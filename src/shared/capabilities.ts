@@ -19,6 +19,21 @@ export interface LocalRuntimeEstimate {
 
 const GiB = 1024 ** 3;
 
+export interface VolumeInfo {
+  mount: string;
+  size: number;
+  used: number;
+}
+
+// 选出应报告的磁盘卷：优先输出目录所在卷（Windows 下 mount 形如 "C:"），否则取剩余空间最大的卷。
+export function pickVolumeForOutput(volumes: VolumeInfo[], outputDirectory?: string): VolumeInfo | undefined {
+  if (volumes.length === 0) return undefined;
+  const dir = outputDirectory?.toLowerCase();
+  const matched = dir ? volumes.find((item) => dir.startsWith(String(item.mount).toLowerCase())) : undefined;
+  const freeOf = (item: VolumeInfo) => Number(item.size) - Number(item.used);
+  return matched ?? volumes.reduce((best, item) => (freeOf(item) > freeOf(best) ? item : best), volumes[0]);
+}
+
 export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentReport, "grade" | "verdict" | "recommendations"> {
   const nvidia = input.gpus.filter((gpu) => /nvidia/i.test(`${gpu.vendor} ${gpu.model}`));
   const appleGpu = input.gpus.some((gpu) => /apple/i.test(`${gpu.vendor} ${gpu.model}`));

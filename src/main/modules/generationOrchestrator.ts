@@ -54,6 +54,9 @@ export class GenerationOrchestrator {
   async cancel(taskId: string): Promise<GenerationTask> {
     const task = this.tasks.find((entry) => entry.id === taskId);
     if (!task) throw new Error("任务不存在。");
+    // 先打终态标记：排队任务据此跳过执行，运行中任务据此把 AbortError 归为取消而非失败。
+    task.status = "cancelled";
+    task.message = "已取消";
     this.controllers.get(taskId)?.abort();
     if (task.providerTaskId) {
       const adapter = await this.adapters.get(task.backend);
@@ -63,11 +66,21 @@ export class GenerationOrchestrator {
   }
 
   private async runTask(request: GenerationRequest, task: GenerationTask): Promise<void> {
+    // 提交后才拿到 providerTaskId 之前也可能被取消；运行到中途取消时，用 prompt_id 通知后端中断。
+    if (task.status === "cancelled") return;
     const controller = new AbortController();
     this.controllers.set(task.id, controller);
     try {
       this.update(task, "validating", 2, "正在校验参数与连接");
       const adapter = await this.adapters.get(request.backend);
+      let cancelNotified = false;
+      controller.signal.addEventListener("abort", () => {
+        if (cancelNotified) return;
+        cancelNotified = true;
+        // ComfyAdapter.cancel 忽略参数并请求全局 /interrupt（本地/SSH 后端并发为 1，目标即当前任务）；
+        // MiniMax 无 cancel 方法，云端任务由 abort 信号停止轮询即可。
+        void this.adapters.get(request.backend).then((a) => a.cancel?.(task.providerTaskId ?? "").catch(() => undefined));
+      }, { once: true });
       const result = await adapter.generate(
         request,
         task,
@@ -75,11 +88,17 @@ export class GenerationOrchestrator {
         controller.signal
       );
       Object.assign(task, result);
+      // cancel() 会在另一个调用栈把 status 改写为 cancelled；generate 若仍返回则不覆盖终态。
+      if ((task.status as GenerationTask["status"]) === "cancelled") return;
       this.update(task, "succeeded", 100, "生成完成");
     } catch (error) {
       const cancelled = controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError");
-      this.update(task, cancelled ? "cancelled" : "failed", task.progress, cancelled ? "已取消" : messageOf(error));
-      if (!cancelled) task.errorCode = "GENERATION_FAILED";
+      if (cancelled) {
+        this.update(task, "cancelled", task.progress, "已取消");
+      } else {
+        this.update(task, "failed", task.progress, messageOf(error));
+        task.errorCode = "GENERATION_FAILED";
+      }
     } finally {
       this.controllers.delete(task.id);
       await this.store.save(this.tasks);

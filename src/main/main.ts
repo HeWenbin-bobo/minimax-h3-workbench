@@ -30,13 +30,25 @@ let mainWindow: BrowserWindow | undefined;
 let adapters: AdapterRegistry | undefined;
 
 app.whenReady().then(async () => {
-  protocol.handle("h3media", (request) => {
+  const settingsStore = new SettingsStore();
+  let settingsCache: AppSettings | undefined;
+  void settingsStore.get().then((s) => { settingsCache = s; });
+  // h3media 只允许读取输出目录内的生成结果，防止渲染进程借协议读任意本地文件。
+  const allowedMediaRoot = async () => path.resolve((settingsCache ?? await settingsStore.get()).outputDirectory);
+
+  protocol.handle("h3media", async (request) => {
     const requestedPath = new URL(request.url).searchParams.get("path");
     if (!requestedPath || !path.isAbsolute(requestedPath)) return new Response("Invalid media path", { status: 400 });
-    return net.fetch(pathToFileURL(requestedPath).toString());
+    const resolved = path.resolve(requestedPath);
+    const mediaRoot = await allowedMediaRoot();
+    // path.relative 为空或以 .. 开头 = 目标不在根内；用分隔符判断避免 "C:\out2" 误匹配 "C:\out" 前缀。
+    const relative = path.relative(mediaRoot, resolved);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+      return new Response("Path outside output directory", { status: 403 });
+    }
+    return net.fetch(pathToFileURL(resolved).toString());
   });
 
-  const settingsStore = new SettingsStore();
   adapters = new AdapterRegistry(settingsStore);
   const orchestrator = new GenerationOrchestrator(
     new TaskStore(),
@@ -148,7 +160,10 @@ function registerIpc(
     const result = await dialog.showOpenDialog(mainWindow!, { properties: ["openFile"], filters });
     return result.canceled ? undefined : result.filePaths[0];
   });
-  handle("environment:inspect", async () => inspectEnvironment((await settingsStore.get()).localComfyUrl));
+  handle("environment:inspect", async () => {
+    const settings = await settingsStore.get();
+    return inspectEnvironment(settings.localComfyUrl, settings.outputDirectory);
+  });
   handle("update:check", () => checkForUpdates(app.getVersion()));
   handle("update:download-install", async () => {
     await downloadAndInstall();

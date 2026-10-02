@@ -1,13 +1,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import si from "systeminformation";
-import { classifyEnvironment } from "../../shared/capabilities";
+import { classifyEnvironment, pickVolumeForOutput } from "../../shared/capabilities";
 import type { EnvironmentReport, GpuInfo } from "../../shared/types";
 import { inspectH3Readiness } from "../backends/comfyReadiness";
 
 const execFileAsync = promisify(execFile);
 
-export async function inspectEnvironment(comfyUrl: string): Promise<EnvironmentReport> {
+export async function inspectEnvironment(comfyUrl: string, outputDirectory?: string): Promise<EnvironmentReport> {
   const [osInfo, cpu, memory, graphics, fileSystems, comfy, ffmpegAvailable] = await Promise.all([
     si.osInfo(),
     si.cpu(),
@@ -23,8 +23,9 @@ export async function inspectEnvironment(comfyUrl: string): Promise<EnvironmentR
     model: gpu.model || "Unknown GPU",
     vramBytes: Number(gpu.vram || 0) * 1024 * 1024
   }));
-  const disk = fileSystems.find((item) => item.mount === "/") ?? fileSystems[0];
-  const diskFreeBytes = disk ? Number(disk.size - disk.used) : 0;
+  // Windows 下 fsSize 的 mount 形如 "C:"，没有 "/"；按输出目录所在卷（其次剩余空间最大卷）报告，避免错报 C 盘。
+  const volume = pickVolumeForOutput(fileSystems, outputDirectory);
+  const diskFreeBytes = volume ? Number(volume.size - volume.used) : 0;
   const capability = classifyEnvironment({
     gpus,
     memoryTotalBytes: memory.total,

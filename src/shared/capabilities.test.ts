@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyEnvironment, estimateCloudCost, estimateLocalRuntime } from "./capabilities";
+import { classifyEnvironment, estimateCloudCost, estimateLocalRuntime, pickVolumeForOutput } from "./capabilities";
 
 const GiB = 1024 ** 3;
 
@@ -55,5 +55,26 @@ describe("estimateCloudCost", () => {
   it("scales with duration and output count", () => {
     expect(estimateCloudCost("768P", 10, 4)).toBe(3.2);
     expect(estimateCloudCost("2K", 10, 4)).toBe(5.2);
+  });
+});
+
+describe("pickVolumeForOutput", () => {
+  const volumes = [
+    { mount: "C:", size: 500 * GiB, used: 480 * GiB }, // 20GB 剩余
+    { mount: "F:", size: 1300 * GiB, used: 1000 * GiB } // 300GB 剩余
+  ];
+
+  it("picks the volume containing the output directory (case-insensitive Windows drive match)", () => {
+    expect(pickVolumeForOutput(volumes, "F:\\Videos\\MiniMax-H3")?.mount).toBe("F:");
+    expect(pickVolumeForOutput(volumes, "f:/videos/out")?.mount).toBe("F:");
+  });
+
+  it("falls back to the volume with the most free space when the directory is unknown", () => {
+    expect(pickVolumeForOutput(volumes, "Z:\\nowhere")?.mount).toBe("F:");
+    expect(pickVolumeForOutput(volumes)?.mount).toBe("F:");
+  });
+
+  it("returns undefined for an empty volume list", () => {
+    expect(pickVolumeForOutput([], "F:\\x")).toBeUndefined();
   });
 });

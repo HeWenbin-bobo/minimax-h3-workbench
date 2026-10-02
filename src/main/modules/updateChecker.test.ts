@@ -6,7 +6,7 @@ describe("checkForUpdates", () => {
     const fetcher = vi.fn(async () => json({
       tag_name: "v0.1.5",
       name: "MiniMax H3 工作台 v0.1.5",
-      html_url: "https://github.com/francoeur003/minimax-h3-workbench/releases/tag/v0.1.5",
+      html_url: "https://github.com/HeWenbin-bobo/minimax-h3-workbench/releases/tag/v0.1.5",
       published_at: "2026-08-10T00:00:00Z"
     }));
 
@@ -15,7 +15,7 @@ describe("checkForUpdates", () => {
       latestVersion: "0.1.5",
       updateAvailable: true,
       releaseName: "MiniMax H3 工作台 v0.1.5",
-      releaseUrl: "https://github.com/francoeur003/minimax-h3-workbench/releases/tag/v0.1.5",
+      releaseUrl: "https://github.com/HeWenbin-bobo/minimax-h3-workbench/releases/tag/v0.1.5",
       publishedAt: "2026-08-10T00:00:00Z"
     });
   });
@@ -24,7 +24,7 @@ describe("checkForUpdates", () => {
     const fetcher = vi.fn(async () => json({
       tag_name: "v0.1.4",
       name: "MiniMax H3 工作台 v0.1.4",
-      html_url: "https://github.com/francoeur003/minimax-h3-workbench/releases/tag/v0.1.4",
+      html_url: "https://github.com/HeWenbin-bobo/minimax-h3-workbench/releases/tag/v0.1.4",
       published_at: "2026-08-09T00:00:00Z"
     }));
 

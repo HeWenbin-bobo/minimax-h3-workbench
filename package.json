@@ -5,6 +5,10 @@
   "main": "dist-electron/main/main.js",
   "license": "MIT",
   "author": "Potatoes into fries",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HeWenbin-bobo/minimax-h3-workbench.git"
+  },
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"tsc -p tsconfig.main.json --watch\" \"wait-on http://127.0.0.1:5173 dist-electron/main/main.js && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "clean": "node -e \"const fs=require('node:fs'); for (const target of ['dist','dist-electron']) fs.rmSync(target,{recursive:true,force:true})\"",
@@ -15,9 +19,11 @@
     "start": "npm run build && electron .",
     "package": "npm run build && electron-builder --publish never",
     "package:mac": "npm run build && electron-builder --mac dmg zip --arm64 --publish never",
-    "package:win": "npm run build && electron-builder --win nsis --x64 --publish never"
+    "package:win": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "release:win": "npm run build && electron-builder --win nsis --x64 --publish always"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "ssh2": "1.17.0",
@@ -54,7 +60,10 @@
     "mac": {
       "category": "public.app-category.video",
       "icon": "build/icon.icns",
-      "electronLanguages": ["zh-CN", "en-US"],
+      "electronLanguages": [
+        "zh-CN",
+        "en-US"
+      ],
       "target": [
         "dmg",
         "zip"
@@ -62,16 +71,25 @@
     },
     "win": {
       "icon": "build/icon.ico",
-      "electronLanguages": ["zh-CN", "en-US"],
+      "electronLanguages": [
+        "zh-CN",
+        "en-US"
+      ],
       "target": [
         "nsis"
       ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "publish": {
+        "provider": "github",
+        "owner": "HeWenbin-bobo",
+        "repo": "minimax-h3-workbench"
+      }
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true
+      "createDesktopShortcut": true,
+      "differentialPackage": true
     }
   }
 }

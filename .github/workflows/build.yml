@@ -1,8 +1,9 @@
-name: build-desktop
+name: build-desktop-release
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -43,3 +44,23 @@ jobs:
         with:
           name: desktop-${{ runner.os }}
           path: release/*
+
+  # 推送 v* 标签时触发：在 Windows runner 上构建并发布到 GitHub Releases。
+  # electron-updater 依赖 Release 附件里的 latest.yml（electron-builder 自动生成）做应用内更新。
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run release:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"

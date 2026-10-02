@@ -21,6 +21,7 @@ export function App() {
   const [detecting, setDetecting] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo>();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [installing, setInstalling] = useState(false);
   const showError = (error: unknown) => setNotice({ text: error instanceof Error ? error.message : String(error || "操作失败"), error: true });
 
   useEffect(() => {
@@ -49,9 +50,13 @@ export function App() {
     } else showError(response.message);
   }
   async function update() {
+    if (installing) return;
     if (updateInfo?.updateAvailable) {
-      const opened = await window.h3.openExternal(updateInfo.releaseUrl);
-      if (!opened.ok) showError(opened.message);
+      setInstalling(true);
+      setNotice({ text: "正在后台下载更新，完成后应用将自动重启安装…" });
+      const response = await window.h3.downloadAndInstallUpdate();
+      setInstalling(false);
+      if (!response.ok) showError(response.message);
       return;
     }
     setCheckingUpdate(true);
@@ -67,8 +72,8 @@ export function App() {
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand"><div className="brand-mark">H3</div><div><strong>MiniMax H3</strong><span>视频生成工作台</span></div></div>
       <nav>{pages.map((item) => <button key={item.id} data-page={item.id} className={page === item.id ? "active" : ""} onClick={() => setPage(item.id)}><i>{item.eyebrow}</i><span>{item.label}</span></button>)}</nav>
-      <button className={`sidebar-update ${updateInfo?.updateAvailable ? "available" : ""}`} onClick={update} disabled={checkingUpdate}>
-        <span className="status-dot" /><span><strong>{updateInfo?.updateAvailable ? "下载更新" : checkingUpdate ? "正在检查…" : "检查更新"}</strong><small>{updateInfo?.updateAvailable ? `v${updateInfo.latestVersion} 已发布` : `轻量版 v${updateInfo?.currentVersion || "0.1.5"}`}</small></span>
+      <button className={`sidebar-update ${updateInfo?.updateAvailable ? "available" : ""}`} onClick={update} disabled={checkingUpdate || installing}>
+        <span className="status-dot" /><span><strong>{installing ? "正在下载更新…" : updateInfo?.updateAvailable ? "立即更新" : checkingUpdate ? "正在检查…" : "检查更新"}</strong><small>{installing ? "完成后自动重启" : updateInfo?.updateAvailable ? `v${updateInfo.latestVersion} 可安装` : `轻量版 v${updateInfo?.currentVersion || "0.1.5"}`}</small></span>
       </button></aside>
     <main className="main-area">
       {page === "ready" && <ReadyPage report={report} busy={detecting} onDetect={detect} onNavigate={setPage} />}

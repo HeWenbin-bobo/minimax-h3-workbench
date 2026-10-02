@@ -15,6 +15,7 @@ import {
 import { AdapterRegistry } from "./backends/adapterRegistry";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import type { ApiResponse, AppSettings, BackendKind, GenerationRequest, SecretName } from "../shared/types";
+import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
@@ -149,6 +150,10 @@ function registerIpc(
   });
   handle("environment:inspect", async () => inspectEnvironment((await settingsStore.get()).localComfyUrl));
   handle("update:check", () => checkForUpdates(app.getVersion()));
+  handle("update:download-install", async () => {
+    await downloadAndInstall();
+    return true;
+  });
   handle("resources:list", () => RESOURCE_LINKS);
   handle("backend:test", async (_event, kind: BackendKind) => (await registry.get(kind)).test());
   handle("tasks:list", () => orchestrator.list());

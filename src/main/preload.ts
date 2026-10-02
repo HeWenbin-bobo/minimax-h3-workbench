@@ -12,6 +12,7 @@ const api: WorkbenchApi = {
   selectFile: (kind) => invoke("dialog:file", kind),
   inspectEnvironment: () => invoke("environment:inspect"),
   checkForUpdates: () => invoke("update:check"),
+  downloadAndInstallUpdate: () => invoke("update:download-install"),
   getResourceLinks: () => invoke("resources:list"),
   testBackend: (kind) => invoke("backend:test", kind),
   listTasks: () => invoke("tasks:list"),

@@ -1,7 +1,9 @@
 import type { UpdateInfo } from "../../shared/types";
 
-const LATEST_RELEASE_API = "https://api.github.com/repos/francoeur003/minimax-h3-workbench/releases/latest";
-const RELEASE_PREFIX = "https://github.com/francoeur003/minimax-h3-workbench/releases/";
+// 发布更新的 GitHub 仓库（owner/repo）。换成你自己的仓库后，应用内更新检查会自动指向它。
+export const UPDATE_REPO = "HeWenbin-bobo/minimax-h3-workbench";
+const LATEST_RELEASE_API = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
+const RELEASE_PREFIX = `https://github.com/${UPDATE_REPO}/releases/`;
 
 interface GithubRelease {
   tag_name?: string;

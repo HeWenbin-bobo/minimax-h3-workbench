@@ -158,6 +158,7 @@ export interface WorkbenchApi {
   selectFile(kind: "image" | "video" | "key"): Promise<ApiResponse<string | undefined>>;
   inspectEnvironment(): Promise<ApiResponse<EnvironmentReport>>;
   checkForUpdates(): Promise<ApiResponse<UpdateInfo>>;
+  downloadAndInstallUpdate(): Promise<ApiResponse<boolean>>;
   getResourceLinks(): Promise<ApiResponse<ResourceLink[]>>;
   testBackend(kind: BackendKind): Promise<ApiResponse<BackendTestResult>>;
   listTasks(): Promise<ApiResponse<GenerationTask[]>>;

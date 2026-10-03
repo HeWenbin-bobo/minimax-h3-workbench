@@ -151,8 +151,11 @@ export class ComfyAdapter implements GenerationAdapter {
     signal?: AbortSignal
   ): Promise<{ filename: string; subfolder?: string; type?: string }> {
     let progress = 18;
+    const startedAt = Date.now();
+    const timeoutMs = 30 * 60 * 1_000; // 30 分钟：防止 ComfyUI 卡死导致任务永远转圈
     for (;;) {
       if (signal?.aborted) throw new DOMException("任务已取消", "AbortError");
+      if (Date.now() - startedAt > timeoutMs) throw new Error("等待 ComfyUI 生成超过 30 分钟，已超时终止。请检查 ComfyUI 是否正常运行。");
       const response = await fetch(`${this.baseUrl}/history/${encodeURIComponent(promptId)}`, { signal });
       if (response.ok) {
         const history = (await response.json()) as Record<string, unknown>;

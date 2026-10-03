@@ -29,10 +29,10 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow: BrowserWindow | undefined;
 let adapters: AdapterRegistry | undefined;
+let settingsCache: AppSettings | undefined; // 模块级：h3media/showItem 白名单与 registerIpc 共享
 
 app.whenReady().then(async () => {
   const settingsStore = new SettingsStore();
-  let settingsCache: AppSettings | undefined;
   void settingsStore.get().then((s) => { settingsCache = s; });
   // h3media 只允许读取输出目录内的生成结果，防止渲染进程借协议读任意本地文件。
   const allowedMediaRoot = async () => path.resolve((settingsCache ?? await settingsStore.get()).outputDirectory);
@@ -139,6 +139,7 @@ function registerIpc(
   handle("settings:get", () => settingsStore.get());
   handle("settings:update", async (_event, patch: Partial<AppSettings>) => {
     const next = await settingsStore.update(patch);
+    settingsCache = next; // 同步刷新 h3media/showItem 白名单缓存，改输出目录后新结果立即可预览
     registry.invalidate(next);
     return next;
   });
@@ -176,9 +177,20 @@ function registerIpc(
   handle("tasks:list", () => orchestrator.list());
   handle("tasks:submit", (_event, request: GenerationRequest) => orchestrator.submit(request));
   handle("tasks:cancel", (_event, id: string) => orchestrator.cancel(id));
-  handle("shell:showItem", (_event, filePath: string) => {
+  handle("shell:showItem", async (_event, filePath: string) => {
     if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
-    shell.showItemInFolder(filePath);
+    // 与 h3media 同类防护：只允许在输出目录或 ComfyUI 模型目录内定位文件/文件夹。
+    const settings = await settingsStore.get();
+    const roots = [settings.outputDirectory, settings.comfyuiRoot]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => path.resolve(value));
+    const resolved = path.resolve(filePath);
+    const allowed = roots.some((rootDir) => {
+      const rel = path.relative(rootDir, resolved);
+      return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+    });
+    if (!allowed) throw new Error("只能打开输出目录或 ComfyUI 模型目录中的位置。");
+    shell.showItemInFolder(resolved);
     return true;
   });
   handle("shell:openExternal", async (_event, url: string) => {

@@ -124,7 +124,11 @@ export class MiniMaxAdapter implements GenerationAdapter {
     signal?: AbortSignal
   ): Promise<{ url: string; inputSeconds?: number; outputSeconds?: number }> {
     let progress = 15;
+    const startedAt = Date.now();
+    const timeoutMs = 60 * 60 * 1_000; // 云端排队+生成上限 1 小时：防止任务永远转圈
     for (;;) {
+      if (signal?.aborted) throw new DOMException("任务已取消", "AbortError");
+      if (Date.now() - startedAt > timeoutMs) throw new Error("云端任务超过 1 小时未完成，已停止轮询。请到 MiniMax 控制台确认任务状态。");
       const response = await fetch(`${this.baseUrl}/v2/query/video_generation/${encodeURIComponent(taskId)}`, {
         headers: { Authorization: `Bearer ${this.options.apiKey}` },
         signal

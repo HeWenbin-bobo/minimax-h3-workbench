@@ -138,6 +138,17 @@ function ResourcesPage({ resources, settings, onSettingsChange }: { resources: R
   const [checking, setChecking] = useState(false);
   const root = settings.comfyuiRoot;
 
+  // 已配置目录时进入页面自动检查一次；目录变化时重新检查。
+  useEffect(() => {
+    if (!root) return;
+    let cancelled = false;
+    setChecking(true);
+    window.h3.checkLocalModels().then((response) => {
+      if (!cancelled) setModelStatus(response.data ?? []);
+    }).catch(() => { if (!cancelled) setModelStatus([]); }).finally(() => { if (!cancelled) setChecking(false); });
+    return () => { cancelled = true; };
+  }, [root]);
+
   async function pickRoot() {
     const response = await window.h3.selectDirectory();
     if (!response.data) return;

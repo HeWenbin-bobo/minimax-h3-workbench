@@ -40,7 +40,8 @@ export class GenerationOrchestrator {
       prompt: request.prompt.trim(),
       createdAt: now,
       updatedAt: now,
-      message: "等待生成"
+      message: "等待生成",
+      request
     }));
     this.tasks.unshift(...created);
     await this.store.save(this.tasks);
@@ -48,6 +49,37 @@ export class GenerationOrchestrator {
 
     const concurrency = request.backend === "minimax" ? 2 : 1;
     void runPool(created, concurrency, (task) => this.runTask(request, task));
+    return created;
+  }
+
+  // 失败/取消任务的一键重试：复用原始请求参数（新种子），生成单个替换任务。
+  async retry(taskId: string): Promise<GenerationTask> {
+    const task = this.tasks.find((entry) => entry.id === taskId);
+    if (!task) throw new Error("任务不存在。");
+    if (!task.request) throw new Error("该任务没有保存原始参数，无法重试。请重新提交。");
+    if (!["failed", "cancelled", "interrupted"].includes(task.status)) throw new Error("只有失败或已取消的任务才能重试。");
+    const request = { ...task.request, baseSeed: Math.floor(Math.random() * 1_000_000) };
+    const parentId = randomUUID();
+    const now = new Date().toISOString();
+    const created: GenerationTask = {
+      id: randomUUID(),
+      parentId,
+      index: task.index,
+      seed: request.baseSeed,
+      backend: request.backend,
+      mode: request.mode,
+      status: "queued",
+      progress: 0,
+      prompt: request.prompt.trim(),
+      createdAt: now,
+      updatedAt: now,
+      message: "等待重试",
+      request: task.request
+    };
+    this.tasks.unshift(created);
+    await this.store.save(this.tasks);
+    this.listener({ ...created });
+    void runPool([created], request.backend === "minimax" ? 2 : 1, (item) => this.runTask(request, item));
     return created;
   }
 

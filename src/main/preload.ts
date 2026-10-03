@@ -19,6 +19,7 @@ const api: WorkbenchApi = {
   listTasks: () => invoke("tasks:list"),
   submitGeneration: (request) => invoke("tasks:submit", request),
   cancelTask: (taskId) => invoke("tasks:cancel", taskId),
+  retryTask: (taskId) => invoke("tasks:retry", taskId),
   showItem: (filePath) => invoke("shell:showItem", filePath),
   openExternal: (url) => invoke("shell:openExternal", url),
   onTaskUpdate: (listener) => subscribe("task:update", listener)

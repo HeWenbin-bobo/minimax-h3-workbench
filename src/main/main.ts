@@ -177,6 +177,7 @@ function registerIpc(
   handle("tasks:list", () => orchestrator.list());
   handle("tasks:submit", (_event, request: GenerationRequest) => orchestrator.submit(request));
   handle("tasks:cancel", (_event, id: string) => orchestrator.cancel(id));
+  handle("tasks:retry", (_event, id: string) => orchestrator.retry(id));
   handle("shell:showItem", async (_event, filePath: string) => {
     if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
     // 与 h3media 同类防护：只允许在输出目录或 ComfyUI 模型目录内定位文件/文件夹。

@@ -106,6 +106,7 @@ export interface GenerationTask {
   outputUrl?: string;
   errorCode?: string;
   message?: string;
+  request?: GenerationRequest; // 原始提交参数，失败/取消后用于一键重试
   usage?: {
     inputSeconds?: number;
     outputSeconds?: number;
@@ -177,6 +178,7 @@ export interface WorkbenchApi {
   listTasks(): Promise<ApiResponse<GenerationTask[]>>;
   submitGeneration(request: GenerationRequest): Promise<ApiResponse<GenerationTask[]>>;
   cancelTask(taskId: string): Promise<ApiResponse<GenerationTask>>;
+  retryTask(taskId: string): Promise<ApiResponse<GenerationTask>>;
   showItem(filePath: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
   onTaskUpdate(listener: (task: GenerationTask) => void): () => void;

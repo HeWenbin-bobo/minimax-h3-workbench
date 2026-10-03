@@ -17,6 +17,8 @@ export type TaskStatus =
 export interface AppSettings {
   localComfyUrl: string;
   outputDirectory: string;
+  /** 本机 ComfyUI 根目录（可选）。设置后模型下载页按此目录检查 5 个 H3 模型文件是否就位。 */
+  comfyuiRoot: string;
   defaultBackend: BackendKind;
   minimaxBaseUrl: string;
   ssh: {
@@ -149,6 +151,16 @@ export interface UpdateInfo {
   publishedAt?: string;
 }
 
+export interface LocalModelStatus {
+  id: string;
+  name: string;
+  directory: string;
+  fullPath: string;
+  present: boolean;
+  sizeBytes?: number;
+  downloadUrl?: string;
+}
+
 export interface WorkbenchApi {
   getSettings(): Promise<ApiResponse<AppSettings>>;
   updateSettings(patch: Partial<AppSettings>): Promise<ApiResponse<AppSettings>>;
@@ -159,6 +171,7 @@ export interface WorkbenchApi {
   inspectEnvironment(): Promise<ApiResponse<EnvironmentReport>>;
   checkForUpdates(): Promise<ApiResponse<UpdateInfo>>;
   downloadAndInstallUpdate(): Promise<ApiResponse<boolean>>;
+  checkLocalModels(): Promise<ApiResponse<LocalModelStatus[]>>;
   getResourceLinks(): Promise<ApiResponse<ResourceLink[]>>;
   testBackend(kind: BackendKind): Promise<ApiResponse<BackendTestResult>>;
   listTasks(): Promise<ApiResponse<GenerationTask[]>>;

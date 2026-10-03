@@ -92,8 +92,17 @@ export class ComfyAdapter implements GenerationAdapter {
     return { providerTaskId: submitted.prompt_id, outputPath };
   }
 
-  async cancel(_providerTaskId?: string): Promise<void> {
-    await fetch(`${this.baseUrl}/interrupt`, { method: "POST" });
+  async cancel(providerTaskId?: string): Promise<void> {
+    // ComfyUI 无"按 prompt 中断"接口：先把仍在排队的任务出队（对不存在/运行中任务是无害 no-op），
+    // 再中断当前采样；本应用本地/SSH 后端并发为 1，两步组合等价于只取消目标任务。
+    if (providerTaskId) {
+      await fetch(`${this.baseUrl}/queue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ delete: [providerTaskId] })
+      }).catch(() => undefined);
+    }
+    await fetch(`${this.baseUrl}/interrupt`, { method: "POST" }).catch(() => undefined);
   }
 
   private async assertModelsReady(mode: GenerationRequest["mode"], signal?: AbortSignal): Promise<void> {

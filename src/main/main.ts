@@ -17,6 +17,7 @@ import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import type { ApiResponse, AppSettings, BackendKind, GenerationRequest, SecretName } from "../shared/types";
 import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
+import { checkLocalModels } from "./modules/localModels";
 import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
@@ -170,6 +171,7 @@ function registerIpc(
     return true;
   });
   handle("resources:list", () => RESOURCE_LINKS);
+  handle("models:check", async () => checkLocalModels((await settingsStore.get()).comfyuiRoot, RESOURCE_LINKS));
   handle("backend:test", async (_event, kind: BackendKind) => (await registry.get(kind)).test());
   handle("tasks:list", () => orchestrator.list());
   handle("tasks:submit", (_event, request: GenerationRequest) => orchestrator.submit(request));

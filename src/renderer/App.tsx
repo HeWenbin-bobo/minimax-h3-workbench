@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, ResourceLink, UpdateInfo } from "../shared/types";
+import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LocalModelStatus, ResourceLink, UpdateInfo } from "../shared/types";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
 
 type Page = "ready" | "studio" | "downloads" | "guide" | "connections";
@@ -78,7 +78,7 @@ export function App() {
     <main className="main-area">
       {page === "ready" && <ReadyPage report={report} busy={detecting} onDetect={detect} onNavigate={setPage} />}
       {page === "studio" && <StudioPage settings={settings} tasks={tasks} onError={showError} onNotice={(text) => setNotice({ text })} />}
-      {page === "downloads" && <ResourcesPage resources={resources} />}
+      {page === "downloads" && <ResourcesPage resources={resources} settings={settings} onSettingsChange={setSettings} />}
       {page === "guide" && <GuidePage />}
       {page === "connections" && <ConnectionsPage settings={settings} setSettings={setSettings} onError={showError} onNotice={(text) => setNotice({ text })} />}
     </main>
@@ -129,14 +129,40 @@ function TaskCard({ task, index }: { task?: GenerationTask; index: number }) {
   return <article className={`task-card ${task?.status || "ready"}`}>{media ? <video src={media} poster={task ? undefined : bundledPoster} controls preload="metadata" /> : <div className="task-placeholder"><span>0{index + 1}</span><i>{statusLabel(task!.status)}</i></div>}<div className="task-meta"><div><strong>{task ? `Seed ${task.seed}` : `结果 ${index + 1}`}</strong><small>{task?.message || "4 秒 · 480P · 已生成"}</small></div>{task ? <em>{task.progress}%</em> : <em>就绪</em>}</div>{task && <div className="progress"><i style={{ width: `${task.progress}%` }}/></div>}{task?.outputPath && <button className="text-button" onClick={() => window.h3.showItem(task.outputPath!)}>在文件夹中显示</button>}{canCancel && <button className="cancel-button" onClick={() => window.h3.cancelTask(task.id)}>取消</button>}</article>;
 }
 
-function ResourcesPage({ resources }: { resources: ResourceLink[] }) {
+function ResourcesPage({ resources, settings, onSettingsChange }: { resources: ResourceLink[]; settings: AppSettings; onSettingsChange: (s: AppSettings) => void }) {
   const labels: Record<ResourceLink["category"], string> = { model: "MODEL", comfyui: "APP", workflow: "JSON", docs: "DOCS" };
   const models = resources.filter((item) => item.category === "model");
   const supporting = resources.filter((item) => item.category !== "model");
   const totalSize = models.reduce((sum, item) => sum + (item.sizeBytes || 0), 0);
-  const renderItems = (items: ResourceLink[]) => <div className="download-list">{items.map((item) => <article key={item.id}><div className="download-icon">{labels[item.category]}</div><div className="download-info"><span>{item.action === "download" ? `${formatBytes(item.sizeBytes)} · ${item.targetDirectory}` : "官方外部资源"}</span><strong>{item.label}</strong><small>{item.description}</small></div><button className="primary" onClick={() => window.h3.openExternal(item.url)}>{item.action === "download" ? "下载模型 ↓" : "打开官网 ↗"}</button></article>)}</div>;
-  return <section className="page"><div className="page-title"><div><span className="eyebrow">OFFICIAL MODELS</span><h1>模型下载</h1></div></div>
-    <div className="light-note"><strong>一键直达下载</strong><span>点击“下载模型”会让默认浏览器直接下载官方文件，不再停在仓库首页。完整五件套约 {formatBytes(totalSize)}，请先确认磁盘空间。</span></div>
+  const [modelStatus, setModelStatus] = useState<LocalModelStatus[]>();
+  const [checking, setChecking] = useState(false);
+  const root = settings.comfyuiRoot;
+
+  async function pickRoot() {
+    const response = await window.h3.selectDirectory();
+    if (!response.data) return;
+    const next = { ...settings, comfyuiRoot: response.data };
+    onSettingsChange(next);
+    await window.h3.updateSettings({ comfyuiRoot: response.data });
+    await checkRoot();
+  }
+  async function checkRoot() {
+    setChecking(true);
+    const response = await window.h3.checkLocalModels();
+    setChecking(false);
+    if (response.data) setModelStatus(response.data); else setModelStatus([]);
+  }
+  const statusById = useMemo(() => new Map((modelStatus ?? []).map((item) => [item.id, item])), [modelStatus]);
+
+  const renderItems = (items: ResourceLink[]) => <div className="download-list">{items.map((item) => {
+    const status = item.category === "model" && root ? statusById.get(item.id) : undefined;
+    return <article key={item.id}><div className="download-icon">{labels[item.category]}</div><div className="download-info"><span>{item.action === "download" ? `${formatBytes(item.sizeBytes)} · ${item.targetDirectory}` : "官方外部资源"}{status && <em className={status.present ? "model-present" : "model-missing"}>{status.present ? "✓ 已就位" : "✗ 未找到"}</em>}</span><strong>{item.label}</strong><small>{status?.present ? status.fullPath : item.description}</small></div><button className="primary" onClick={() => window.h3.openExternal(item.url)}>{item.action === "download" ? "下载模型 ↓" : "打开官网 ↗"}</button></article>;
+  })}</div>;
+  return <section className="page"><div className="page-title"><div><span className="eyebrow">OFFICIAL MODELS</span><h1>模型下载</h1></div><button className="secondary" onClick={checkRoot} disabled={!root || checking}>{checking ? "检查中…" : "重新检查"}</button></div>
+    <div className="light-note"><strong>本机 ComfyUI 目录</strong><span>指定你自己的 ComfyUI 安装目录后，这里会逐个检查 5 个模型文件是否已放到正确位置。</span></div>
+    <div className="input-button comfy-root-row"><input value={root} readOnly placeholder="未指定：请选择 ComfyUI 根目录（含 models 子目录）" /><button onClick={pickRoot}>{root ? "更改目录" : "选择目录"}</button></div>
+    {root && modelStatus && <p className="footnote">{modelStatus.filter((m) => m.present).length} / {modelStatus.length} 个模型已就位{modelStatus.every((m) => m.present) ? "，全部就绪 ✅" : "，缺失项点击下方“下载模型”后放入标注目录，然后完全重启 ComfyUI"}</p>}
+    <div className="light-note" style={{ marginTop: 16 }}><strong>一键直达下载</strong><span>点击“下载模型”会让默认浏览器直接下载官方文件，不再停在仓库首页。完整五件套约 {formatBytes(totalSize)}，请先确认磁盘空间。</span></div>
     {renderItems(models)}
     <div className="resource-subheading"><span>SUPPORTING RESOURCES</span><h2>其他官方资源</h2></div>
     {renderItems(supporting)}

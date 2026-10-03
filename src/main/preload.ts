@@ -13,6 +13,7 @@ const api: WorkbenchApi = {
   inspectEnvironment: () => invoke("environment:inspect"),
   checkForUpdates: () => invoke("update:check"),
   downloadAndInstallUpdate: () => invoke("update:download-install"),
+  checkLocalModels: () => invoke("models:check"),
   getResourceLinks: () => invoke("resources:list"),
   testBackend: (kind) => invoke("backend:test", kind),
   listTasks: () => invoke("tasks:list"),

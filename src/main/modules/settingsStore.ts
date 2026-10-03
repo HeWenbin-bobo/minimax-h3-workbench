@@ -6,6 +6,7 @@ import type { AppSettings, SecretName } from "../../shared/types";
 const defaultSettings = (): AppSettings => ({
   localComfyUrl: "http://127.0.0.1:8188",
   outputDirectory: path.join(app.getPath("videos"), "MiniMax-H3"),
+  comfyuiRoot: "",
   defaultBackend: "local",
   minimaxBaseUrl: "https://api.minimax.io",
   ssh: {
@@ -35,6 +36,7 @@ export class SettingsStore {
       return {
         localComfyUrl: raw.localComfyUrl || defaults.localComfyUrl,
         outputDirectory: raw.outputDirectory || defaults.outputDirectory,
+        comfyuiRoot: typeof raw.comfyuiRoot === "string" ? raw.comfyuiRoot : defaults.comfyuiRoot,
         defaultBackend,
         minimaxBaseUrl: raw.minimaxBaseUrl || defaults.minimaxBaseUrl,
         ssh: { ...defaults.ssh, ...(raw.ssh ?? {}) }

@@ -4,7 +4,7 @@
   "description": "MiniMax H3 一站式配置、下载与视频生成工作台",
   "main": "dist-electron/main/main.js",
   "license": "MIT",
-  "author": "Potatoes into fries",
+  "author": "HeWenbin-bobo",
   "repository": {
     "type": "git",
     "url": "https://github.com/HeWenbin-bobo/minimax-h3-workbench.git"
@@ -45,7 +45,7 @@
     "wait-on": "^9.0.3"
   },
   "build": {
-    "appId": "studio.huyouren.minimaxh3",
+    "appId": "com.hewenbin.minimaxh3",
     "productName": "MiniMax H3 工作台",
     "asar": true,
     "compression": "maximum",

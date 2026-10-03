@@ -10,14 +10,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/francoeur003/minimax-h3-workbench/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/francoeur003/minimax-h3-workbench?color=ff3864&label=最新版"></a>
-  <a href="https://github.com/francoeur003/minimax-h3-workbench/actions/workflows/build.yml"><img alt="构建状态" src="https://img.shields.io/github/actions/workflow/status/francoeur003/minimax-h3-workbench/build.yml?branch=main&label=桌面端构建"></a>
+  <a href="https://github.com/HeWenbin-bobo/minimax-h3-workbench/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/HeWenbin-bobo/minimax-h3-workbench?color=ff3864&label=最新版"></a>
+  <a href="https://github.com/HeWenbin-bobo/minimax-h3-workbench/actions/workflows/build.yml"><img alt="构建状态" src="https://img.shields.io/github/actions/workflow/status/HeWenbin-bobo/minimax-h3-workbench/build.yml?branch=main&label=桌面端构建"></a>
   <img alt="支持平台" src="https://img.shields.io/badge/平台-macOS%20Apple%20Silicon%20%7C%20Windows-6c5ce7">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-20b26b"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/francoeur003/minimax-h3-workbench/releases/latest"><strong>下载最新版</strong></a>
+  <a href="https://github.com/HeWenbin-bobo/minimax-h3-workbench/releases/latest"><strong>下载最新版</strong></a>
   · <a href="#产品界面">查看界面</a>
   · <a href="#快速开始">快速开始</a>
   · <a href="./SECURITY.md">安全说明</a>
@@ -71,7 +71,7 @@
 
 ### 直接安装
 
-前往 [Releases](https://github.com/francoeur003/minimax-h3-workbench/releases/latest) 下载：
+前往 [Releases](https://github.com/HeWenbin-bobo/minimax-h3-workbench/releases/latest) 下载：
 
 - macOS Apple Silicon：`DMG` 或 `ZIP`
 - Windows x64：`NSIS` 安装程序
@@ -133,16 +133,3 @@ npm run package:mac
 工作台源码使用 [MIT License](./LICENSE)。MiniMax H3 模型及相关资产使用各自仓库声明的许可证，二者互不替代。
 
 ---
-
-<!-- abo-douyin-profile:start -->
-## 关于作者
-
-<p align="center">
-  <strong>阿波 Nate</strong><br />
-  抖音号：<code>53691197416</code>
-</p>
-
-<p align="center">
-  <img src="docs/images/douyin-abo-nate.jpg" width="320" alt="阿波 Nate 抖音二维码，抖音号 53691197416" />
-</p>
-<!-- abo-douyin-profile:end -->

@@ -60,13 +60,17 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # electron-builder 并发上传存在同 tag 重复建 Release 的竞态（资产会被拆到两个对象），
-      # 先用 gh 预建 Release，electron-builder 检测到已存在就直接上传。
-      - name: Pre-create release
+      # electron-builder 只向 draft Release 上传资产：预建 draft 避免并发上传竞态
+      # （同 tag 重复建 Release 导致资产拆分到两个对象）。发布状态由维护者手动转正。
+      - name: Pre-create draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" 2>/dev/null || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "MiniMax H3 工作台 $GITHUB_REF_NAME" --notes "自动构建发布。见下方附件下载安装包。"
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" 2>/dev/null && exit 0
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
+            --title "MiniMax H3 工作台 $GITHUB_REF_NAME" \
+            --notes "自动构建发布。下载 setup exe 安装，老版本用户会在应用内收到更新提示。"
       - run: npm run release:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

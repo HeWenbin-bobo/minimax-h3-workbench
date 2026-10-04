@@ -26,16 +26,35 @@ export class RbAdapter implements GenerationAdapter {
     return { Authorization: `Bearer ${this.options.cardCode}` };
   }
 
+  // 站点走 Cloudflare，冷连接偶发 >8s（实测 p95≈6.4s）。每次尝试独立超时；超时/网络抖动自动重试一次；
+  // 用户主动取消（signal 已中止）不重试。提交任务传 retries=0：响应丢失时无法确认服务端是否已建任务，重试可能重复扣次。
+  private async fetchWithRetry(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+    signal?: AbortSignal,
+    retries = 1
+  ): Promise<Response> {
+    for (let attempt = 0; ; attempt += 1) {
+      const timeoutSignal = AbortSignal.timeout(timeoutMs);
+      const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      try {
+        return await fetch(url, { ...init, signal: combined });
+      } catch (error) {
+        if (attempt >= retries || signal?.aborted) throw error;
+      }
+    }
+  }
+
   async test(signal?: AbortSignal): Promise<BackendTestResult> {
     const start = Date.now();
     if (!this.options.cardCode) {
       return { ok: false, label: "瞬映 RB 云生成", latencyMs: 0, details: {}, message: "尚未保存瞬映卡密。" };
     }
     try {
-      const response = await fetch(`${this.baseUrl}/api/v1/jobs?limit=1`, {
-        headers: this.headers(),
-        signal: signal ?? AbortSignal.timeout(8_000)
-      });
+      const response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs?limit=1`, {
+        headers: this.headers()
+      }, 15_000, signal);
       const authenticated = response.status !== 401 && response.status !== 403;
       return {
         ok: authenticated,
@@ -52,7 +71,9 @@ export class RbAdapter implements GenerationAdapter {
         label: "瞬映 RB 云生成",
         latencyMs: Date.now() - start,
         details: {},
-        message: error instanceof Error ? error.message : "瞬映 RB 不可达"
+        message: error instanceof Error
+          ? (error.name === "TimeoutError" ? "连接瞬映服务超时（已自动重试）。请检查网络后重试。" : error.message)
+          : "瞬映 RB 不可达"
       };
     }
   }
@@ -116,12 +137,11 @@ export class RbAdapter implements GenerationAdapter {
     const form = new FormData();
     // 图片端点用 files（多文件数组），视频端点用 file（单文件）。
     form.append(kind === "image" ? "files" : "file", new Blob([new Uint8Array(bytes)]), path.basename(filePath));
-    const response = await fetch(`${this.baseUrl}${uploadPath}`, {
+    const response = await this.fetchWithRetry(`${this.baseUrl}${uploadPath}`, {
       method: "POST",
       headers: this.headers(),
-      body: form,
-      signal
-    });
+      body: form
+    }, 300_000, signal);
     const payload = (await response.json().catch(() => ({}))) as {
       items?: Array<{ ref?: string }>;
       ref?: string;
@@ -152,12 +172,12 @@ export class RbAdapter implements GenerationAdapter {
       body.height = request.height;
       body.seconds = request.duration;
     }
-    const response = await fetch(`${this.baseUrl}/api/v1/jobs`, {
+    // retries=0：提交失败若因网络超时，无法确认服务端是否已建任务，重试可能重复扣次，宁可让用户重试。
+    const response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs`, {
       method: "POST",
       headers: { ...this.headers(), "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal
-    });
+      body: JSON.stringify(body)
+    }, 30_000, signal, 0);
     const payload = (await response.json().catch(() => ({}))) as {
       id?: string;
       job_id?: string;
@@ -181,10 +201,9 @@ export class RbAdapter implements GenerationAdapter {
     for (;;) {
       if (signal?.aborted) throw new DOMException("任务已取消", "AbortError");
       if (Date.now() - startedAt > timeoutMs) throw new Error("瞬映 RB 任务超过 1 小时未完成，已停止轮询。请到瞬映工作台确认任务状态。");
-      const response = await fetch(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}`, {
-        headers: this.headers(),
-        signal
-      });
+      const response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}`, {
+        headers: this.headers()
+      }, 20_000, signal);
       const payload = (await response.json().catch(() => ({}))) as {
         status?: string;
         has_video?: boolean;
@@ -212,10 +231,9 @@ export class RbAdapter implements GenerationAdapter {
   }
 
   private async downloadVideo(jobId: string, taskId: string, signal?: AbortSignal): Promise<string> {
-    const response = await fetch(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/video`, {
-      headers: this.headers(),
-      signal
-    });
+    const response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/video`, {
+      headers: this.headers()
+    }, 300_000, signal);
     if (!response.ok) throw new Error(`生成结果下载失败：${response.status}`);
     await mkdir(this.options.outputDirectory, { recursive: true });
     const target = path.join(this.options.outputDirectory, `${taskId}.mp4`);

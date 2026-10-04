@@ -7,6 +7,7 @@ const defaultSettings = (): AppSettings => ({
   localComfyUrl: "http://127.0.0.1:8188",
   outputDirectory: path.join(app.getPath("videos"), "MiniMax-H3"),
   comfyuiRoot: "",
+  rbBaseUrl: "https://rb.coolhs.com",
   defaultBackend: "local",
   minimaxBaseUrl: "https://api.minimax.io",
   ssh: {
@@ -30,13 +31,14 @@ export class SettingsStore {
     try {
       const raw = JSON.parse(await readFile(this.filePath, "utf8")) as Partial<AppSettings>;
       const defaults = defaultSettings();
-      const defaultBackend = raw.defaultBackend === "ssh" || raw.defaultBackend === "minimax" || raw.defaultBackend === "local"
+      const defaultBackend = raw.defaultBackend === "ssh" || raw.defaultBackend === "minimax" || raw.defaultBackend === "rb" || raw.defaultBackend === "local"
         ? raw.defaultBackend
         : "local";
       return {
         localComfyUrl: raw.localComfyUrl || defaults.localComfyUrl,
         outputDirectory: raw.outputDirectory || defaults.outputDirectory,
         comfyuiRoot: typeof raw.comfyuiRoot === "string" ? raw.comfyuiRoot : defaults.comfyuiRoot,
+        rbBaseUrl: typeof raw.rbBaseUrl === "string" && raw.rbBaseUrl ? raw.rbBaseUrl : defaults.rbBaseUrl,
         defaultBackend,
         minimaxBaseUrl: raw.minimaxBaseUrl || defaults.minimaxBaseUrl,
         ssh: { ...defaults.ssh, ...(raw.ssh ?? {}) }

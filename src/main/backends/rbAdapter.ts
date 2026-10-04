@@ -1,0 +1,235 @@
+import { readFile, mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import type {
+  BackendTestResult,
+  GenerationAdapter,
+  GenerationRequest,
+  GenerationTask,
+  TaskStatus
+} from "../../shared/types";
+
+interface RbAdapterOptions {
+  baseUrl: string;
+  cardCode: string;
+  outputDirectory: string;
+}
+
+// 瞬映 RB（rb.coolhs.com）：卡密即 Bearer；提交→轮询→下载三段流程与 MiniMax 云后端同构。
+export class RbAdapter implements GenerationAdapter {
+  private readonly baseUrl: string;
+
+  constructor(private readonly options: RbAdapterOptions) {
+    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+  }
+
+  private headers(): Record<string, string> {
+    return { Authorization: `Bearer ${this.options.cardCode}` };
+  }
+
+  async test(signal?: AbortSignal): Promise<BackendTestResult> {
+    const start = Date.now();
+    if (!this.options.cardCode) {
+      return { ok: false, label: "瞬映 RB 云生成", latencyMs: 0, details: {}, message: "尚未保存瞬映卡密。" };
+    }
+    try {
+      const response = await fetch(`${this.baseUrl}/api/v1/jobs?limit=1`, {
+        headers: this.headers(),
+        signal: signal ?? AbortSignal.timeout(8_000)
+      });
+      const authenticated = response.status !== 401 && response.status !== 403;
+      return {
+        ok: authenticated,
+        label: "瞬映 RB 云生成",
+        latencyMs: Date.now() - start,
+        details: { httpStatus: response.status },
+        message: authenticated
+          ? "卡密已通过鉴权检查。"
+          : `卡密无效或已失效（HTTP ${response.status}）。`
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        label: "瞬映 RB 云生成",
+        latencyMs: Date.now() - start,
+        details: {},
+        message: error instanceof Error ? error.message : "瞬映 RB 不可达"
+      };
+    }
+  }
+
+  async generate(
+    request: GenerationRequest,
+    task: GenerationTask,
+    onProgress: (status: TaskStatus, progress: number, message?: string) => void,
+    signal?: AbortSignal
+  ): Promise<Pick<GenerationTask, "providerTaskId" | "outputPath" | "outputUrl" | "usage">> {
+    if (!this.options.cardCode) throw new Error("请先在连接设置中保存瞬映卡密。");
+    onProgress("uploading", 5, "正在上传参考素材");
+    const refs = await this.uploadRefs(request, signal);
+    onProgress("queued", 10, "正在提交瞬映 RB 任务");
+    const jobId = await this.submitJob(request, refs, signal);
+    onProgress("running", 15, "瞬映 RB 正在生成");
+    const result = await this.wait(jobId, onProgress, signal);
+    onProgress("downloading", 95, "正在保存生成结果");
+    const outputPath = await this.downloadVideo(jobId, task.id, signal);
+    onProgress("succeeded", 100, "生成完成");
+    return {
+      providerTaskId: jobId,
+      outputPath,
+      outputUrl: result.videoUrl,
+      usage: { estimatedUsd: undefined }
+    };
+  }
+
+  // 站点无取消端点；云端任务会跑完扣次，本地只停止轮询（与 MiniMax 云后端现状一致）。
+  async cancel(_providerTaskId?: string): Promise<void> {
+    return;
+  }
+
+  private async uploadRefs(
+    request: GenerationRequest,
+    signal?: AbortSignal
+  ): Promise<{ images: string[]; videos: string[] }> {
+    const images: string[] = [];
+    const videos: string[] = [];
+    const candidates = [
+      { filePath: request.sourceImagePath, kind: "image" as const },
+      { filePath: request.firstFramePath, kind: "image" as const },
+      { filePath: request.lastFramePath, kind: "image" as const },
+      { filePath: request.sourceVideoPath, kind: "video" as const }
+    ];
+    for (const candidate of candidates) {
+      if (!candidate.filePath) continue;
+      const ref = await this.uploadFile(candidate.filePath, candidate.kind, signal);
+      if (candidate.kind === "image") images.push(ref); else videos.push(ref);
+    }
+    return { images, videos };
+  }
+
+  private async uploadFile(filePath: string, kind: "image" | "video", signal?: AbortSignal): Promise<string> {
+    const bytes = await readFile(filePath);
+    const extension = path.extname(filePath).toLowerCase();
+    if (kind === "image" && ![".jpg", ".jpeg", ".png", ".webp"].includes(extension)) {
+      throw new Error("瞬映 RB 参考图仅支持 JPEG/PNG/WebP。");
+    }
+    const uploadPath = kind === "image" ? "/api/v1/uploads" : "/api/v1/uploads/video";
+    const form = new FormData();
+    // 图片端点用 files（多文件数组），视频端点用 file（单文件）。
+    form.append(kind === "image" ? "files" : "file", new Blob([new Uint8Array(bytes)]), path.basename(filePath));
+    const response = await fetch(`${this.baseUrl}${uploadPath}`, {
+      method: "POST",
+      headers: this.headers(),
+      body: form,
+      signal
+    });
+    const payload = (await response.json().catch(() => ({}))) as {
+      items?: Array<{ ref?: string }>;
+      ref?: string;
+      error?: { message?: string };
+      message?: string;
+    };
+    if (!response.ok) throw new Error(`瞬映 RB 上传失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
+    const ref = kind === "image" ? payload.items?.[0]?.ref : payload.ref;
+    if (!ref) throw new Error("瞬映 RB 上传成功但未返回素材引用。");
+    return ref;
+  }
+
+  private async submitJob(
+    request: GenerationRequest,
+    refs: { images: string[]; videos: string[] },
+    signal?: AbortSignal
+  ): Promise<string> {
+    const hasFirstLast = Boolean(request.firstFramePath && request.lastFramePath);
+    const preset = hasFirstLast ? "tail_frame" : "reference";
+    const body: Record<string, unknown> = {
+      preset,
+      prompt: request.prompt
+    };
+    if (refs.images.length > 0) body.images = refs.images;
+    if (refs.videos.length > 0) body.ref_videos = refs.videos;
+    if (request.mode === "text" || request.mode === "image") {
+      body.width = request.width;
+      body.height = request.height;
+      body.seconds = request.duration;
+    }
+    const response = await fetch(`${this.baseUrl}/api/v1/jobs`, {
+      method: "POST",
+      headers: { ...this.headers(), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal
+    });
+    const payload = (await response.json().catch(() => ({}))) as {
+      id?: string;
+      job_id?: string;
+      error?: { message?: string };
+      message?: string;
+    };
+    if (!response.ok || !(payload.id || payload.job_id)) {
+      throw new Error(`瞬映 RB 提交失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
+    }
+    return payload.id || payload.job_id || "";
+  }
+
+  private async wait(
+    jobId: string,
+    onProgress: (status: TaskStatus, progress: number, message?: string) => void,
+    signal?: AbortSignal
+  ): Promise<{ videoUrl?: string }> {
+    let progress = 15;
+    const startedAt = Date.now();
+    const timeoutMs = 60 * 60 * 1_000; // 与 MiniMax 云后端一致：1 小时兜底超时
+    for (;;) {
+      if (signal?.aborted) throw new DOMException("任务已取消", "AbortError");
+      if (Date.now() - startedAt > timeoutMs) throw new Error("瞬映 RB 任务超过 1 小时未完成，已停止轮询。请到瞬映工作台确认任务状态。");
+      const response = await fetch(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}`, {
+        headers: this.headers(),
+        signal
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        status?: string;
+        has_video?: boolean;
+        hasVideo?: boolean;
+        video_url?: string;
+        videoUrl?: string;
+        error?: { message?: string };
+        message?: string;
+      };
+      if (!response.ok) throw new Error(`瞬映 RB 查询失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
+      const hasVideo = payload.has_video ?? payload.hasVideo;
+      if (payload.status === "succeeded") {
+        if (hasVideo || payload.video_url || payload.videoUrl) {
+          return { videoUrl: payload.video_url ?? payload.videoUrl };
+        }
+        // succeeded 但视频尚未就绪（转码中）：继续轮询。
+        onProgress("decoding", Math.min(92, progress), "视频转码中");
+      } else if (payload.status === "failed") {
+        throw new Error(payload.error?.message || payload.message || "瞬映 RB 任务失败");
+      }
+      progress = Math.min(92, progress + 2);
+      onProgress("running", progress, payload.status === "queued" ? "云端排队中" : "瞬映 RB 正在生成");
+      await delay(5_000, signal);
+    }
+  }
+
+  private async downloadVideo(jobId: string, taskId: string, signal?: AbortSignal): Promise<string> {
+    const response = await fetch(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/video`, {
+      headers: this.headers(),
+      signal
+    });
+    if (!response.ok) throw new Error(`生成结果下载失败：${response.status}`);
+    await mkdir(this.options.outputDirectory, { recursive: true });
+    const target = path.join(this.options.outputDirectory, `${taskId}.mp4`);
+    await writeFile(target, Buffer.from(await response.arrayBuffer()));
+    return target;
+  }
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(new DOMException("任务已取消", "AbortError"));
+    }, { once: true });
+  });
+}

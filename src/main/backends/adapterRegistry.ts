@@ -2,6 +2,7 @@ import type { AppSettings, BackendKind, GenerationAdapter } from "../../shared/t
 import { SettingsStore } from "../modules/settingsStore";
 import { ComfyAdapter } from "./comfyAdapter";
 import { MiniMaxAdapter } from "./minimaxAdapter";
+import { RbAdapter } from "./rbAdapter";
 import { SshComfyAdapter } from "./sshComfyAdapter";
 
 export class AdapterRegistry {
@@ -18,6 +19,13 @@ export class AdapterRegistry {
       return new MiniMaxAdapter({
         baseUrl: settings.minimaxBaseUrl,
         apiKey: await this.settingsStore.getSecret("minimaxApiKey"),
+        outputDirectory: settings.outputDirectory
+      });
+    }
+    if (kind === "rb") {
+      return new RbAdapter({
+        baseUrl: settings.rbBaseUrl,
+        cardCode: await this.settingsStore.getSecret("rbCardCode"),
         outputDirectory: settings.outputDirectory
       });
     }

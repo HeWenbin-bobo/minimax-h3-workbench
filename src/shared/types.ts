@@ -1,5 +1,5 @@
-export type BackendKind = "local" | "ssh" | "minimax";
-export type SecretName = "minimaxApiKey" | "sshPassword";
+export type BackendKind = "local" | "ssh" | "minimax" | "rb";
+export type SecretName = "minimaxApiKey" | "sshPassword" | "rbCardCode";
 export type GenerationMode = "text" | "image" | "video";
 export type TaskStatus =
   | "draft"
@@ -19,6 +19,8 @@ export interface AppSettings {
   outputDirectory: string;
   /** 本机 ComfyUI 根目录（可选）。设置后模型下载页按此目录检查 5 个 H3 模型文件是否就位。 */
   comfyuiRoot: string;
+  /** 瞬映 RB（rb.coolhs.com 或兼容中转）的 API 根地址。 */
+  rbBaseUrl: string;
   defaultBackend: BackendKind;
   minimaxBaseUrl: string;
   ssh: {

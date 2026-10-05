@@ -146,6 +146,7 @@ function registerIpc(
       apiKey: await settingsStore.getSecret("llmApiKey"),
       model: settings.llm.model,
       systemPrompt: settings.llm.systemPrompt,
+      chatPath: settings.llm.chatPath || undefined,
       searchBaseUrl: settings.searchApi.baseUrl || undefined,
       searchApiKey: await settingsStore.getSecret("searchApiKey")
     });
@@ -153,6 +154,28 @@ function registerIpc(
   };
   const sendChunk = (event: LlmStreamEvent) => mainWindow?.webContents.send("llm:chunk", event);
   const sendDone = (ok: boolean, message?: string) => mainWindow?.webContents.send("llm:done", { ok, message } satisfies LlmDoneEvent);
+  // LLM 连接测试 = 发一条最小对话验证 Key + 模型名 + 端点全链路；返回时延与错误详情。
+  handle("llm:test", async () => {
+    const service = await rebuildLlm();
+    const start = Date.now();
+    let streamed = "";
+    try {
+      await service.chat(
+        [{ role: "user", content: "回复一个字：好" }],
+        false,
+        (event) => { streamed += event.delta; }
+      );
+      if (!streamed.trim()) throw new Error("服务商未返回内容，请检查模型名称。");
+      return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: (await settingsStore.get()).llm.model }, message: `连接成功，模型已回复（${Date.now() - start}ms）。` };
+    } catch (error) {
+      return { ok: false, label: "游乐场 LLM", latencyMs: Date.now() - start, details: {}, message: error instanceof Error ? error.message : "连接失败" };
+    }
+  });
+  // 从上游拉取模型列表（OpenAI 兼容 GET /models）；需先保存 Key。
+  handle("llm:models", async () => {
+    const service = await rebuildLlm();
+    return service.listModels();
+  });
 
   handle("settings:get", () => settingsStore.get());
   handle("settings:update", async (_event, patch: Partial<AppSettings>) => {

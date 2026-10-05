@@ -7,6 +7,8 @@ export interface LlmServiceOptions {
   systemPrompt: string;
   searchBaseUrl?: string;
   searchApiKey?: string;
+  /** 对话端点路径，默认 /chat/completions（MiniMax 官方为 /text/chatcompletion_v2）。 */
+  chatPath?: string;
 }
 
 export type ChunkSender = (event: LlmStreamEvent) => void;
@@ -37,7 +39,7 @@ export class LlmService {
     const payload = await this.buildPayload(messages, webSearch);
     this.controller = new AbortController();
     try {
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      const response = await fetch(`${this.baseUrl}${this.options.chatPath || "/chat/completions"}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -54,9 +56,42 @@ export class LlmService {
         const detail = await response.text().catch(() => "");
         throw new Error(`LLM 请求失败：${response.status} ${detail.slice(0, 200)}`);
       }
-      await consumeSse(response.body, send);
+      // 流式响应走 SSE 解析；服务商忽略 stream:true 返回完整 JSON 时，从非流式结构取内容。
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("text/event-stream")) {
+        const received = await consumeSse(response.body, send);
+        if (!received) throw new Error("服务商未返回任何内容（响应为空或格式不兼容），请检查模型名称是否正确。");
+      } else {
+        const full = (await response.json().catch(() => ({}))) as {
+          choices?: Array<{ message?: { content?: string }; delta?: { content?: string }; text?: string }>;
+          content?: string;
+          base_resp?: { status_msg?: string };
+        };
+        const text = full.choices?.[0]?.message?.content ?? full.choices?.[0]?.delta?.content ?? full.choices?.[0]?.text ?? full.content;
+        if (text) send({ seq: 1, delta: text });
+        else throw new Error(`服务商未返回内容：${full.base_resp?.status_msg || JSON.stringify(full).slice(0, 200)}`);
+      }
     } finally {
       this.controller = undefined;
+    }
+  }
+
+  // 模型列表（OpenAI 兼容 GET /models）。部分服务商不支持——返回 ok=false 且提示手动填写。
+  async listModels(): Promise<{ ok: boolean; models: string[]; message: string }> {
+    try {
+      const response = await fetch(`${this.baseUrl}/models`, {
+        headers: this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {},
+        signal: AbortSignal.timeout(10_000)
+      });
+      if (!response.ok) {
+        return { ok: false, models: [], message: `该服务商不支持模型列表接口（HTTP ${response.status}），请手动填写模型名。` };
+      }
+      const payload = (await response.json().catch(() => ({}))) as { data?: Array<{ id?: string }> };
+      const models = (payload.data ?? []).map((item) => item.id).filter((id): id is string => Boolean(id)).sort();
+      if (models.length === 0) return { ok: false, models: [], message: "服务商返回了空模型列表，请手动填写模型名。" };
+      return { ok: true, models, message: `获取到 ${models.length} 个模型。` };
+    } catch (error) {
+      return { ok: false, models: [], message: error instanceof Error ? error.message : "无法连接服务商" };
     }
   }
 
@@ -119,11 +154,13 @@ export class LlmService {
 }
 
 // 解析 SSE 流：按行拆 data: 载荷，提取 choices[0].delta.content；残行跨 chunk 缓存。
-export async function consumeSse(body: ReadableStream<Uint8Array>, send: ChunkSender): Promise<void> {
+// 返回是否收到过任何内容——零内容时调用方报错（空回复检测）。
+export async function consumeSse(body: ReadableStream<Uint8Array>, send: ChunkSender): Promise<boolean> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let seq = 0;
+  let received = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -135,18 +172,22 @@ export async function consumeSse(body: ReadableStream<Uint8Array>, send: ChunkSe
         const trimmed = line.trim();
         if (!trimmed.startsWith("data:")) continue;
         const data = trimmed.slice(5).trim();
-        if (data === "[DONE]") return;
+        if (data === "[DONE]") return received;
         try {
           const parsed = JSON.parse(data) as {
             choices?: Array<{ delta?: { content?: string } }>;
           };
           const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) send({ seq: (seq += 1), delta });
+          if (delta) {
+            received = true;
+            send({ seq: (seq += 1), delta });
+          }
         } catch {
           // 忽略不完整/非 JSON 行（如注释心跳）。
         }
       }
     }
+    return received;
   } finally {
     reader.releaseLock();
   }

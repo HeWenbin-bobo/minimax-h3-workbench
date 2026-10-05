@@ -213,6 +213,9 @@ button { cursor: pointer; }
 .submit-area strong { color: var(--ink); font-size: 11px; margin-top: 3px; }
 
 .result-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+/* 1 路时占满整行；视频高度随路数自适应，避免大量留白（4 路每卡约 50% 宽，2 路 100% 宽） */
+.result-grid.single { grid-template-columns: 1fr; }
+.result-grid.single video, .result-grid.single .task-placeholder { height: 420px; }
 .task-card { position: relative; overflow: hidden; min-height: 270px; background: #fff; border: 1px solid var(--line); border-radius: 18px; display: flex; flex-direction: column; box-shadow: var(--shadow); }
 .task-card video { width: 100%; height: 205px; background: #11141a; object-fit: contain; }
 .task-placeholder { position: relative; flex: 1; min-height: 200px; display: grid; place-items: center; background: radial-gradient(circle at 75% 20%, rgba(122, 39, 255, 0.24), transparent 38%), radial-gradient(circle at 20% 90%, rgba(255, 39, 111, 0.18), transparent 35%), #141821; }
@@ -285,7 +288,7 @@ button { cursor: pointer; }
 
 /* 游乐场 */
 .playground { max-width: 1150px; }
-.playground-layout { display: grid; grid-template-columns: 200px 1fr; gap: 14px; height: calc(100vh - 150px); min-height: 480px; }
+.playground-layout { display: grid; grid-template-columns: 200px 1fr; gap: 14px; flex: 1; min-height: 0; }
 .pg-sessions { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
 .pg-session { border: 1px solid var(--line); background: #fff; border-radius: 12px; padding: 12px 14px; text-align: left; display: grid; gap: 3px; }
 .pg-session.active { border-color: #ff9b7c; background: #fff7f4; }
@@ -331,6 +334,14 @@ button { cursor: pointer; }
 .pg-input-row textarea:focus { background: #fff; border-color: #ff795b; }
 .pg-input-row .primary { padding: 12px 22px; border: 0; border-radius: 12px; color: #fff; background: var(--brand-gradient); font-size: 12px; }
 .pg-input-row .primary:disabled { opacity: 0.45; cursor: not-allowed; }
+.pg-model-select { max-width: 150px; margin-top: 7px !important; border-radius: 0 10px 10px 0 !important; border-left: 0 !important; }
+
+/* 游乐场页面高度自适应：占满视口剩余空间，内部滚动，页面本身不出滚动条 */
+.playground { max-width: 1150px; display: flex; flex-direction: column; }
+.playground .page-title { margin-bottom: 16px; flex: none; }
+.playground-layout { display: grid; grid-template-columns: 200px 1fr; gap: 14px; flex: 1; min-height: 0; }
+.pg-sessions { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
+.pg-session { border: 1px solid var(--line); background: #fff; border-radius: 12px; padding: 12px 14px; text-align: left; display: grid; gap: 3px; flex: none; }
 
 @media (max-width: 1200px) {
   .page { padding-left: 30px; padding-right: 30px; }

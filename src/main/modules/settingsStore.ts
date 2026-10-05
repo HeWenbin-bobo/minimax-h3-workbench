@@ -10,6 +10,15 @@ const defaultSettings = (): AppSettings => ({
   rbBaseUrl: "https://rb.coolhs.com",
   defaultBackend: "local",
   minimaxBaseUrl: "https://api.minimax.io",
+  llm: {
+    provider: "minimax",
+    baseUrl: "https://api.minimax.io/v1",
+    model: "MiniMax-Text-01",
+    systemPrompt: ""
+  },
+  searchApi: {
+    baseUrl: ""
+  },
   ssh: {
     name: "远程显卡",
     host: "",
@@ -41,6 +50,8 @@ export class SettingsStore {
         rbBaseUrl: typeof raw.rbBaseUrl === "string" && raw.rbBaseUrl ? raw.rbBaseUrl : defaults.rbBaseUrl,
         defaultBackend,
         minimaxBaseUrl: raw.minimaxBaseUrl || defaults.minimaxBaseUrl,
+        llm: { ...defaults.llm, ...(raw.llm ?? {}) },
+        searchApi: { ...defaults.searchApi, ...(raw.searchApi ?? {}) },
         ssh: { ...defaults.ssh, ...(raw.ssh ?? {}) }
       };
     } catch {

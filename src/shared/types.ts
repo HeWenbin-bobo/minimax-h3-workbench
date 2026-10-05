@@ -1,5 +1,5 @@
 export type BackendKind = "local" | "ssh" | "minimax" | "rb";
-export type SecretName = "minimaxApiKey" | "sshPassword" | "rbCardCode";
+export type SecretName = "minimaxApiKey" | "sshPassword" | "rbCardCode" | "llmApiKey" | "searchApiKey";
 export type GenerationMode = "text" | "image" | "video";
 export type TaskStatus =
   | "draft"
@@ -23,6 +23,18 @@ export interface AppSettings {
   rbBaseUrl: string;
   defaultBackend: BackendKind;
   minimaxBaseUrl: string;
+  /** 游乐场 LLM 配置：OpenAI 兼容接入（预设提供商或自定义）。 */
+  llm: {
+    /** 预设提供商 id 或 "custom"。 */
+    provider: string;
+    baseUrl: string;
+    model: string;
+    systemPrompt: string;
+  };
+  /** 游乐场可选联网搜索（OpenAI 兼容搜索 API，如博查/Tavily 转接）。 */
+  searchApi: {
+    baseUrl: string;
+  };
   ssh: {
     name: string;
     host: string;
@@ -35,6 +47,16 @@ export interface AppSettings {
     remoteComfyPath: string;
   };
 }
+
+/** LLM 提供商预设（OpenAI 兼容）。 */
+export const LLM_PROVIDERS = [
+  { id: "minimax", label: "MiniMax", baseUrl: "https://api.minimax.io/v1", model: "MiniMax-Text-01" },
+  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  { id: "zhipu", label: "智谱 GLM", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
+  { id: "moonshot", label: "月之暗面 Kimi", baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
+  { id: "ollama", label: "Ollama（本机）", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5" },
+  { id: "custom", label: "自定义（OpenAI 兼容）", baseUrl: "", model: "" }
+] as const;
 
 export interface GpuInfo {
   vendor: string;
@@ -189,5 +211,42 @@ export interface WorkbenchApi {
   retryTask(taskId: string): Promise<ApiResponse<GenerationTask>>;
   showItem(filePath: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
+  /** 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。 */
+  chatLlm(messages: ChatMessage[], webSearch: boolean): Promise<ApiResponse<boolean>>;
+  abortLlm(): Promise<ApiResponse<boolean>>;
+  /** 游乐场：读取本地附件为 data URL（图片）或文本内容。 */
+  readAttachment(path: string): Promise<ApiResponse<AttachmentPayload>>;
+  onLlmChunk(listener: (chunk: LlmStreamEvent) => void): () => void;
+  onLlmDone(listener: (event: LlmDoneEvent) => void): () => void;
   onTaskUpdate(listener: (task: GenerationTask) => void): () => void;
+}
+
+export type ChatRole = "user" | "assistant" | "system";
+
+/** 游乐场消息：文本内容 + 可选图片附件（data URL）。 */
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+  images?: string[];
+}
+
+/** 附件读取结果：图片转 data URL，文本类直接读内容，其他仅返回名称。 */
+export interface AttachmentPayload {
+  kind: "image" | "text" | "other";
+  name: string;
+  dataUrl?: string;
+  text?: string;
+}
+
+/** LLM 流式分块事件。 */
+export interface LlmStreamEvent {
+  /** 递增序号，渲染端用于去重与排序。 */
+  seq: number;
+  delta: string;
+}
+
+/** LLM 单轮流结束事件。 */
+export interface LlmDoneEvent {
+  ok: boolean;
+  message?: string;
 }

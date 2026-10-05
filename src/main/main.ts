@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -14,10 +14,11 @@ import {
 } from "electron";
 import { AdapterRegistry } from "./backends/adapterRegistry";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
-import type { ApiResponse, AppSettings, BackendKind, GenerationRequest, SecretName } from "../shared/types";
+import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmDoneEvent, LlmStreamEvent, SecretName } from "../shared/types";
 import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
+import { LlmService } from "./modules/llmService";
 import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
@@ -136,16 +137,35 @@ function registerIpc(
   registry: AdapterRegistry,
   orchestrator: GenerationOrchestrator
 ): void {
+  // 游乐场 LLM：单例服务，随设置刷新重建；流式分块经 llm:chunk 推送，结束经 llm:done 推送。
+  let llm: LlmService | undefined;
+  const rebuildLlm = async (): Promise<LlmService> => {
+    const settings = await settingsStore.get();
+    llm = new LlmService({
+      baseUrl: settings.llm.baseUrl,
+      apiKey: await settingsStore.getSecret("llmApiKey"),
+      model: settings.llm.model,
+      systemPrompt: settings.llm.systemPrompt,
+      searchBaseUrl: settings.searchApi.baseUrl || undefined,
+      searchApiKey: await settingsStore.getSecret("searchApiKey")
+    });
+    return llm;
+  };
+  const sendChunk = (event: LlmStreamEvent) => mainWindow?.webContents.send("llm:chunk", event);
+  const sendDone = (ok: boolean, message?: string) => mainWindow?.webContents.send("llm:done", { ok, message } satisfies LlmDoneEvent);
+
   handle("settings:get", () => settingsStore.get());
   handle("settings:update", async (_event, patch: Partial<AppSettings>) => {
     const next = await settingsStore.update(patch);
     settingsCache = next; // 同步刷新 h3media/showItem 白名单缓存，改输出目录后新结果立即可预览
     registry.invalidate(next);
+    llm = undefined; // LLM 配置可能已变，下一轮对话重建服务
     return next;
   });
   handle("secret:set", async (_event, name: SecretName, value: string) => {
     await settingsStore.setSecret(name, value);
     registry.invalidate();
+    llm = undefined; // Key 可能已变，下一轮对话重建服务
     return true;
   });
   handle("secret:has", (_event, name: SecretName) => settingsStore.hasSecret(name));
@@ -178,6 +198,31 @@ function registerIpc(
   handle("tasks:submit", (_event, request: GenerationRequest) => orchestrator.submit(request));
   handle("tasks:cancel", (_event, id: string) => orchestrator.cancel(id));
   handle("tasks:retry", (_event, id: string) => orchestrator.retry(id));
+  // 游乐场：流式对话（异步跑完，期间 llm:chunk/llm:done 推送）、中断、附件读取。
+  handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean) => {
+    const service = llm ?? await rebuildLlm();
+    void service.chat(messages, webSearch, sendChunk)
+      .then(() => sendDone(true))
+      .catch((error: unknown) => sendDone(false, error instanceof Error ? error.message : "对话失败"));
+    return true;
+  });
+  handle("llm:abort", async () => {
+    llm?.abort();
+    return true;
+  });
+  handle("attachment:read", async (_event, filePath: string) => {
+    if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
+    const extension = path.extname(filePath).toLowerCase();
+    const name = path.basename(filePath);
+    if ([".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(extension)) {
+      const mime = extension === ".png" ? "image/png" : extension === ".webp" ? "image/webp" : extension === ".gif" ? "image/gif" : "image/jpeg";
+      return { kind: "image", name, dataUrl: `data:${mime};base64,${(await readFile(filePath)).toString("base64")}` };
+    }
+    if ([".txt", ".md", ".json", ".csv", ".srt", ".vtt", ".log"].includes(extension)) {
+      return { kind: "text", name, text: (await readFile(filePath, "utf8")).slice(0, 100_000) };
+    }
+    return { kind: "other", name };
+  });
   handle("shell:showItem", async (_event, filePath: string) => {
     if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
     // 与 h3media 同类防护：只允许在输出目录或 ComfyUI 模型目录内定位文件/文件夹。

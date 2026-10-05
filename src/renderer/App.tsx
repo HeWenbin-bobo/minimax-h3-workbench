@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LocalModelStatus, ResourceLink, UpdateInfo } from "../shared/types";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMessage, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LlmStreamEvent, LocalModelStatus, ResourceLink, UpdateInfo } from "../shared/types";
+import { LLM_PROVIDERS } from "../shared/types";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
+import { renderMarkdown } from "./markdown";
 
-type Page = "ready" | "studio" | "downloads" | "guide" | "connections";
+type Page = "ready" | "studio" | "playground" | "downloads" | "guide" | "connections";
 const pages: Array<{ id: Page; label: string; eyebrow: string }> = [
   { id: "ready", label: "就绪检测", eyebrow: "CHECK" }, { id: "studio", label: "生成工作台", eyebrow: "CREATE" },
-  { id: "downloads", label: "模型下载", eyebrow: "MODELS" }, { id: "guide", label: "配置指南", eyebrow: "GUIDE" },
+  { id: "playground", label: "游乐场", eyebrow: "PLAY" }, { id: "downloads", label: "模型下载", eyebrow: "MODELS" },
+  { id: "guide", label: "配置指南", eyebrow: "GUIDE" },
   { id: "connections", label: "连接设置", eyebrow: "CONNECT" }
 ];
 const demoPrompt = "Create a cinematic 4-second product-style video of a translucent glass sphere floating above a reflective black surface, glowing with a magenta-to-orange gradient and violet-blue rim light. The sphere slowly rotates while fine particles orbit it, then emits one soft pulse of light. Minimal futuristic studio, premium AI technology aesthetic, smooth dolly-in, crisp details, no text, no logos, no people, native ambient stereo sound.";
@@ -78,6 +81,7 @@ export function App() {
     <main className="main-area">
       {page === "ready" && <ReadyPage report={report} busy={detecting} onDetect={detect} onNavigate={setPage} />}
       {page === "studio" && <StudioPage settings={settings} tasks={tasks} onError={showError} onNotice={(text) => setNotice({ text })} />}
+      {page === "playground" && <PlaygroundPage settings={settings} tasks={tasks} onError={showError} onNotice={(text) => setNotice({ text })} onNavigate={setPage} />}
       {page === "downloads" && <ResourcesPage resources={resources} settings={settings} onSettingsChange={setSettings} />}
       {page === "guide" && <GuidePage />}
       {page === "connections" && <ConnectionsPage settings={settings} setSettings={setSettings} onError={showError} onNotice={(text) => setNotice({ text })} />}
@@ -221,19 +225,194 @@ function GuidePage() { const guides = [
   ]; return <section className="page guide"><div className="page-title"><div><span className="eyebrow">HANDBOOK</span><h1>配置指南</h1></div></div><div className="guide-grid">{guides.map(([title, body], i) => <article key={String(title)}><span>0{i+1}</span><h2>{title}</h2><p>{body}</p></article>)}</div><div className="callout"><strong>遇到 OOM？</strong><span>降低分辨率或时长，关闭其他占显存程序；单卡不足时优先使用 SSH 多卡主机或 MiniMax 云 API。</span></div></section>; }
 
 function ConnectionsPage({ settings, setSettings, onError, onNotice }: { settings: AppSettings; setSettings: (s: AppSettings) => void; onError: (e: unknown) => void; onNotice: (s: string) => void }) {
-  const [draft, setDraft] = useState(settings); const [apiKey, setApiKey] = useState(""); const [sshPassword, setSshPassword] = useState(""); const [rbCardCode, setRbCardCode] = useState(""); const [testing, setTesting] = useState<BackendKind>(); const [results, setResults] = useState<Partial<Record<BackendKind, BackendTestResult>>>({});
+  const [draft, setDraft] = useState(settings); const [apiKey, setApiKey] = useState(""); const [sshPassword, setSshPassword] = useState(""); const [rbCardCode, setRbCardCode] = useState(""); const [llmKey, setLlmKey] = useState(""); const [searchKey, setSearchKey] = useState(""); const [testing, setTesting] = useState<BackendKind>(); const [results, setResults] = useState<Partial<Record<BackendKind, BackendTestResult>>>({});
   const setSsh = (patch: Partial<AppSettings["ssh"]>) => setDraft({ ...draft, ssh: { ...draft.ssh, ...patch } });
-  async function save() { try { const saved = await must(window.h3.updateSettings(draft)); if (apiKey) await must(window.h3.setSecret("minimaxApiKey", apiKey)); if (sshPassword) await must(window.h3.setSecret("sshPassword", sshPassword)); if (rbCardCode) await must(window.h3.setSecret("rbCardCode", rbCardCode)); setSettings(saved); setApiKey(""); setSshPassword(""); setRbCardCode(""); onNotice("连接设置已安全保存"); } catch (e) { onError(e); } }
+  const setLlm = (patch: Partial<AppSettings["llm"]>) => setDraft({ ...draft, llm: { ...draft.llm, ...patch } });
+  const setLlmProvider = (provider: string) => {
+    const preset = LLM_PROVIDERS.find((p) => p.id === provider);
+    setDraft({ ...draft, llm: { ...draft.llm, provider, ...(preset && provider !== "custom" ? { baseUrl: preset.baseUrl, model: preset.model } : {}) } });
+  };
+  async function save() { try { const saved = await must(window.h3.updateSettings(draft)); if (apiKey) await must(window.h3.setSecret("minimaxApiKey", apiKey)); if (sshPassword) await must(window.h3.setSecret("sshPassword", sshPassword)); if (rbCardCode) await must(window.h3.setSecret("rbCardCode", rbCardCode)); if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey)); if (searchKey) await must(window.h3.setSecret("searchApiKey", searchKey)); setSettings(saved); setApiKey(""); setSshPassword(""); setRbCardCode(""); setLlmKey(""); setSearchKey(""); onNotice("连接设置已安全保存"); } catch (e) { onError(e); } }
   async function test(kind: BackendKind) { setTesting(kind); const result = await window.h3.testBackend(kind); setTesting(undefined); if (result.data) setResults((r) => ({...r,[kind]:result.data})); else onError(result.message); }
   return <section className="page connections"><div className="page-title"><div><span className="eyebrow">CONNECT</span><h1>连接设置</h1></div><button className="primary" onClick={save}>保存全部设置</button></div>
     <ConnectionCard title="本机 ComfyUI" badge="LOCAL" result={results.local} onTest={() => test("local")} testing={testing === "local"}><label>服务地址<input value={draft.localComfyUrl} onChange={(e) => setDraft({...draft,localComfyUrl:e.target.value})}/></label><label>输出目录<div className="input-button"><input value={draft.outputDirectory} onChange={(e) => setDraft({...draft,outputDirectory:e.target.value})}/><button onClick={async () => { const x=await window.h3.selectDirectory(); if(x.data)setDraft({...draft,outputDirectory:x.data}); }}>选择</button></div></label></ConnectionCard>
     <ConnectionCard title="MiniMax 云 API" badge="CLOUD" result={results.minimax} onTest={() => test("minimax")} testing={testing === "minimax"}><label>API 地址<input value={draft.minimaxBaseUrl} onChange={(e) => setDraft({...draft,minimaxBaseUrl:e.target.value})}/></label><label>API Key<input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="已保存的密钥不会回显；留空不修改"/></label></ConnectionCard>
     <ConnectionCard title="瞬映 RB 云生成" badge="RB-CLOUD" result={results.rb} onTest={() => test("rb")} testing={testing === "rb"}><label>API 地址<input value={draft.rbBaseUrl} onChange={(e) => setDraft({...draft,rbBaseUrl:e.target.value})}/></label><label>瞬映卡密<input type="password" value={rbCardCode} onChange={(e) => setRbCardCode(e.target.value)} placeholder="已保存的卡密不会回显；留空不修改"/></label></ConnectionCard>
     <ConnectionCard title="SSH 远程显卡" badge="REMOTE" result={results.ssh} onTest={() => test("ssh")} testing={testing === "ssh"}><div className="form-grid"><label>主机<input value={draft.ssh.host} onChange={(e)=>setSsh({host:e.target.value})} placeholder="gpu.example.com"/></label><label>端口<input type="number" value={draft.ssh.port} onChange={(e)=>setSsh({port:Number(e.target.value)})}/></label><label>用户名<input value={draft.ssh.username} onChange={(e)=>setSsh({username:e.target.value})}/></label><label>远端 ComfyUI 端口<input type="number" value={draft.ssh.remoteComfyPort} onChange={(e)=>setSsh({remoteComfyPort:Number(e.target.value)})}/></label></div><label>私钥路径<div className="input-button"><input value={draft.ssh.privateKeyPath} onChange={(e)=>setSsh({privateKeyPath:e.target.value})}/><button onClick={async()=>{const x=await window.h3.selectFile("key");if(x.data)setSsh({privateKeyPath:x.data});}}>选择</button></div></label><label>SSH 密码（仅无私钥时）<input type="password" value={sshPassword} onChange={(e)=>setSshPassword(e.target.value)} placeholder="使用系统安全存储"/></label><label>主机 SHA-256 指纹<input value={draft.ssh.hostFingerprint} onChange={(e)=>setSsh({hostFingerprint:e.target.value})} placeholder="首次测试确认后填入"/></label></ConnectionCard>
+    <ConnectionCard title="游乐场 LLM（OpenAI 兼容）" badge="PLAY"><div className="form-grid"><label>提供商<select value={draft.llm.provider} onChange={(e) => setLlmProvider(e.target.value)}>{LLM_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}</select></label><label>API 地址<input value={draft.llm.baseUrl} onChange={(e) => setLlm({baseUrl: e.target.value})} placeholder="https://api.example.com/v1"/></label><label>模型名称<input value={draft.llm.model} onChange={(e) => setLlm({model: e.target.value})} placeholder="deepseek-chat"/></label></div><label>API Key<input type="password" value={llmKey} onChange={(e) => setLlmKey(e.target.value)} placeholder="已保存的密钥不会回显；留空不修改（Ollama 本机可留空）"/></label><label>系统提示词（可选）<input value={draft.llm.systemPrompt} onChange={(e) => setLlm({systemPrompt: e.target.value})} placeholder="例如：你是视频创作助手，帮我润色视频描述。"/></label></ConnectionCard>
+    <ConnectionCard title="联网搜索（可选）" badge="SEARCH"><label>搜索 API 地址<input value={draft.searchApi.baseUrl} onChange={(e) => setDraft({...draft, searchApi: {baseUrl: e.target.value}})} placeholder="博查/Tavily 转接等，POST /search 返回 results 数组；留空隐藏搜索开关"/></label><label>搜索 API Key<input type="password" value={searchKey} onChange={(e) => setSearchKey(e.target.value)} placeholder="已保存的密钥不会回显；留空不修改"/></label></ConnectionCard>
   </section>;
 }
 
-function ConnectionCard({ title, badge, result, onTest, testing, children }: { title: string; badge: string; result?: BackendTestResult; onTest: () => void; testing: boolean; children: ReactNode }) { return <article className="connection-card"><header><div><span>{badge}</span><h2>{title}</h2></div><button className="secondary" onClick={onTest} disabled={testing}>{testing ? "测试中…" : "测试连接"}</button></header><div className="connection-fields">{children}</div>{result && <div className={`test-result ${result.ok ? "ok" : "bad"}`}><strong>{result.ok ? "连接成功" : "连接失败"}</strong><span>{result.message} · {result.latencyMs}ms</span></div>}</article>; }
+function ConnectionCard({ title, badge, result, onTest, testing, children }: { title: string; badge: string; result?: BackendTestResult; onTest?: () => void; testing?: boolean; children: ReactNode }) { return <article className="connection-card"><header><div><span>{badge}</span><h2>{title}</h2></div>{onTest && <button className="secondary" onClick={onTest} disabled={testing}>{testing ? "测试中…" : "测试连接"}</button>}</header><div className="connection-fields">{children}</div>{result && <div className={`test-result ${result.ok ? "ok" : "bad"}`}><strong>{result.ok ? "连接成功" : "连接失败"}</strong><span>{result.message} · {result.latencyMs}ms</span></div>}</article>; }
+
+interface PlaygroundSession {
+  id: string;
+  title: string;
+  messages: PlaygroundMessage[];
+  createdAt: string;
+}
+
+// 消息可携带内嵌的视频生成任务（任务卡片随 task:update 实时刷新）。
+interface PlaygroundMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  images?: string[];
+  streaming?: boolean;
+  taskIds?: string[];
+  error?: boolean;
+}
+
+const pgSessionsKey = "h3-playground-sessions";
+
+function loadSessions(): PlaygroundSession[] {
+  try { return JSON.parse(localStorage.getItem(pgSessionsKey) || "[]") as PlaygroundSession[]; } catch { return []; }
+}
+
+function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
+  const [sessions, setSessions] = useState<PlaygroundSession[]>(loadSessions);
+  const [activeId, setActiveId] = useState<string>(() => loadSessions()[0]?.id || "");
+  const active = sessions.find((s) => s.id === activeId);
+  const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
+  const [webSearch, setWebSearch] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [showVideoForm, setShowVideoForm] = useState(false);
+  const [videoRequest, setVideoRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
+  const streamBuffer = useRef("");
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const searchReady = Boolean(settings.searchApi.baseUrl);
+
+  useEffect(() => { localStorage.setItem(pgSessionsKey, JSON.stringify(sessions.slice(0, 50))); }, [sessions]);
+  useEffect(() => {
+    const offChunk = window.h3.onLlmChunk((event: LlmStreamEvent) => {
+      streamBuffer.current += event.delta;
+      setSessions((all) => patchLast(all, activeIdRef.current, (msg) => ({ ...msg, content: streamBuffer.current })));
+    });
+    const offDone = window.h3.onLlmDone((event) => {
+      setSessions((all) => patchLast(all, activeIdRef.current, (msg) => ({ ...msg, streaming: false, error: !event.ok && Boolean(event.message) })));
+      streamBuffer.current = "";
+      setGenerating(false);
+      if (!event.ok && event.message) onError(new Error(event.message));
+    });
+    return () => { offChunk(); offDone(); };
+  }, []);
+  const activeIdRef = useRef(activeId);
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+  // 粘底自动滚动：仅在用户接近底部时跟随。
+  useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
+
+  function patchLast(all: PlaygroundSession[], id: string, patch: (msg: PlaygroundMessage) => PlaygroundMessage): PlaygroundSession[] {
+    return all.map((session) => session.id !== id ? session : { ...session, messages: session.messages.map((msg, i) => i === session.messages.length - 1 ? patch(msg) : msg) });
+  }
+
+  function newSession() {
+    const session: PlaygroundSession = { id: crypto.randomUUID(), title: "新对话", messages: [], createdAt: new Date().toISOString() };
+    setSessions((all) => [session, ...all]);
+    setActiveId(session.id);
+    setInput("");
+    setAttachments([]);
+  }
+
+  async function pickAttachment() {
+    const response = await window.h3.selectFile("image");
+    if (!response.data) return;
+    const payload = await window.h3.readAttachment(response.data);
+    if (!payload.data) { onError(new Error(payload.message || "读取附件失败")); return; }
+    if (payload.data.kind === "other") { onNotice(`已添加附件 ${payload.data.name}（此类型仅作为文件名提示发送）`); }
+    setAttachments((all) => [...all, { name: payload.data!.name, dataUrl: payload.data!.dataUrl, text: payload.data!.text }]);
+  }
+
+  async function send() {
+    const text = input.trim();
+    if ((!text && attachments.length === 0) || generating) return;
+    if (!settings.llm.baseUrl) { onError(new Error("请先在连接设置中配置游乐场 LLM。")); return; }
+    let session = active;
+    if (!session) { newSession(); return; }
+    const userImages = attachments.map((a) => a.dataUrl).filter((url): url is string => Boolean(url));
+    const extraText = attachments.map((a) => a.text ? `\n\n--- 附件 ${a.name} ---\n${a.text}` : `\n\n（附件：${a.name}）`).join("");
+    const userMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "user", content: text + extraText, images: userImages.length ? userImages : undefined };
+    const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: "", streaming: true };
+    const history: ChatMessage[] = [...(session?.messages ?? []).filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })), { role: "user", content: userMsg.content, images: userMsg.images }];
+    setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, title: s.messages.length === 0 && text ? text.slice(0, 20) : s.title, messages: [...s.messages, userMsg, assistantMsg] } : s));
+    setInput(""); setAttachments([]); setGenerating(true); streamBuffer.current = "";
+    const result = await window.h3.chatLlm(history, webSearch);
+    if (!result.ok) {
+      setGenerating(false);
+      setSessions((all) => patchLast(all, session!.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
+    }
+  }
+
+  async function stop() {
+    await window.h3.abortLlm();
+    setGenerating(false);
+    setSessions((all) => patchLast(all, activeIdRef.current, (msg) => ({ ...msg, streaming: false })));
+  }
+
+  async function submitVideo() {
+    let session = active;
+    if (!session) { newSession(); return; }
+    const result = await window.h3.submitGeneration({ ...videoRequest, prompt: videoRequest.prompt || input.trim() });
+    if (!result.ok) { onError(result.message); return; }
+    const taskIds = result.data?.map((task) => task.id) ?? [];
+    const summary = `已提交视频生成（${backendLabel(videoRequest.backend)}${videoRequest.preset ? ` · ${rbPresetLabel(videoRequest.preset)}` : ""}）：${videoRequest.prompt.slice(0, 60)}${videoRequest.prompt.length > 60 ? "…" : ""}`;
+    const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: summary, taskIds };
+    setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, messages: [...s.messages, { id: crypto.randomUUID(), role: "user" as const, content: `🎬 生成视频：${videoRequest.prompt.slice(0, 80)}` }, assistantMsg] } : s));
+    setShowVideoForm(false);
+    onNotice(`已创建 ${videoRequest.count} 个生成任务`);
+  }
+
+  const activeTasks = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+
+  return <section className="page playground"><div className="page-title"><div><span className="eyebrow">PLAY</span><h1>游乐场</h1></div><button className="primary" onClick={newSession}>新对话</button></div>
+    <div className="playground-layout">
+      <aside className="pg-sessions">
+        {sessions.length === 0 && <p className="footnote">还没有对话。点击右上角"新对话"开始。</p>}
+        {sessions.map((session) => <button key={session.id} className={session.id === activeId ? "pg-session active" : "pg-session"} onClick={() => setActiveId(session.id)}><strong>{session.title || "新对话"}</strong><small>{session.messages.length} 条消息</small></button>)}
+      </aside>
+      <div className="pg-main">
+        <div className="pg-messages">
+          {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
+            : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
+              {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
+              <div className="pg-bubble">{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}</div>
+              {msg.taskIds && msg.taskIds.length > 0 && <div className="result-grid pg-task-grid">{msg.taskIds.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} />)}</div>}
+            </div>)}
+          <div ref={bottomRef} />
+        </div>
+        <div className="pg-composer">
+          <div className="pg-chips">
+            <button className={webSearch ? "pg-chip on" : "pg-chip"} onClick={() => { if (!searchReady && !webSearch) { onNotice("联网搜索需要先在连接设置配置搜索 API；若 LLM 自带联网也可不接。"); } setWebSearch(!webSearch); }}>🌐 联网{searchReady ? "" : "（未配置 API）"}</button>
+            <button className={showVideoForm ? "pg-chip on" : "pg-chip"} onClick={() => setShowVideoForm(!showVideoForm)}>🎬 生成视频</button>
+            <button className="pg-chip" onClick={pickAttachment}>📎 附件</button>
+            <span className="pg-model">{settings.llm.model || "未配置模型"}{generating ? " · 生成中…" : ""}</span>
+            {generating && <button className="pg-chip stop" onClick={stop}>■ 停止</button>}
+          </div>
+          {showVideoForm && <div className="pg-video-form">
+            <div className="form-grid">
+              <label>生成后端<select value={videoRequest.backend} onChange={(e) => setVideoRequest({ ...videoRequest, backend: e.target.value as BackendKind, preset: undefined })}>{(["local", "ssh", "minimax", "rb"] as BackendKind[]).map((kind) => <option key={kind} value={kind}>{backendLabel(kind)}</option>)}</select></label>
+              <label>时长<select value={videoRequest.duration} onChange={(e) => setVideoRequest({ ...videoRequest, duration: Number(e.target.value) })}>{[4, 6, 8, 10, 12, 15].map((x) => <option key={x} value={x}>{x} 秒</option>)}</select></label>
+              <label>结果数量<select value={videoRequest.count} onChange={(e) => setVideoRequest({ ...videoRequest, count: Number(e.target.value) })}>{[1, 2, 3, 4].map((x) => <option key={x} value={x}>{x} 路</option>)}</select></label>
+            </div>
+            <label>视频描述（留空则使用下方聊天输入内容）<textarea rows={2} value={videoRequest.prompt} onChange={(e) => setVideoRequest({ ...videoRequest, prompt: e.target.value })} /></label>
+            <button className="primary" onClick={submitVideo}>提交生成任务</button>
+          </div>}
+          {attachments.length > 0 && <div className="pg-attachments">{attachments.map((a, i) => <span key={i} className="pg-attachment">{a.dataUrl ? <img src={a.dataUrl} alt={a.name} /> : `📄 ${a.name}`}<button onClick={() => setAttachments((all) => all.filter((_, j) => j !== i))}>×</button></span>)}</div>}
+          <div className="pg-input-row">
+            <textarea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder={generating ? "AI 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
+            <button className="primary" disabled={generating || (!input.trim() && attachments.length === 0)} onClick={send}>{generating ? "回复中…" : "发送"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>;
+}
+
+function rbPresetLabel(preset: string): string {
+  return ({ reference: "贴合参考图", tail_frame: "首尾过渡", easy_15: "15 秒", easy_30: "30 秒", flashvsr_upscale: "视频变清晰" } as Record<string, string>)[preset] || preset;
+}
+
 function FilePicker({ label, path, onClick }: { label: string; path?: string; onClick: () => void }) { return <button className={`file-picker ${path ? "picked" : ""}`} onClick={onClick}><span>{path ? "✓" : "+"}</span><strong>{label}</strong><small>{path ? path.split(/[\\/]/).pop() : "点击选择文件"}</small></button>; }
 function upsert<T extends { id: string }>(items: T[], item: T): T[] { const index=items.findIndex((x)=>x.id===item.id); if(index<0)return[item,...items];const copy=[...items];copy[index]=item;return copy; }
 async function must<T>(promise: Promise<ApiResponse<T>>): Promise<T> { const result=await promise;if(!result.ok)throw new Error(result.message||"操作失败");return result.data as T; }

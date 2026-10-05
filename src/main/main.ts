@@ -154,19 +154,22 @@ function registerIpc(
   };
   const sendChunk = (event: LlmStreamEvent) => mainWindow?.webContents.send("llm:chunk", event);
   const sendDone = (ok: boolean, message?: string) => mainWindow?.webContents.send("llm:done", { ok, message } satisfies LlmDoneEvent);
-  // LLM 连接测试 = 发一条最小对话验证 Key + 模型名 + 端点全链路；返回时延与错误详情。
+  // LLM 连接测试（cc-switch 模式）：拉模型列表验证连通性——不发对话（不花钱），
+  // 不受对话端点路径差异影响；/models 不通的服务商回退发一条最小对话。
   handle("llm:test", async () => {
     const service = await rebuildLlm();
     const start = Date.now();
-    let streamed = "";
+    const settings = await settingsStore.get();
     try {
-      await service.chat(
-        [{ role: "user", content: "回复一个字：好" }],
-        false,
-        (event) => { streamed += event.delta; }
-      );
+      const models = await service.listModels();
+      if (models.ok) {
+        return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: settings.llm.model }, message: `连接成功（${Date.now() - start}ms），上游返回 ${models.models.length} 个模型。` };
+      }
+      // /models 不支持：回退发一条最小对话验证全链路（Key+模型名+端点）。
+      let streamed = "";
+      await service.chat([{ role: "user", content: "回复一个字：好" }], false, (event) => { streamed += event.delta; });
       if (!streamed.trim()) throw new Error("服务商未返回内容，请检查模型名称。");
-      return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: (await settingsStore.get()).llm.model }, message: `连接成功，模型已回复（${Date.now() - start}ms）。` };
+      return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: settings.llm.model }, message: `连接成功，模型已回复（${Date.now() - start}ms；该服务商不支持模型列表，走的对话验证）。` };
     } catch (error) {
       return { ok: false, label: "游乐场 LLM", latencyMs: Date.now() - start, details: {}, message: error instanceof Error ? error.message : "连接失败" };
     }

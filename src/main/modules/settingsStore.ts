@@ -14,7 +14,8 @@ const defaultSettings = (): AppSettings => ({
     provider: "minimax",
     baseUrl: "https://api.minimax.io/v1",
     model: "MiniMax-Text-01",
-    systemPrompt: ""
+    systemPrompt: "",
+    chatPath: "/text/chatcompletion_v2"
   },
   searchApi: {
     baseUrl: ""

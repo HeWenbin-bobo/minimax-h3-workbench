@@ -149,6 +149,11 @@ export class GenerationOrchestrator {
 }
 
 function validateRequest(request: GenerationRequest): void {
+  if (request.backend === "rb") {
+    // RB 预设自带时长约束（easy_15/30 固定，flashvsr 只收视频）；prompt 仅 flashvsr 不需要。
+    if (request.preset !== "flashvsr_upscale" && !request.prompt?.trim()) throw new Error("请输入视频描述。");
+    return;
+  }
   if (!request.prompt?.trim()) throw new Error("请输入视频描述。");
   if (request.duration < 4 || request.duration > 15) throw new Error("视频时长必须在 4–15 秒之间。");
   if (request.mode === "image" && !request.sourceImagePath && !request.firstFramePath) {

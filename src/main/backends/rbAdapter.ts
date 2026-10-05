@@ -102,9 +102,13 @@ export class RbAdapter implements GenerationAdapter {
     };
   }
 
-  // 站点无取消端点；云端任务会跑完扣次，本地只停止轮询（与 MiniMax 云后端现状一致）。
-  async cancel(_providerTaskId?: string): Promise<void> {
-    return;
+  // 官网有取消端点（/api/portal/jobs/{id}/cancel，v1 镜像同路径）；失败静默——任务可能已完成。
+  async cancel(providerTaskId?: string): Promise<void> {
+    if (!providerTaskId) return;
+    await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(providerTaskId)}/cancel`, {
+      method: "POST",
+      headers: this.headers()
+    }, 15_000, undefined, 0).catch(() => undefined);
   }
 
   private async uploadRefs(
@@ -159,19 +163,7 @@ export class RbAdapter implements GenerationAdapter {
     refs: { images: string[]; videos: string[] },
     signal?: AbortSignal
   ): Promise<string> {
-    const hasFirstLast = Boolean(request.firstFramePath && request.lastFramePath);
-    const preset = hasFirstLast ? "tail_frame" : "reference";
-    const body: Record<string, unknown> = {
-      preset,
-      prompt: request.prompt
-    };
-    if (refs.images.length > 0) body.images = refs.images;
-    if (refs.videos.length > 0) body.ref_videos = refs.videos;
-    if (request.mode === "text" || request.mode === "image") {
-      body.width = request.width;
-      body.height = request.height;
-      body.seconds = request.duration;
-    }
+    const body = this.buildJobBody(request, refs);
     // retries=0：提交失败若因网络超时，无法确认服务端是否已建任务，重试可能重复扣次，宁可让用户重试。
     const response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs`, {
       method: "POST",
@@ -188,6 +180,40 @@ export class RbAdapter implements GenerationAdapter {
       throw new Error(`瞬映 RB 提交失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
     }
     return payload.id || payload.job_id || "";
+  }
+
+  // 按官网预设组装 JobBody（预设约束来自 rb.coolhs.com 前端 bundle 的静态清单）：
+  // - reference: ≤8 图 + 参考视频，时长 4/6/8s，宽高可传
+  // - tail_frame: ≤2 图（首+尾），时长 4/6/8s
+  // - easy_15 / easy_30: 固定时长，画布 1344×768，不接受宽高
+  // - flashvsr_upscale: 只收源视频，无 prompt
+  // 未指定 preset 时沿用旧行为：有首尾帧→tail_frame，否则 reference。
+  buildJobBody(
+    request: GenerationRequest,
+    refs: { images: string[]; videos: string[] }
+  ): Record<string, unknown> {
+    const preset = request.preset || (request.firstFramePath && request.lastFramePath ? "tail_frame" : "reference");
+    const body: Record<string, unknown> = { preset };
+    if (preset === "flashvsr_upscale") {
+      if (!request.sourceVideoPath) throw new Error("视频变清晰模式必须选择源视频。");
+      if (refs.videos.length > 0) body.video = refs.videos[0];
+      return body;
+    }
+    body.prompt = request.prompt;
+    if (refs.images.length > 0) body.images = refs.images;
+    if (refs.videos.length > 0) body.ref_videos = refs.videos;
+    if (preset === "easy_15" || preset === "easy_30") {
+      body.width = 1344;
+      body.height = 768;
+      body.seconds = preset === "easy_15" ? 15 : 30;
+    } else {
+      body.width = request.width;
+      body.height = request.height;
+      body.seconds = request.duration;
+      if (request.interpolate) body.interpolate = true;
+      if (request.samplerSteps) body.sampler_steps = request.samplerSteps;
+    }
+    return body;
   }
 
   private async wait(

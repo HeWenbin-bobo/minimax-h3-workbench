@@ -89,6 +89,12 @@ export interface GenerationRequest {
   lastFramePath?: string;
   sourceImagePath?: string;
   sourceVideoPath?: string;
+  /** RB 后端专用：官网预设（reference/tail_frame/easy_15/easy_30/flashvsr_upscale）。 */
+  preset?: string;
+  /** RB 后端专用：是否补帧（仅 reference/tail_frame 支持）。 */
+  interpolate?: boolean;
+  /** RB 后端专用：采样步数（reference/tail_frame 可选 8/20）。 */
+  samplerSteps?: number;
 }
 
 export interface GenerationTask {

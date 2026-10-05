@@ -146,7 +146,6 @@ function registerIpc(
       apiKey: await settingsStore.getSecret("llmApiKey"),
       model: settings.llm.model,
       systemPrompt: settings.llm.systemPrompt,
-      chatPath: settings.llm.chatPath || undefined,
       searchBaseUrl: settings.searchApi.baseUrl || undefined,
       searchApiKey: await settingsStore.getSecret("searchApiKey")
     });

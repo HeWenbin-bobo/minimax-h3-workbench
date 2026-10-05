@@ -7,8 +7,6 @@ export interface LlmServiceOptions {
   systemPrompt: string;
   searchBaseUrl?: string;
   searchApiKey?: string;
-  /** 对话端点路径，默认 /chat/completions（MiniMax 官方为 /text/chatcompletion_v2）。 */
-  chatPath?: string;
 }
 
 export type ChunkSender = (event: LlmStreamEvent) => void;
@@ -39,7 +37,7 @@ export class LlmService {
     const payload = await this.buildPayload(messages, webSearch);
     this.controller = new AbortController();
     try {
-      const response = await fetch(`${this.baseUrl}${this.options.chatPath || "/chat/completions"}`, {
+      const response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -151,6 +149,12 @@ export class LlmService {
     }
     return payload;
   }
+}
+
+// 对话端点按域名运行时推导：MiniMax 官方域名走其私有端点，其余（中转/自定义）一律标准 OpenAI 路径。
+// 不存储在设置里——彻底避免改 baseUrl 后残留旧端点的脏状态。
+export function resolveChatPath(baseUrl: string): string {
+  return /api\.minimax\.io/i.test(baseUrl) ? "/text/chatcompletion_v2" : "/chat/completions";
 }
 
 // 解析 SSE 流：按行拆 data: 载荷，提取 choices[0].delta.content；残行跨 chunk 缓存。

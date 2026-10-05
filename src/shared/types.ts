@@ -23,15 +23,13 @@ export interface AppSettings {
   rbBaseUrl: string;
   defaultBackend: BackendKind;
   minimaxBaseUrl: string;
-  /** 游乐场 LLM 配置：OpenAI 兼容接入（预设提供商或自定义）。 */
+  /** 游乐场 LLM 配置：OpenAI 兼容接入（预设提供商或自定义）。对话端点不存储，运行时按域名推导。 */
   llm: {
     /** 预设提供商 id 或 "custom"。 */
     provider: string;
     baseUrl: string;
     model: string;
     systemPrompt: string;
-    /** 对话端点路径（默认 /chat/completions；MiniMax 官方为 /text/chatcompletion_v2）。 */
-    chatPath?: string;
   };
   /** 游乐场可选联网搜索（OpenAI 兼容搜索 API，如博查/Tavily 转接）。 */
   searchApi: {
@@ -50,14 +48,14 @@ export interface AppSettings {
   };
 }
 
-/** LLM 提供商预设（OpenAI 兼容）。 */
+/** LLM 提供商预设（OpenAI 兼容）。对话端点由主进程按域名推导，预设只提供地址与默认模型。 */
 export const LLM_PROVIDERS = [
-  { id: "minimax", label: "MiniMax", baseUrl: "https://api.minimax.io/v1", model: "MiniMax-Text-01", chatPath: "/text/chatcompletion_v2" },
-  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", chatPath: "" },
-  { id: "zhipu", label: "智谱 GLM", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash", chatPath: "" },
-  { id: "moonshot", label: "月之暗面 Kimi", baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k", chatPath: "" },
-  { id: "ollama", label: "Ollama（本机）", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5", chatPath: "" },
-  { id: "custom", label: "自定义（OpenAI 兼容）", baseUrl: "", model: "", chatPath: "" }
+  { id: "minimax", label: "MiniMax", baseUrl: "https://api.minimax.io/v1", model: "MiniMax-Text-01" },
+  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  { id: "zhipu", label: "智谱 GLM", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
+  { id: "moonshot", label: "月之暗面 Kimi", baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
+  { id: "ollama", label: "Ollama（本机）", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5" },
+  { id: "custom", label: "自定义（OpenAI 兼容）", baseUrl: "", model: "" }
 ] as const;
 
 export interface GpuInfo {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -228,7 +228,11 @@ function registerIpc(
     const service = llm ?? await rebuildLlm();
     void service.chat(messages, webSearch, sendChunk)
       .then(() => sendDone(true))
-      .catch((error: unknown) => sendDone(false, error instanceof Error ? error.message : "对话失败"));
+      .catch((error: unknown) => {
+        // 用户主动停止（abort）不算错误：正常收尾，不显示红色报错。
+        const aborted = error instanceof DOMException && error.name === "AbortError";
+        sendDone(aborted, aborted ? undefined : error instanceof Error ? error.message : "对话失败");
+      });
     return true;
   });
   handle("llm:abort", async () => {
@@ -239,11 +243,16 @@ function registerIpc(
     if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
     const extension = path.extname(filePath).toLowerCase();
     const name = path.basename(filePath);
+    // 附件大小上限：图片 15MB、文本 2MB——base64 进内存且随 IPC 传输，超大文件会卡死渲染端。
+    const info = await stat(filePath).catch(() => undefined);
+    if (!info?.isFile()) throw new Error("附件不存在或不是文件。");
     if ([".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(extension)) {
+      if (info.size > 15 * 1024 * 1024) throw new Error("图片附件超过 15MB 上限，请压缩后再上传。");
       const mime = extension === ".png" ? "image/png" : extension === ".webp" ? "image/webp" : extension === ".gif" ? "image/gif" : "image/jpeg";
       return { kind: "image", name, dataUrl: `data:${mime};base64,${(await readFile(filePath)).toString("base64")}` };
     }
     if ([".txt", ".md", ".json", ".csv", ".srt", ".vtt", ".log"].includes(extension)) {
+      if (info.size > 2 * 1024 * 1024) throw new Error("文本附件超过 2MB 上限，请只粘贴相关片段。");
       return { kind: "text", name, text: (await readFile(filePath, "utf8")).slice(0, 100_000) };
     }
     return { kind: "other", name };

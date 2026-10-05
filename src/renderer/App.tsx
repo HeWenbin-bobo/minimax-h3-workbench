@@ -304,17 +304,24 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [showVideoForm, setShowVideoForm] = useState(false);
   const [videoRequest, setVideoRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
   const streamBuffer = useRef("");
+  const streamingSessionId = useRef("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const searchReady = Boolean(settings.searchApi.baseUrl);
 
   useEffect(() => { localStorage.setItem(pgSessionsKey, JSON.stringify(sessions.slice(0, 50))); }, [sessions]);
   useEffect(() => {
+    // 流式事件只写入发起本轮对话的会话——期间切换会话不会污染其他会话的消息。
     const offChunk = window.h3.onLlmChunk((event: LlmStreamEvent) => {
+      if (!streamingSessionId.current) return;
       streamBuffer.current += event.delta;
-      setSessions((all) => patchLast(all, activeIdRef.current, (msg) => ({ ...msg, content: streamBuffer.current })));
+      const targetId = streamingSessionId.current;
+      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, content: streamBuffer.current })));
     });
     const offDone = window.h3.onLlmDone((event) => {
-      setSessions((all) => patchLast(all, activeIdRef.current, (msg) => ({ ...msg, streaming: false, error: !event.ok && Boolean(event.message) })));
+      const targetId = streamingSessionId.current;
+      streamingSessionId.current = "";
+      if (!targetId) return;
+      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, streaming: false, error: !event.ok && Boolean(event.message) })));
       streamBuffer.current = "";
       setGenerating(false);
       if (!event.ok && event.message) onError(new Error(event.message));
@@ -364,7 +371,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: "", streaming: true };
     const history: ChatMessage[] = [...(session.messages).filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })), { role: "user", content: userMsg.content, images: userMsg.images }];
     setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, title: s.messages.length === 0 && text ? text.slice(0, 20) : s.title, messages: [...s.messages, userMsg, assistantMsg] } : s));
-    setInput(""); setAttachments([]); setGenerating(true); streamBuffer.current = "";
+    setInput(""); setAttachments([]); setGenerating(true); streamBuffer.current = ""; streamingSessionId.current = session.id;
     const result = await window.h3.chatLlm(history, webSearch);
     if (!result.ok) {
       setGenerating(false);

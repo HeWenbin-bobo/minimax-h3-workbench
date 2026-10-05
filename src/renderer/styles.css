@@ -303,8 +303,10 @@ button { cursor: pointer; }
 .pg-msg.user { align-self: flex-end; }
 .pg-msg.assistant { align-self: flex-start; }
 .pg-msg.error .pg-bubble { background: #fff1f1; border-color: #f3c2c2; color: var(--danger); }
-.pg-bubble { background: #f5f6f8; border: 1px solid var(--line); border-radius: 14px; padding: 11px 14px; font-size: 12px; line-height: 1.75; word-break: break-word; }
+.pg-bubble { background: #f5f6f8; border: 1px solid var(--line); border-radius: 14px; padding: 11px 14px; font-size: 12px; line-height: 1.75; word-break: break-word; color: var(--ink); }
 .pg-msg.user .pg-bubble { background: var(--brand-gradient); color: #fff; border: 0; }
+.pg-msg.user .pg-bubble code { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.pg-msg.user .pg-bubble a { color: #fff; }
 .pg-msg.assistant .pg-bubble p { margin: 0 0 8px; }
 .pg-msg.assistant .pg-bubble p:last-child { margin-bottom: 0; }
 .pg-msg.assistant .pg-bubble ul, .pg-msg.assistant .pg-bubble ol { margin: 4px 0 8px; padding-left: 20px; }

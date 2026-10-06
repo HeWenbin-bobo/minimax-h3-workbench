@@ -68,7 +68,8 @@ export class ComfyAdapter implements GenerationAdapter {
     request: GenerationRequest,
     task: GenerationTask,
     onProgress: (status: TaskStatus, progress: number, message?: string) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onProviderId?: (providerTaskId: string) => void
   ): Promise<Pick<GenerationTask, "providerTaskId" | "outputPath" | "outputUrl" | "usage">> {
     await this.assertModelsReady(request.mode, signal);
     onProgress("uploading", 5, "正在准备参考素材");
@@ -83,6 +84,7 @@ export class ComfyAdapter implements GenerationAdapter {
     if (!response.ok) throw new Error(`ComfyUI 提交失败：${response.status} ${await response.text()}`);
     const submitted = (await response.json()) as { prompt_id?: string; error?: { message?: string } };
     if (!submitted.prompt_id) throw new Error(submitted.error?.message || "ComfyUI 未返回 prompt_id");
+    onProviderId?.(submitted.prompt_id);
     onProgress("running", 15, "ComfyUI 正在生成");
 
     const output = await this.waitForOutput(submitted.prompt_id, onProgress, signal);

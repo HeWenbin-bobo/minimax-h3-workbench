@@ -82,13 +82,15 @@ export class RbAdapter implements GenerationAdapter {
     request: GenerationRequest,
     task: GenerationTask,
     onProgress: (status: TaskStatus, progress: number, message?: string) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onProviderId?: (providerTaskId: string) => void
   ): Promise<Pick<GenerationTask, "providerTaskId" | "outputPath" | "outputUrl" | "usage">> {
     if (!this.options.cardCode) throw new Error("请先在连接设置中保存瞬映卡密。");
     onProgress("uploading", 5, "正在上传参考素材");
     const refs = await this.uploadRefs(request, signal);
     onProgress("queued", 10, "正在提交瞬映 RB 任务");
     const jobId = await this.submitJob(request, refs, signal);
+    onProviderId?.(jobId);
     onProgress("running", 15, "瞬映 RB 正在生成");
     const result = await this.wait(jobId, onProgress, signal);
     onProgress("downloading", 95, "正在保存生成结果");

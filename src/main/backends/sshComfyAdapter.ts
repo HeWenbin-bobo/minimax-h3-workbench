@@ -51,13 +51,14 @@ export class SshComfyAdapter implements GenerationAdapter {
     request: GenerationRequest,
     task: GenerationTask,
     onProgress: (status: TaskStatus, progress: number, message?: string) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onProviderId?: (providerTaskId: string) => void
   ): Promise<Pick<GenerationTask, "providerTaskId" | "outputPath" | "outputUrl" | "usage">> {
     if (!this.delegate) {
       const tunnel = await this.tunnel.start();
       this.delegate = new ComfyAdapter({ baseUrl: tunnel.url, outputDirectory: this.settings.outputDirectory });
     }
-    return this.delegate.generate(request, task, onProgress, signal);
+    return this.delegate.generate(request, task, onProgress, signal, onProviderId);
   }
 
   async cancel(providerTaskId: string): Promise<void> {

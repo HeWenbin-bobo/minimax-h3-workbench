@@ -60,7 +60,8 @@ export class MiniMaxAdapter implements GenerationAdapter {
     request: GenerationRequest,
     task: GenerationTask,
     onProgress: (status: TaskStatus, progress: number, message?: string) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onProviderId?: (providerTaskId: string) => void
   ): Promise<Pick<GenerationTask, "providerTaskId" | "outputPath" | "outputUrl" | "usage">> {
     if (!this.options.apiKey) throw new Error("请先在连接设置中保存 MiniMax API Key。 ");
     onProgress("uploading", 5, "正在编码参考素材");
@@ -83,6 +84,7 @@ export class MiniMaxAdapter implements GenerationAdapter {
     });
     const created = (await response.json()) as { task_id?: string; error?: { type?: string; message?: string } };
     if (!response.ok || !created.task_id) throw new Error(created.error?.message || `MiniMax 提交失败：${response.status}`);
+    onProviderId?.(created.task_id); // 提交成功立即回传：中途取消时云端任务也能被终止（按次计费）。
     const result = await this.wait(created.task_id, onProgress, signal);
     onProgress("downloading", 95, "正在保存云端结果");
     const outputPath = await this.download(result.url, task.id, signal);

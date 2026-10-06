@@ -117,7 +117,12 @@ export class GenerationOrchestrator {
         request,
         task,
         (status, progress, message) => this.update(task, status, progress, message),
-        controller.signal
+        controller.signal,
+        (providerTaskId) => {
+          // 云后端提交成功即回传 ID：中途取消时 cancel()/abort 监听才能通知云端终止（云任务按次计费）。
+          task.providerTaskId = providerTaskId;
+          void this.store.save(this.tasks);
+        }
       );
       Object.assign(task, result);
       // cancel() 会在另一个调用栈把 status 改写为 cancelled；generate 若仍返回则不覆盖终态。

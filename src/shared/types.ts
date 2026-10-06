@@ -158,7 +158,9 @@ export interface GenerationAdapter {
     request: GenerationRequest,
     task: GenerationTask,
     onProgress: (status: TaskStatus, progress: number, message?: string) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /** 可选：云后端提交成功后立即回传 providerTaskId，让 orchestrator 在任务运行中也能通知云端取消（按次计费）。 */
+    onProviderId?: (providerTaskId: string) => void
   ): Promise<Pick<GenerationTask, "providerTaskId" | "outputPath" | "outputUrl" | "usage">>;
   cancel?(providerTaskId: string): Promise<void>;
 }

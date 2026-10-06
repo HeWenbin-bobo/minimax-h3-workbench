@@ -321,7 +321,13 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       const targetId = streamingSessionId.current;
       streamingSessionId.current = "";
       if (!targetId) return;
-      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, streaming: false, error: !event.ok && Boolean(event.message) })));
+      setSessions((all) => patchLast(all, targetId, (msg) => ({
+        ...msg,
+        streaming: false,
+        error: !event.ok && Boolean(event.message),
+        // 失败且气泡为空时写入错误文案——空回复永远是"显示出来的错误"，绝不静默。
+        content: !event.ok && event.message && !msg.content ? `请求失败：${event.message}` : msg.content
+      })));
       streamBuffer.current = "";
       setGenerating(false);
       if (!event.ok && event.message) onError(new Error(event.message));

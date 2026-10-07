@@ -1,5 +1,8 @@
 // CDP E2E 驱动：启动 Electron（remote debugging）→ 连接 → 模拟人类操作 → 断言
 import { spawn } from "node:child_process";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 const ELECTRON = process.platform === "win32"
@@ -8,9 +11,11 @@ const ELECTRON = process.platform === "win32"
 const PORT = 9222;
 
 export async function launchApp(extraEnv = {}) {
+  // 每次启动用独立临时 userData：settings/secrets/tasks/localStorage 全隔离，测试互不污染。
+  const userData = await mkdtemp(path.join(tmpdir(), "h3-e2e-"));
   const child = spawn(ELECTRON, [".", `--remote-debugging-port=${PORT}`], {
     cwd: process.cwd(),
-    env: { ...process.env, ...extraEnv },
+    env: { ...process.env, H3_USER_DATA: userData, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"]
   });
   child.stderr.on("data", () => {});

@@ -5,13 +5,13 @@ import { withApp } from "./driver.mjs";
 const results = [];
 const check = (name, ok, detail = "") => { results.push({ name, ok, detail }); console.log(`${ok ? "PASS" : "FAIL"} | ${name}${detail ? " | " + detail : ""}`); };
 
-// RB mock（永不完成，供取消）
+// RB mock（永不完成，供取消）——响应格式用官网真实包装 {job:{...}}（bundle 实证），验证解包逻辑
 let rbCancelled = false;
 const rbServer = createServer((req, res) => {
   const url = req.url || "";
   if (req.method === "POST" && url.endsWith("/api/v1/jobs")) {
     req.on("data", () => {});
-    req.on("end", () => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ id: "rb-cancel-job" })); });
+    req.on("end", () => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ job: { id: "rb-cancel-job", status: "queued" } })); });
     return;
   }
   if (req.method === "POST" && url.includes("/cancel")) {
@@ -22,7 +22,7 @@ const rbServer = createServer((req, res) => {
   }
   if (req.method === "GET" && url.includes("/api/v1/jobs/rb-cancel-job")) {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "running" }));
+    res.end(JSON.stringify({ job: { id: "rb-cancel-job", status: "running" } }));
     return;
   }
   res.writeHead(404); res.end();
@@ -103,6 +103,31 @@ await withApp({}, async (cdp) => {
     try { const r = await window.h3.checkForUpdates(); return JSON.stringify(r); } catch (e) { return "ERR:" + e.message; }
   })()`);
   check("D-更新检查返回结果", update.startsWith("{") && (update.includes("latestVersion") || update.includes("ok")), update.slice(0, 120));
+
+  // ===== Part E: 游乐场滚动约束 + 工作台项目化 =====
+  await cdp.eval(`document.querySelector('[data-page="playground"]').click()`);
+  await new Promise(r => setTimeout(r, 400));
+  const scrollCheck = await cdp.eval(`(() => {
+    const body = document.scrollingElement;
+    const pg = document.querySelector(".playground-layout");
+    const pgMain = document.querySelector(".pg-main");
+    const pgMessages = document.querySelector(".pg-messages");
+    return JSON.stringify({
+      bodyScrollable: body.scrollHeight > body.clientHeight,
+      pgHeight: pg ? Math.round(pg.getBoundingClientRect().height) : 0,
+      viewport: window.innerHeight,
+      pgMainScrolls: pgMain ? pgMain.scrollHeight <= pgMain.clientHeight : null,
+      msgScrolls: pgMessages ? pgMessages.scrollHeight >= pgMessages.clientHeight : null
+    });
+  })()`);
+  const scroll = JSON.parse(scrollCheck);
+  check("E-游乐场页面本身不滚动(body)", !scroll.bodyScrollable, `bodyScrollable=${scroll.bodyScrollable}`);
+  check("E-聊天区高度贴合视口", scroll.pgHeight > 300 && scroll.pgHeight <= scroll.viewport, `pg=${scroll.pgHeight} viewport=${scroll.viewport}`);
+
+  await cdp.eval(`document.querySelector('[data-page="studio"]').click()`);
+  await new Promise(r => setTimeout(r, 400));
+  check("E-项目条存在(有历史任务时)", await cdp.eval(`document.querySelector('.project-tabs') !== null || document.querySelectorAll('.task-card').length === 0`));
+  check("E-项目tab显示进度", await cdp.eval(`(() => { const tab = document.querySelector('.project-tab'); return !tab || Boolean(tab.querySelector('strong') && tab.querySelector('small')); })()`));
 });
 
 rbServer.close();

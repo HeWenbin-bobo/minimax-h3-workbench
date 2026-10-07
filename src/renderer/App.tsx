@@ -39,6 +39,24 @@ export function App() {
     return () => { offTask(); };
   }, []);
 
+  // 生成完成/失败系统通知：应用最小化或在后台时用户也能第一时间知道结果。
+  const tasksRef = useRef<GenerationTask[]>([]);
+  useEffect(() => {
+    const prev = tasksRef.current;
+    for (const task of tasks) {
+      const before = prev.find((t) => t.id === task.id);
+      const entered = (status: GenerationTask["status"]) => before?.status !== status && task.status === status;
+      if (entered("succeeded")) {
+        const notification = new Notification("MiniMax H3", { body: `视频生成完成：${task.prompt.slice(0, 40)}` });
+        notification.onclick = () => window.focus();
+      } else if (entered("failed")) {
+        const notification = new Notification("MiniMax H3", { body: `生成失败：${task.prompt.slice(0, 40)}（${task.message?.slice(0, 60) || "未知错误"}）` });
+        notification.onclick = () => window.focus();
+      }
+    }
+    tasksRef.current = tasks;
+  }, [tasks]);
+
   useEffect(() => {
     if (!report) return;
     const timer = window.setTimeout(() => document.querySelector(".runtime-estimate")?.scrollIntoView({ behavior: "smooth", block: "center" }), 120);
@@ -110,14 +128,50 @@ function ReadyPage({ report, busy, onDetect, onNavigate }: { report?: Environmen
 function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void }) {
   const [request, setRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
   const [submitting, setSubmitting] = useState(false);
+  // 项目化：按 parentId 分组展示历次提交（最新在前），提交后自动切到新项目；支持多项目并行生成。
+  const projects = useMemo(() => {
+    const groups = new Map<string, GenerationTask[]>();
+    for (const task of tasks) {
+      const key = task.parentId || task.id;
+      const group = groups.get(key);
+      if (group) group.push(task); else groups.set(key, [task]);
+    }
+    return Array.from(groups.values()).sort((a, b) => b[0].createdAt.localeCompare(a[0].createdAt));
+  }, [tasks]);
+  const [activeProjectId, setActiveProjectId] = useState<string>();
+  const activeProject = projects.find((group) => (group[0].parentId || group[0].id) === activeProjectId) ?? projects[0];
   const isRb = request.backend === "rb";
   const rbPreset = request.preset || (request.firstFramePath && request.lastFramePath ? "tail_frame" : "reference");
   const setRbPreset = (preset: string) => setRequest({ ...request, preset, ...(preset === "easy_15" ? { duration: 15 } : preset === "easy_30" ? { duration: 30 } : { duration: request.duration > 8 ? 8 : request.duration }) });
-  const currentTasks = useMemo(() => { const parent = tasks[0]?.parentId; const group = parent ? tasks.filter((task) => task.parentId === parent) : []; return Array.from({ length: Math.max(1, Math.min(4, request.count)) }, (_, i) => group.find((task) => task.index === i)); }, [tasks, request.count]);
+  // 当前项目的结果格子：格子数跟随项目实际任务数（无项目时回落到表单选择），按 index 对齐。
+  const shownCount = Math.max(1, Math.min(4, activeProject?.length || request.count));
+  const currentTasks = useMemo(() => {
+    const group = activeProject ?? [];
+    return Array.from({ length: shownCount }, (_, i) => group.find((task) => task.index === i));
+  }, [activeProject, shownCount]);
   async function choose(kind: "image" | "video", field: keyof GenerationRequest) { const response = await window.h3.selectFile(kind); if (response.data) setRequest((r) => ({ ...r, [field]: response.data })); }
-  async function submit() { setSubmitting(true); const response = await window.h3.submitGeneration(request); setSubmitting(false); if (!response.ok) onError(response.message); else onNotice(`已创建 ${request.count} 个生成任务`); }
+  async function submit() {
+    setSubmitting(true);
+    const response = await window.h3.submitGeneration(request);
+    setSubmitting(false);
+    if (!response.ok) { onError(response.message); return; }
+    // 提交成功：切到新项目（submitGeneration 创建的任务组排在最前）。
+    if (response.data?.[0]) setActiveProjectId(response.data[0].parentId);
+    onNotice(`已创建 ${request.count} 个生成任务，可继续提交新任务并行生成`);
+  }
   const rbDurationOptions = rbPreset === "reference" || rbPreset === "tail_frame" ? [4, 6, 8] : rbPreset === "easy_15" ? [15] : rbPreset === "easy_30" ? [30] : [];
   return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div>
+    {projects.length > 0 && <div className="project-tabs">{projects.slice(0, 12).map((group) => {
+      const key = group[0].parentId || group[0].id;
+      const running = group.some((t) => !["succeeded", "failed", "cancelled", "interrupted"].includes(t.status));
+      const done = group.filter((t) => t.status === "succeeded").length;
+      const active = activeProject === group;
+      return <button key={key} className={`project-tab${active ? " active" : ""}`} onClick={() => setActiveProjectId(key)}>
+        <strong>{group[0].prompt.slice(0, 18) || "未命名项目"}</strong>
+        <small>{running ? "生成中…" : `${done}/${group.length} 完成`}</small>
+        {running && <i className="dot" />}
+      </button>;
+    })}</div>}
     <div className="studio-layout"><div className="control-panel">
       {!isRb && <div className="mode-tabs">{(["text", "image", "video"] as GenerationMode[]).map((mode) => <button key={mode} className={request.mode === mode ? "active" : ""} onClick={() => setRequest({ ...request, mode })}>{mode === "text" ? "文生视频" : mode === "image" ? "图生视频" : "视频生视频"}</button>)}</div>}
       {isRb && <div className="mode-tabs">{[["reference", "贴合参考图"], ["tail_frame", "首尾过渡"], ["easy_15", "15 秒"], ["easy_30", "30 秒"], ["flashvsr_upscale", "视频变清晰"]].map(([value, label]) => <button key={value} className={rbPreset === value ? "active" : ""} onClick={() => setRbPreset(value)}>{label}</button>)}</div>}
@@ -142,7 +196,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       </div>
       <label>基础随机种子<input type="number" value={request.baseSeed} onChange={(e) => setRequest({ ...request, baseSeed: Number(e.target.value) })}/></label>
       <div className="submit-area"><div>{request.backend === "minimax" ? <><span>云端估算</span><strong>约 ${estimateCloudCost(request.resolution, request.duration, request.count).toFixed(2)} / {request.count} 条</strong></> : request.backend === "rb" ? <><span>云端估算</span><strong>卡密计费 · {request.count} 条消耗 {request.count} 次</strong></> : <><span>本地生成</span><strong>不产生 API 费用</strong></>}</div><button className="primary" disabled={submitting} onClick={submit}>{submitting ? "提交中…" : `生成 ${request.count} 个结果`}</button></div>
-    </div><div className={`result-grid${request.count === 1 ? " single" : ""}`}>{currentTasks.map((task, index) => <TaskCard key={task?.id || index} task={task} index={index} onError={onError} />)}</div></div>
+    </div><div className={`result-grid${shownCount === 1 ? " single" : ""}`}>{currentTasks.map((task, index) => <TaskCard key={task?.id || index} task={task} index={index} onError={onError} />)}</div></div>
   </section>;
 }
 

@@ -33,6 +33,8 @@ let adapters: AdapterRegistry | undefined;
 let settingsCache: AppSettings | undefined; // 模块级：h3media/showItem 白名单与 registerIpc 共享
 
 app.whenReady().then(async () => {
+  // E2E/多实例隔离：H3_USER_DATA 指定独立 userData 目录（settings/secrets/tasks 全随隔离）。
+  if (process.env.H3_USER_DATA) app.setPath("userData", path.resolve(process.env.H3_USER_DATA));
   const settingsStore = new SettingsStore();
   void settingsStore.get().then((s) => { settingsCache = s; });
   // h3media 只允许读取输出目录内的生成结果，防止渲染进程借协议读任意本地文件。

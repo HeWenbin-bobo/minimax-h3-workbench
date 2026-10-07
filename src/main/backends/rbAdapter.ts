@@ -173,15 +173,18 @@ export class RbAdapter implements GenerationAdapter {
       body: JSON.stringify(body)
     }, 30_000, signal, 0);
     const payload = (await response.json().catch(() => ({}))) as {
+      job?: { id?: string };
       id?: string;
       job_id?: string;
       error?: { message?: string };
       message?: string;
     };
-    if (!response.ok || !(payload.id || payload.job_id)) {
+    // 官网 API 返回 {job:{id,...}} 包装（官网 bundle 实证）；兼容老网关平铺 id/job_id。
+    const jobId = payload.job?.id || payload.id || payload.job_id;
+    if (!response.ok || !jobId) {
       throw new Error(`瞬映 RB 提交失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
     }
-    return payload.id || payload.job_id || "";
+    return jobId;
   }
 
   // 按官网预设组装 JobBody（预设约束来自 rb.coolhs.com 前端 bundle 的静态清单）：
@@ -232,7 +235,9 @@ export class RbAdapter implements GenerationAdapter {
       const response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}`, {
         headers: this.headers()
       }, 20_000, signal);
-      const payload = (await response.json().catch(() => ({}))) as {
+      // 官网 API 返回 {job:{...}} 包装（官网 bundle 实证）；兼容老网关平铺字段。
+      const raw = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      const payload = (raw.job ?? raw) as {
         status?: string;
         has_video?: boolean;
         hasVideo?: boolean;

@@ -52,4 +52,18 @@ describe("RbAdapter.buildJobBody", () => {
     expect(body.images).toBeUndefined();
     expect(() => adapter().buildJobBody({ ...base, preset: "flashvsr_upscale" }, { images: [], videos: [] })).toThrow("源视频");
   });
+
+  it("提交响应解包官网 {job:{id}} 包装：进入轮询而非误报提交失败", async () => {
+    const fetchMock = (async (url: string | URL) => {
+      const target = String(url);
+      if (target.endsWith("/api/v1/jobs")) {
+        return new Response(JSON.stringify({ job: { id: "job-9", status: "queued" } }), { status: 200 });
+      }
+      // 提交成功后进入轮询：返回 failed 以终止 generate，同时证明已越过提交阶段。
+      return new Response(JSON.stringify({ job: { id: "job-9", status: "failed", message: "内容审核未通过" } }), { status: 200 });
+    }) as typeof fetch;
+    globalThis.fetch = fetchMock;
+    const task = { id: "t1", seed: 1, prompt: base.prompt } as never;
+    await expect(adapter().generate(base, task, () => undefined)).rejects.toThrow("内容审核未通过");
+  });
 });

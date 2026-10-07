@@ -39,6 +39,13 @@ export function App() {
     return () => { offTask(); };
   }, []);
 
+  // 删除/恢复后同步渲染端任务列表：删掉的从本地 state 移除，恢复的重新并入。
+  useEffect(() => {
+    const onChanged = () => window.h3.listTasks().then((r) => { if (r.data) setTasks(r.data); }).catch(() => undefined);
+    window.addEventListener("h3-tasks-changed", onChanged);
+    return () => window.removeEventListener("h3-tasks-changed", onChanged);
+  }, []);
+
   // 生成完成/失败系统通知：应用最小化或在后台时用户也能第一时间知道结果。
   const tasksRef = useRef<GenerationTask[]>([]);
   useEffect(() => {
@@ -160,7 +167,17 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
     onNotice(`已创建 ${request.count} 个生成任务，可继续提交新任务并行生成`);
   }
   const rbDurationOptions = rbPreset === "reference" || rbPreset === "tail_frame" ? [4, 6, 8] : rbPreset === "easy_15" ? [15] : rbPreset === "easy_30" ? [30] : [];
-  return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div>
+  const [showTrash, setShowTrash] = useState(false);
+  async function deleteProject() {
+    if (!activeProject) return;
+    // 传任一真实任务 id，orchestrator 按 parentId 整组软删除。
+    const response = await window.h3.deleteTasks([activeProject[0].id]);
+    if (!response.ok) { onError(response.message); return; }
+    setActiveProjectId(undefined);
+    onNotice("已移入回收站，7 天内可恢复");
+    window.dispatchEvent(new Event("h3-tasks-changed"));
+  }
+  return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="page-title-actions"><button className="text-button" onClick={() => setShowTrash((v) => !v)}>🗑 回收站</button><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div></div>
     {projects.length > 0 && <div className="project-tabs">{projects.slice(0, 12).map((group) => {
       const key = group[0].parentId || group[0].id;
       const running = group.some((t) => !["succeeded", "failed", "cancelled", "interrupted"].includes(t.status));
@@ -172,6 +189,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
         {running && <i className="dot" />}
       </button>;
     })}</div>}
+    {showTrash && <TrashPanel tasks={tasks} onError={onError} onNotice={onNotice} />}
     <div className="studio-layout"><div className="control-panel">
       {!isRb && <div className="mode-tabs">{(["text", "image", "video"] as GenerationMode[]).map((mode) => <button key={mode} className={request.mode === mode ? "active" : ""} onClick={() => setRequest({ ...request, mode })}>{mode === "text" ? "文生视频" : mode === "image" ? "图生视频" : "视频生视频"}</button>)}</div>}
       {isRb && <div className="mode-tabs">{[["reference", "贴合参考图"], ["tail_frame", "首尾过渡"], ["easy_15", "15 秒"], ["easy_30", "30 秒"], ["flashvsr_upscale", "视频变清晰"]].map(([value, label]) => <button key={value} className={rbPreset === value ? "active" : ""} onClick={() => setRbPreset(value)}>{label}</button>)}</div>}
@@ -196,7 +214,42 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       </div>
       <label>基础随机种子<input type="number" value={request.baseSeed} onChange={(e) => setRequest({ ...request, baseSeed: Number(e.target.value) })}/></label>
       <div className="submit-area"><div>{request.backend === "minimax" ? <><span>云端估算</span><strong>约 ${estimateCloudCost(request.resolution, request.duration, request.count).toFixed(2)} / {request.count} 条</strong></> : request.backend === "rb" ? <><span>云端估算</span><strong>卡密计费 · {request.count} 条消耗 {request.count} 次</strong></> : <><span>本地生成</span><strong>不产生 API 费用</strong></>}</div><button className="primary" disabled={submitting} onClick={submit}>{submitting ? "提交中…" : `生成 ${request.count} 个结果`}</button></div>
-    </div><div className={`result-grid${shownCount === 1 ? " single" : ""}`}>{currentTasks.map((task, index) => <TaskCard key={task?.id || index} task={task} index={index} onError={onError} />)}</div></div>
+    </div><div className="result-pane"><div className="result-pane-head">{activeProject && <button className="text-button danger" onClick={deleteProject}>🗑 删除此项目</button>}</div><div className={`result-grid${shownCount === 1 ? " single" : ""}`}>{currentTasks.map((task, index) => <TaskCard key={task?.id || index} task={task} index={index} onError={onError} />)}</div></div></div>
+  </section>;
+}
+
+// 回收站面板：按项目分组展示已删除任务，支持恢复 / 彻底删除（含视频文件）。
+function TrashPanel({ tasks, onError, onNotice }: { tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void }) {
+  const [items, setItems] = useState<GenerationTask[]>([]);
+  const [loading, setLoading] = useState(true);
+  const retentionMs = 7 * 24 * 60 * 60 * 1_000;
+  const refresh = () => window.h3.listDeletedTasks().then((r) => { if (r.data) setItems(r.data); setLoading(false); }).catch(() => setLoading(false));
+  useEffect(() => { void refresh(); }, []);
+  const groups = new Map<string, GenerationTask[]>();
+  for (const task of items) {
+    const group = groups.get(task.parentId);
+    if (group) group.push(task); else groups.set(task.parentId, [task]);
+  }
+  const daysLeft = (iso: string) => Math.max(0, Math.ceil((retentionMs - (Date.now() - new Date(iso).getTime())) / 86_400_000));
+  const notifyChanged = () => window.dispatchEvent(new Event("h3-tasks-changed"));
+  async function restore(ids: string[]) { const r = await window.h3.restoreTasks(ids); if (!r.ok) { onError(r.message); return; } onNotice("已恢复"); notifyChanged(); void refresh(); }
+  async function purge(ids: string[]) { const r = await window.h3.purgeTasks(ids); if (!r.ok) { onError(r.message); return; } onNotice("已彻底删除（含视频文件）"); notifyChanged(); void refresh(); }
+  return <section className="trash-panel">
+    <header><strong>回收站</strong><small>项目删除后保留 7 天，到期自动清除（含视频文件）</small></header>
+    {loading && <p className="footnote">加载中…</p>}
+    {!loading && groups.size === 0 && <p className="footnote">回收站是空的。</p>}
+    {Array.from(groups.values()).map((group) => {
+      const ids = group.map((t) => t.id);
+      const deletedAt = group[0].deletedAt || group[0].updatedAt;
+      return <article key={group[0].parentId} className="trash-item">
+        <div><strong>{group[0].prompt.slice(0, 40) || "未命名项目"}</strong>
+          <small>{group.length} 条 · {daysLeft(deletedAt)} 天后自动清除</small></div>
+        <div className="trash-actions">
+          <button className="text-button" onClick={() => restore(ids)}>恢复</button>
+          <button className="text-button danger" onClick={() => purge(ids)}>彻底删除</button>
+        </div>
+      </article>;
+    })}
   </section>;
 }
 
@@ -468,7 +521,22 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     <div className="playground-layout">
       <aside className="pg-sessions">
         {sessions.length === 0 && <p className="footnote">还没有对话。点击右上角"新对话"开始。</p>}
-        {sessions.map((session) => <button key={session.id} className={session.id === activeId ? "pg-session active" : "pg-session"} onClick={() => setActiveId(session.id)}><strong>{session.title || "新对话"}</strong><small>{session.messages.length} 条消息</small></button>)}
+        {sessions.map((session) => <div key={session.id} className={session.id === activeId ? "pg-session active" : "pg-session"}>
+          <button className="pg-session-body" onClick={() => setActiveId(session.id)} title="双击重命名" onDoubleClick={() => {
+            const title = window.prompt("重命名会话", session.title || "新对话");
+            if (title && title.trim()) setSessions((all) => all.map((s) => s.id === session.id ? { ...s, title: title.trim().slice(0, 40) } : s));
+          }}>
+            <strong>{session.title || "新对话"}</strong><small>{session.messages.length} 条消息</small>
+          </button>
+          <button className="pg-session-delete" title="删除会话" onClick={() => {
+            if (!window.confirm(`删除会话「${session.title || "新对话"}」？删除后不可恢复。`)) return;
+            setSessions((all) => {
+              const next = all.filter((s) => s.id !== session.id);
+              if (session.id === activeId) setActiveId(next[0]?.id || "");
+              return next;
+            });
+          }}>×</button>
+        </div>)}
       </aside>
       <div className="pg-main">
         <div className="pg-messages">

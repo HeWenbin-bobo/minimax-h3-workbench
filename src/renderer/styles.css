@@ -190,6 +190,18 @@ button { cursor: pointer; }
 .backend-pill { background: #fff; border: 1px solid var(--line); border-radius: 30px; padding: 10px 15px; color: #6e7782; font-size: 11px; box-shadow: 0 6px 20px rgba(24, 30, 37, 0.04); }
 .backend-pill span { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px rgba(0, 180, 42, 0.1); margin-right: 8px; }
 .studio-layout { display: grid; grid-template-columns: minmax(330px, 390px) 1fr; gap: 18px; }
+.page-title-actions { display: flex; align-items: center; gap: 12px; }
+.result-pane { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.result-pane-head { display: flex; justify-content: flex-end; min-height: 20px; }
+.text-button.danger { color: var(--danger); }
+.trash-panel { border: 1px solid var(--line); background: #fff; border-radius: 14px; padding: 14px 16px; margin-bottom: 14px; display: grid; gap: 8px; box-shadow: var(--shadow); }
+.trash-panel header { display: flex; align-items: baseline; gap: 10px; }
+.trash-panel header strong { color: var(--ink); font-size: 12px; }
+.trash-panel header small { color: var(--muted); font-size: 10px; }
+.trash-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.trash-item strong { color: var(--ink); font-size: 11px; display: block; }
+.trash-item small { color: var(--muted); font-size: 9px; }
+.trash-actions { display: flex; gap: 10px; flex: none; }
 .project-tabs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 14px; flex: none; }
 .project-tab { position: relative; flex: none; max-width: 190px; border: 1px solid var(--line); background: #fff; border-radius: 12px; padding: 9px 30px 9px 13px; text-align: left; display: grid; gap: 2px; }
 .project-tab.active { border-color: #ff9b7c; background: #fff7f4; }
@@ -297,8 +309,6 @@ button { cursor: pointer; }
 .playground-layout { display: grid; grid-template-columns: 200px 1fr; gap: 14px; flex: 1; min-height: 0; }
 .pg-sessions { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
 .pg-session.active { border-color: #ff9b7c; background: #fff7f4; }
-.pg-session strong { color: var(--ink); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pg-session small { color: var(--muted); font-size: 9px; }
 .pg-main { display: flex; flex-direction: column; background: #fff; border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); overflow: hidden; }
 .pg-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
 .pg-empty { margin: auto; text-align: center; display: grid; gap: 8px; color: var(--muted); }
@@ -350,7 +360,13 @@ button { cursor: pointer; }
 .playground .page-title { margin-bottom: 16px; flex: none; }
 .playground-layout { display: grid; grid-template-columns: 200px 1fr; gap: 14px; flex: 1; min-height: 0; }
 .pg-sessions { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
-.pg-session { border: 1px solid var(--line); background: #fff; border-radius: 12px; padding: 12px 14px; text-align: left; display: grid; gap: 3px; flex: none; }
+.pg-session { position: relative; border: 1px solid var(--line); background: #fff; border-radius: 12px; padding: 0; text-align: left; overflow: hidden; flex: none; }
+.pg-session-body { display: grid; gap: 3px; padding: 12px 34px 12px 14px; width: 100%; background: transparent; border: 0; text-align: left; }
+.pg-session-body strong { color: var(--ink); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pg-session-body small { color: var(--muted); font-size: 9px; }
+.pg-session-delete { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 22px; height: 22px; border: 0; border-radius: 8px; background: transparent; color: var(--subtle); font-size: 14px; line-height: 1; display: grid; place-items: center; opacity: 0; transition: opacity 0.12s; }
+.pg-session:hover .pg-session-delete { opacity: 1; }
+.pg-session-delete:hover { background: #fff1f1; color: var(--danger); }
 
 @media (max-width: 1200px) {
   .page { padding-left: 30px; padding-right: 30px; }

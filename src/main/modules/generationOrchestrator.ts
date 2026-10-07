@@ -20,7 +20,78 @@ export class GenerationOrchestrator {
   }
 
   list(): GenerationTask[] {
-    return [...this.tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    // 回收站中的任务不进常规列表（渲染端经 tasks:listDeleted 单独获取）。
+    return [...this.tasks].filter((task) => !task.deletedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  // 回收站：软删除（运行中的先取消）→ 7 天内可恢复 → 到期彻底清除（含输出视频）。
+  static readonly RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+
+  async deleteTasks(taskIds: string[]): Promise<GenerationTask[]> {
+    const ids = new Set(taskIds);
+    const affected: GenerationTask[] = [];
+    for (const task of this.tasks) {
+      if (!ids.has(task.id) || task.deletedAt) continue;
+      // 整组语义：删任一路即删整组（UI 以项目为单位）。
+      const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
+      for (const sibling of siblings) {
+        if (sibling.deletedAt) continue;
+        sibling.deletedAt = new Date().toISOString();
+        if (!["succeeded", "failed", "cancelled", "interrupted"].includes(sibling.status)) {
+          sibling.message = "已删除（生成中止）";
+          await this.cancel(sibling.id).catch(() => undefined);
+        }
+        affected.push(sibling);
+      }
+    }
+    await this.store.save(this.tasks);
+    affected.forEach(this.listener);
+    return affected;
+  }
+
+  async restoreTasks(taskIds: string[]): Promise<GenerationTask[]> {
+    const ids = new Set(taskIds);
+    const affected: GenerationTask[] = [];
+    for (const task of this.tasks) {
+      if (!ids.has(task.id) || !task.deletedAt) continue;
+      const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
+      for (const sibling of siblings) {
+        if (!sibling.deletedAt) continue;
+        delete sibling.deletedAt;
+        affected.push(sibling);
+      }
+    }
+    await this.store.save(this.tasks);
+    affected.forEach(this.listener);
+    return affected;
+  }
+
+  async purgeTasks(taskIds: string[], deleteFile?: (path: string) => Promise<void>): Promise<GenerationTask[]> {
+    const ids = new Set(taskIds);
+    const affected: GenerationTask[] = [];
+    const groupIds = new Set(this.tasks.filter((t) => ids.has(t.id) && t.deletedAt).map((t) => t.parentId));
+    for (const task of this.tasks.filter((t) => groupIds.has(t.parentId) && t.deletedAt)) {
+      if (task.outputPath && deleteFile) await deleteFile(task.outputPath).catch(() => undefined);
+      this.tasks = this.tasks.filter((t) => t.id !== task.id);
+      affected.push(task);
+    }
+    await this.store.save(this.tasks);
+    return affected;
+  }
+
+  listDeleted(): GenerationTask[] {
+    return [...this.tasks].filter((task) => task.deletedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** 启动时清理：回收站中超过 7 天的任务连同输出视频一并清除；返回被清除的输出路径。 */
+  async purgeExpired(deleteFile?: (path: string) => Promise<void>): Promise<string[]> {
+    const now = Date.now();
+    const expired = this.tasks.filter((t) => t.deletedAt && now - new Date(t.deletedAt).getTime() > GenerationOrchestrator.RETENTION_MS);
+    const files = expired.map((t) => t.outputPath).filter((p): p is string => Boolean(p));
+    if (expired.length > 0) {
+      await this.purgeTasks(expired.map((t) => t.id), deleteFile);
+    }
+    return files;
   }
 
   async submit(request: GenerationRequest): Promise<GenerationTask[]> {

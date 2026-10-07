@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -60,6 +60,15 @@ app.whenReady().then(async () => {
     (task) => mainWindow?.webContents.send("task:update", task)
   );
   await orchestrator.initialize();
+  // 回收站过期清理：删除超过 7 天的任务，连同输出目录内的视频文件一并清除（安全删除白名单内）。
+  void orchestrator.purgeExpired(async (filePath) => {
+    const settings = await settingsStore.get();
+    const resolved = path.resolve(filePath);
+    const root = path.resolve(settings.outputDirectory);
+    const relative = path.relative(root, resolved);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return; // 仅限输出目录内
+    await unlink(resolved).catch(() => undefined);
+  });
   registerIpc(settingsStore, adapters, orchestrator);
   mainWindow = createWindow();
   await loadApp(mainWindow);
@@ -225,6 +234,21 @@ function registerIpc(
   handle("tasks:submit", (_event, request: GenerationRequest) => orchestrator.submit(request));
   handle("tasks:cancel", (_event, id: string) => orchestrator.cancel(id));
   handle("tasks:retry", (_event, id: string) => orchestrator.retry(id));
+  // 回收站：删除（软）→ 恢复 → 彻底清除。彻底删除的文件同样只允许输出目录内。
+  handle("tasks:delete", (_event, ids: string[]) => orchestrator.deleteTasks(Array.isArray(ids) ? ids : []));
+  handle("tasks:restore", (_event, ids: string[]) => orchestrator.restoreTasks(Array.isArray(ids) ? ids : []));
+  handle("tasks:listDeleted", () => orchestrator.listDeleted());
+  handle("tasks:purge", async (_event, ids: string[]) => {
+    const settings = await settingsStore.get();
+    const safeDelete = async (filePath: string) => {
+      const resolved = path.resolve(filePath);
+      const root = path.resolve(settings.outputDirectory);
+      const relative = path.relative(root, resolved);
+      if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return; // 仅限输出目录内
+      await unlink(resolved).catch(() => undefined);
+    };
+    return orchestrator.purgeTasks(Array.isArray(ids) ? ids : [], safeDelete);
+  });
   // 游乐场：流式对话（异步跑完，期间 llm:chunk/llm:done 推送）、中断、附件读取。
   handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean) => {
     const service = llm ?? await rebuildLlm();

@@ -128,6 +128,31 @@ await withApp({}, async (cdp) => {
   await new Promise(r => setTimeout(r, 400));
   check("E-项目条存在(有历史任务时)", await cdp.eval(`document.querySelector('.project-tabs') !== null || document.querySelectorAll('.task-card').length === 0`));
   check("E-项目tab显示进度", await cdp.eval(`(() => { const tab = document.querySelector('.project-tab'); return !tab || Boolean(tab.querySelector('strong') && tab.querySelector('small')); })()`));
+
+  // ===== Part F: 回收站全流程（提交→删除→回收站可见→恢复→彻底删除）=====
+  const before = JSON.parse(await cdp.eval(`(async () => JSON.stringify((await window.h3.listTasks()).data || []))()`));
+  const targetTask = before[0];
+  if (targetTask) {
+    await cdp.eval(`(async () => { await window.h3.deleteTasks([${JSON.stringify(targetTask.id)}]); return true; })()`);
+    await new Promise(r => setTimeout(r, 600));
+    const afterDelete = JSON.parse(await cdp.eval(`(async () => JSON.stringify((await window.h3.listTasks()).data || []))()`));
+    check("F-删除后常规列表隐藏", !afterDelete.some((t) => t.parentId === targetTask.parentId));
+    const deleted = JSON.parse(await cdp.eval(`(async () => JSON.stringify((await window.h3.listDeletedTasks()).data || []))()`));
+    check("F-回收站可见", deleted.some((t) => t.parentId === targetTask.parentId && t.deletedAt));
+    await cdp.eval(`(async () => { await window.h3.restoreTasks([${JSON.stringify(targetTask.id)}]); return true; })()`);
+    await new Promise(r => setTimeout(r, 600));
+    const afterRestore = JSON.parse(await cdp.eval(`(async () => JSON.stringify((await window.h3.listTasks()).data || []))()`));
+    check("F-恢复后回到常规列表", afterRestore.some((t) => t.parentId === targetTask.parentId));
+    await cdp.eval(`(async () => { await window.h3.deleteTasks([${JSON.stringify(targetTask.id)}]); await window.h3.purgeTasks([${JSON.stringify(targetTask.id)}]); return true; })()`);
+    await new Promise(r => setTimeout(r, 600));
+    const afterPurge = JSON.parse(await cdp.eval(`(async () => JSON.stringify((await window.h3.listDeletedTasks()).data || []))()`));
+    check("F-彻底删除后回收站清空", !afterPurge.some((t) => t.parentId === targetTask.parentId));
+    await cdp.eval(`(() => { const btn = Array.from(document.querySelectorAll('.page-title-actions button')).find((b) => b.textContent.includes('回收站')); if (btn) btn.click(); })()`);
+    await new Promise(r => setTimeout(r, 500));
+    check("F-回收站UI可开关", await cdp.eval(`document.querySelector('.trash-panel') !== null`));
+  } else {
+    check("F-跳过(无历史任务)", true);
+  }
 });
 
 rbServer.close();

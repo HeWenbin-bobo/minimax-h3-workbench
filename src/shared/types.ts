@@ -137,6 +137,8 @@ export interface GenerationTask {
   errorCode?: string;
   message?: string;
   request?: GenerationRequest; // 原始提交参数，失败/取消后用于一键重试
+  /** 回收站：非空表示已删除（软删除），7 天后被自动清除（含输出视频）。 */
+  deletedAt?: string;
   usage?: {
     inputSeconds?: number;
     outputSeconds?: number;
@@ -211,6 +213,14 @@ export interface WorkbenchApi {
   submitGeneration(request: GenerationRequest): Promise<ApiResponse<GenerationTask[]>>;
   cancelTask(taskId: string): Promise<ApiResponse<GenerationTask>>;
   retryTask(taskId: string): Promise<ApiResponse<GenerationTask>>;
+  /** 回收站：软删除任务（运行中的先取消），7 天内可恢复；传 parentId 可整组删除。 */
+  deleteTasks(taskIds: string[]): Promise<ApiResponse<GenerationTask[]>>;
+  /** 回收站：恢复软删除的任务（按 parentId 组恢复）。 */
+  restoreTasks(taskIds: string[]): Promise<ApiResponse<GenerationTask[]>>;
+  /** 回收站：彻底删除（含输出视频文件，仅限输出目录内）。 */
+  purgeTasks(taskIds: string[]): Promise<ApiResponse<GenerationTask[]>>;
+  /** 回收站：列出已删除任务（含剩余毫秒数由渲染端按 deletedAt 自算）。 */
+  listDeletedTasks(): Promise<ApiResponse<GenerationTask[]>>;
   showItem(filePath: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
   /** 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。 */

@@ -146,11 +146,15 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
     return Array.from(groups.values()).sort((a, b) => b[0].createdAt.localeCompare(a[0].createdAt));
   }, [tasks]);
   const [activeProjectId, setActiveProjectId] = useState<string>();
-  const activeProject = projects.find((group) => (group[0].parentId || group[0].id) === activeProjectId) ?? projects[0];
+  // followForm：用户正在为"新提交"调参数（如改结果数量）——结果区立即切到 request.count 个占位格子；
+  // 点项目 tab 或提交成功后回到项目视图。
+  const [followForm, setFollowForm] = useState(false);
+  const activeProject = followForm ? undefined : (projects.find((group) => (group[0].parentId || group[0].id) === activeProjectId) ?? projects[0]);
   const isRb = request.backend === "rb";
   const rbPreset = request.preset || (request.firstFramePath && request.lastFramePath ? "tail_frame" : "reference");
   const setRbPreset = (preset: string) => setRequest({ ...request, preset, ...(preset === "easy_15" ? { duration: 15 } : preset === "easy_30" ? { duration: 30 } : { duration: request.duration > 8 ? 8 : request.duration }) });
   // 当前项目的结果格子：格子数跟随项目实际任务数（无项目时回落到表单选择），按 index 对齐。
+  // 选结果数量时立刻反馈：composingCount 与 request.count 同步变化，占位格子即时增减。
   const shownCount = Math.max(1, Math.min(4, activeProject?.length || request.count));
   const currentTasks = useMemo(() => {
     const group = activeProject ?? [];
@@ -205,7 +209,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       const running = group.some((t) => !["succeeded", "failed", "cancelled", "interrupted"].includes(t.status));
       const done = group.filter((t) => t.status === "succeeded").length;
       const active = activeProject === group;
-      return <button key={key} className={`project-tab${active ? " active" : ""}`} onClick={() => setActiveProjectId(key)}>
+      return <button key={key} className={`project-tab${active ? " active" : ""}`} onClick={() => { setActiveProjectId(key); setFollowForm(false); }}>
         <strong>{group[0].prompt.slice(0, 18) || "未命名项目"}</strong>
         <small>{running ? "生成中…" : `${done}/${group.length} 完成`}{group[0].category ? ` · ${group[0].category}` : ""}</small>
         {running && <i className="dot" />}
@@ -232,7 +236,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
         {!isRb && <label>分辨率<select value={request.resolution} onChange={(e) => setRequest({ ...request, resolution: e.target.value as "768P" | "2K" })}><option>768P</option><option>2K</option></select></label>}
         {isRb && (rbPreset === "reference" || rbPreset === "tail_frame") && <label>采样步数<select value={request.samplerSteps || 20} onChange={(e) => setRequest({ ...request, samplerSteps: Number(e.target.value) })}><option value={8}>8（更快）</option><option value={20}>20（更精细）</option></select></label>}
         {isRb && (rbPreset === "reference" || rbPreset === "tail_frame") && <label>补帧<select value={request.interpolate ? "on" : "off"} onChange={(e) => setRequest({ ...request, interpolate: e.target.value === "on" })}><option value="off">关闭</option><option value="on">开启（更流畅）</option></select></label>}
-        <label>结果数量<select value={request.count} onChange={(e) => setRequest({ ...request, count: Number(e.target.value) })}>{[1,2,3,4].map((x) => <option key={x} value={x}>{x} 路</option>)}</select></label>
+        <label>结果数量<select value={request.count} onChange={(e) => { setRequest({ ...request, count: Number(e.target.value) }); setFollowForm(true); }}>{[1,2,3,4].map((x) => <option key={x} value={x}>{x} 路</option>)}</select></label>
       </div>
       <label>基础随机种子<input type="number" value={request.baseSeed} onChange={(e) => setRequest({ ...request, baseSeed: Number(e.target.value) })}/></label>
       <div className="submit-area"><div>{request.backend === "minimax" ? <><span>云端估算</span><strong>约 ${estimateCloudCost(request.resolution, request.duration, request.count).toFixed(2)} / {request.count} 条</strong></> : request.backend === "rb" ? <><span>云端估算</span><strong>卡密计费 · {request.count} 条消耗 {request.count} 次</strong></> : <><span>本地生成</span><strong>不产生 API 费用</strong></>}</div><button className="primary" disabled={submitting} onClick={submit}>{submitting ? "提交中…" : `生成 ${request.count} 个结果`}</button></div>
@@ -438,6 +442,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
   const [webSearch, setWebSearch] = useState(false);
+  const [agentMode, setAgentMode] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [showVideoForm, setShowVideoForm] = useState(false);
   const [videoRequest, setVideoRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
@@ -525,7 +530,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const history: ChatMessage[] = [...(session.messages).filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })), { role: "user", content: userMsg.content, images: userMsg.images }];
     setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, title: s.messages.length === 0 && text ? text.slice(0, 20) : s.title, messages: [...s.messages, userMsg, assistantMsg] } : s));
     setInput(""); setAttachments([]); setGenerating(true); streamBuffer.current = ""; streamingSessionId.current = session.id;
-    const result = await window.h3.chatLlm(history, webSearch);
+    const result = await window.h3.chatLlm(history, webSearch, agentMode);
     if (!result.ok) {
       setGenerating(false);
       setSessions((all) => patchLast(all, session!.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
@@ -630,6 +635,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         <div className="pg-composer">
           <div className="pg-chips">
             <button className={webSearch ? "pg-chip on" : "pg-chip"} onClick={() => { if (!searchReady && !webSearch) { onNotice("联网搜索需要先在连接设置配置搜索 API；若 LLM 自带联网也可不接。"); } setWebSearch(!webSearch); }}>🌐 联网{searchReady ? "" : "（未配置 API）"}</button>
+            <button className={agentMode ? "pg-chip on" : "pg-chip"} title="智能体模式：AI 可自主联网搜索、直接帮你提交视频生成任务（Codex/Claude Code 形态的多步工具循环）" onClick={() => setAgentMode(!agentMode)}>🤖 智能体</button>
             <button className={showVideoForm ? "pg-chip on" : "pg-chip"} onClick={() => setShowVideoForm(!showVideoForm)}>🎬 生成视频</button>
             <button className="pg-chip" onClick={pickAttachment}>📎 附件</button>
             <span className="pg-model">{settings.llm.model || "未配置模型"}{generating ? " · 生成中…" : ""}</span>

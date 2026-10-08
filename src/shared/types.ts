@@ -227,8 +227,10 @@ export interface WorkbenchApi {
   listDeletedTasks(): Promise<ApiResponse<GenerationTask[]>>;
   showItem(filePath: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
-  /** 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。 */
-  chatLlm(messages: ChatMessage[], webSearch: boolean): Promise<ApiResponse<boolean>>;
+  /** 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。agent=true 走 AI SDK 工具循环。 */
+  chatLlm(messages: ChatMessage[], webSearch: boolean, agent?: boolean): Promise<ApiResponse<boolean>>;
+  /** 智能体框架独立更新检查（npm registry 最新版 vs 打包版本）。 */
+  checkAgentFrameworkUpdate(): Promise<ApiResponse<{ bundledVersion: string; latestVersion?: string; updateAvailable: boolean; message: string }>>;
   abortLlm(): Promise<ApiResponse<boolean>>;
   /** 游乐场：从上游拉取模型列表（OpenAI 兼容 GET /models）；不支持的服务商返回 ok=false + 提示。 */
   listLlmModels(): Promise<ApiResponse<{ ok: boolean; models: string[]; message: string }>>;

@@ -18,11 +18,11 @@ import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequ
 import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
-import { LlmService } from "./modules/llmService";
+import { LlmService, chatAgent } from "./modules/llmService";
 import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
-import { checkForUpdates } from "./modules/updateChecker";
+import { checkForUpdates, checkFrameworkUpdate } from "./modules/updateChecker";
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "h3media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
@@ -148,8 +148,23 @@ function registerIpc(
   registry: AdapterRegistry,
   orchestrator: GenerationOrchestrator
 ): void {
+  // 智能体视频工具的兜底参数（具体 prompt/时长/数量由模型经工具入参给定）。
+  const initialAgentVideoRequest: GenerationRequest = {
+    mode: "text",
+    backend: "rb",
+    prompt: "",
+    duration: 4,
+    ratio: "16:9",
+    resolution: "768P",
+    width: 1280,
+    height: 720,
+    count: 1,
+    baseSeed: 1
+  };
+  const backendKindLabel = (kind: BackendKind) => kind === "local" ? "本机 ComfyUI" : kind === "ssh" ? "SSH 远程显卡" : kind === "rb" ? "瞬映 RB" : "MiniMax H3";
   // 游乐场 LLM：单例服务，随设置刷新重建；流式分块经 llm:chunk 推送，结束经 llm:done 推送。
   let llm: LlmService | undefined;
+  const llmAborters: Array<AbortController> = []; // agent 模式的取消器（llm:abort 时全部中止）
   const rebuildLlm = async (): Promise<LlmService> => {
     const settings = await settingsStore.get();
     llm = new LlmService({
@@ -223,6 +238,11 @@ function registerIpc(
     return inspectEnvironment(settings.localComfyUrl, settings.outputDirectory);
   });
   handle("update:check", () => checkForUpdates(app.getVersion()));
+  // 智能体框架独立更新检查：应用本体不更新时也报告框架新版本。
+  handle("update:checkFramework", async () => {
+    const { frameworkVersion } = await import("../shared/agentVersion.js");
+    return checkFrameworkUpdate(frameworkVersion);
+  });
   handle("update:download-install", async () => {
     await downloadAndInstall();
     return true;
@@ -252,22 +272,72 @@ function registerIpc(
     return orchestrator.purgeTasks(Array.isArray(ids) ? ids : [], safeDelete);
   });
   // 游乐场：流式对话（异步跑完，期间 llm:chunk/llm:done 推送）、中断、附件读取。
-  handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean) => {
+  // agent 模式走 AI SDK 工具循环（web_search / generate_video），普通聊天走原路径零回归。
+  handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean, agent: boolean) => {
     const service = llm ?? await rebuildLlm();
-    void service.chat(messages, webSearch, sendChunk)
-      .then(() => sendDone(true))
-      .catch((error: unknown) => {
-        // 用户主动停止（abort）不算错误：正常收尾，不显示红色报错。
-        const aborted = error instanceof DOMException && error.name === "AbortError";
-        sendDone(aborted, aborted ? undefined : error instanceof Error ? error.message : "对话失败");
-      });
+    if (!agent) {
+      void service.chat(messages, webSearch, sendChunk)
+        .then(() => sendDone(true))
+        .catch((error: unknown) => {
+          // 用户主动停止（abort）不算错误：正常收尾，不显示红色报错。
+          const aborted = error instanceof DOMException && error.name === "AbortError";
+          sendDone(aborted, aborted ? undefined : error instanceof Error ? error.message : "对话失败");
+        });
+      return true;
+    }
+    // 智能体模式：AI SDK 多步工具循环。视频工具直接接 orchestrator（提交即返回任务 ID，卡片实时刷新）。
+    const controller = new AbortController();
+    llmAborters.push(controller);
+    void (async () => {
+      const settings = await settingsStore.get();
+      await chatAgent({
+        baseUrl: settings.llm.baseUrl,
+        apiKey: await settingsStore.getSecret("llmApiKey"),
+        model: settings.llm.model,
+        systemPrompt: settings.llm.systemPrompt,
+        searchBaseUrl: settings.searchApi.baseUrl || undefined,
+        searchApiKey: await settingsStore.getSecret("searchApiKey")
+      }, messages, {
+        webSearch: async (query) => {
+          const response = await fetch(`${(settings.searchApi.baseUrl || "").replace(/\/+$/, "")}/search`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(await settingsStore.getSecret("searchApiKey") ? { Authorization: `Bearer ${await settingsStore.getSecret("searchApiKey")}` } : {})
+            },
+            body: JSON.stringify({ query, count: 6 }),
+            signal: controller.signal
+          });
+          if (!response.ok) throw new Error(`搜索请求失败：${response.status}`);
+          const payload = await response.json() as { results?: Array<{ title?: string; name?: string; url?: string; snippet?: string; content?: string }> };
+          return (payload.results ?? [])
+            .map((item, index) => `[${index + 1}] ${item.title || item.name || ""}\n${item.url || ""}\n${item.snippet || item.content || ""}`)
+            .join("\n\n");
+        },
+        generateVideo: async (params) => {
+          const request: GenerationRequest = {
+            ...initialAgentVideoRequest,
+            prompt: params.prompt,
+            duration: Math.max(4, Math.min(15, Math.round(params.duration || 4))),
+            count: Math.max(1, Math.min(4, Math.round(params.count || 1))),
+            baseSeed: Math.floor(Math.random() * 1_000_000)
+          };
+          const response = await orchestrator.submit(request);
+          return `已创建 ${response.length} 个视频生成任务（${backendKindLabel(request.backend)}·${request.duration} 秒），卡片将在下方实时显示进度，也可到「生成工作台」查看。`;
+        }
+      }, sendChunk, controller.signal);
+      sendDone(true);
+    })().catch((error: unknown) => {
+      const aborted = controller.signal.aborted;
+      sendDone(aborted, aborted ? undefined : error instanceof Error ? error.message : "智能体对话失败");
+    });
     return true;
   });
   handle("llm:abort", async () => {
     llm?.abort();
+    while (llmAborters.length > 0) llmAborters.pop()?.abort(); // agent 模式的取消
     return true;
-  });
-  handle("attachment:read", async (_event, filePath: string) => {
+  });  handle("attachment:read", async (_event, filePath: string) => {
     if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
     const extension = path.extname(filePath).toLowerCase();
     const name = path.basename(filePath);

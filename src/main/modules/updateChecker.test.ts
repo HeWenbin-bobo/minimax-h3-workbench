@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { checkForUpdates } from "./updateChecker";
+import { checkForUpdates, checkFrameworkUpdate } from "./updateChecker";
 
 describe("checkForUpdates", () => {
   it("reports a newer public GitHub release", async () => {
@@ -36,6 +36,30 @@ describe("checkForUpdates", () => {
   it("returns an actionable error when GitHub cannot be reached", async () => {
     const fetcher = vi.fn(async () => new Response("rate limited", { status: 403 }));
     await expect(checkForUpdates("0.1.4", fetcher)).rejects.toThrow("更新服务器返回 HTTP 403");
+  });
+});
+
+describe("checkFrameworkUpdate", () => {
+  it("flags a newer npm framework version independently of the app release", async () => {
+    const fetcher = vi.fn(async () => json({ version: "6.0.0" }));
+    const result = await checkFrameworkUpdate("5.0.0", fetcher);
+    expect(result.updateAvailable).toBe(true);
+    expect(result.latestVersion).toBe("6.0.0");
+    expect(result.message).toContain("6.0.0");
+  });
+
+  it("reports the bundled framework is current", async () => {
+    const fetcher = vi.fn(async () => json({ version: "5.0.0" }));
+    const result = await checkFrameworkUpdate("5.0.0", fetcher);
+    expect(result.updateAvailable).toBe(false);
+    expect(result.message).toContain("已是最新");
+  });
+
+  it("never throws on network failure", async () => {
+    const fetcher = vi.fn(async () => new Response("offline", { status: 500 }));
+    const result = await checkFrameworkUpdate("5.0.0", fetcher);
+    expect(result.updateAvailable).toBe(false);
+    expect(result.message).toContain("500");
   });
 });
 

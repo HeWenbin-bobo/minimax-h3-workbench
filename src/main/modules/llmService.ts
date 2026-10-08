@@ -7,6 +7,8 @@ export interface LlmServiceOptions {
   systemPrompt: string;
   searchBaseUrl?: string;
   searchApiKey?: string;
+  /** 智能体模式（chatAgent）使用的框架版本——由 updateChecker 独立检查更新。 */
+  frameworkVersion?: string;
 }
 
 export type ChunkSender = (event: LlmStreamEvent) => void;
@@ -155,6 +157,93 @@ export class LlmService {
 // 不存储在设置里——彻底避免改 baseUrl 后残留旧端点的脏状态。
 export function resolveChatPath(baseUrl: string): string {
   return /api\.minimax\.io/i.test(baseUrl) ? "/text/chatcompletion_v2" : "/chat/completions";
+}
+
+// ---------- 智能体模式（Vercel AI SDK 工具循环，Codex/Claude Code 形态） ----------
+
+export interface AgentToolCallbacks {
+  /** 联网搜索工具：返回参考段落（未配置搜索 API 时抛错）。 */
+  webSearch: (query: string) => Promise<string>;
+  /** 视频生成工具：提交生成任务并返回给用户的说明文本。 */
+  generateVideo: (params: { prompt: string; duration: number; count: number }) => Promise<string>;
+}
+
+/** 从打包产物读取智能体框架版本（agentVersion.ts 由构建脚本从 node_modules/ai 同步）。 */
+export async function bundledFrameworkVersion(): Promise<string> {
+  const { frameworkVersion } = await import("../../shared/agentVersion.js");
+  return frameworkVersion;
+}
+
+/**
+ * AI SDK 多步智能体对话：模型可自主调用 web_search / generate_video 工具，
+ * 默认最多 6 步。AI SDK 是 ESM-only——主进程 CJS 产物用动态 import 加载；
+ * model 经 createOpenAICompatible 注入（复用连接设置里的 baseUrl/Key/模型名）。
+ */
+export async function chatAgent(
+  options: LlmServiceOptions,
+  messages: ChatMessage[],
+  callbacks: AgentToolCallbacks,
+  send: ChunkSender,
+  signal: AbortSignal
+): Promise<void> {
+  const [{ streamText, tool, stepCountIs }, { createOpenAICompatible }, { z }] = await Promise.all([
+    import("ai"),
+    import("@ai-sdk/openai-compatible"),
+    import("zod")
+  ] as const);
+  const provider = createOpenAICompatible({
+    name: "workbench-llm",
+    baseURL: options.baseUrl,
+    apiKey: options.apiKey || undefined,
+    headers: options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : undefined
+  });
+  const model = provider.chatModel(options.model);
+  const toModelMessages = (list: ChatMessage[]) => list.map((message) => {
+    if (message.role === "system") return { role: "system" as const, content: message.content };
+    if (message.role === "assistant") return { role: "assistant" as const, content: message.content };
+    return {
+      role: "user" as const,
+      content: message.images?.length
+        ? [{ type: "text" as const, text: message.content || "请看这张图片。" }, ...message.images.map((url) => ({ type: "image" as const, image: url }))]
+        : message.content
+    };
+  });
+  const stream = streamText({
+    model,
+    system: options.systemPrompt || "你是 MiniMax H3 视频工作台内置的智能助手，可以联网搜索资料，也可以直接调用 generate_video 工具为用户生成视频。",
+    messages: toModelMessages(messages),
+    tools: {
+      web_search: tool({
+        description: "联网搜索最新资料。当用户询问实时信息、需要引用来源时调用。",
+        inputSchema: z.object({ query: z.string().describe("搜索关键词") }),
+        execute: async ({ query }) => {
+          try {
+            const results = await callbacks.webSearch(query);
+            return results || "未搜索到相关内容。";
+          } catch (error) {
+            return `搜索失败：${error instanceof Error ? error.message : "未知错误"}（请基于自身知识回答）`;
+          }
+        }
+      }),
+      generate_video: tool({
+        description: "为用户生成 AI 视频。用户明确想生成/制作视频时调用。",
+        inputSchema: z.object({
+          prompt: z.string().describe("视频内容描述（画面主体、动作、镜头、光线、风格）"),
+          duration: z.number().int().min(4).max(15).describe("时长秒数，4–15"),
+          count: z.number().int().min(1).max(4).describe("生成数量，1–4")
+        }),
+        execute: async (params) => callbacks.generateVideo(params)
+      })
+    },
+    stopWhen: stepCountIs(6),
+    abortSignal: signal
+  });
+  let seq = 0;
+  for await (const part of stream.textStream) {
+    if (part) send({ seq: (seq += 1), delta: part });
+  }
+  // 工具调用全程在 streamText 内部完成；这里只等最终收尾（错误抛给调用方）。
+  await stream.finishReason;
 }
 
 // 解析 SSE 流：按行拆 data: 载荷，提取 choices[0].delta.content；残行跨 chunk 缓存。

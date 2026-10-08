@@ -20,6 +20,7 @@ const api: WorkbenchApi = {
   submitGeneration: (request) => invoke("tasks:submit", request),
   cancelTask: (taskId) => invoke("tasks:cancel", taskId),
   retryTask: (taskId) => invoke("tasks:retry", taskId),
+  setTaskCategory: (taskId, category) => invoke("tasks:setCategory", { taskId, category }),
   deleteTasks: (taskIds) => invoke("tasks:delete", taskIds),
   restoreTasks: (taskIds) => invoke("tasks:restore", taskIds),
   purgeTasks: (taskIds) => invoke("tasks:purge", taskIds),

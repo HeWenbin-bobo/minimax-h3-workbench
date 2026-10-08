@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMessage, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LlmStreamEvent, LocalModelStatus, ResourceLink, UpdateInfo } from "../shared/types";
 import { LLM_PROVIDERS } from "../shared/types";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
@@ -168,6 +168,20 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   }
   const rbDurationOptions = rbPreset === "reference" || rbPreset === "tail_frame" ? [4, 6, 8] : rbPreset === "easy_15" ? [15] : rbPreset === "easy_30" ? [30] : [];
   const [showTrash, setShowTrash] = useState(false);
+  // 项目分类：所有项目出现过的分类 + "全部"/"未分类" 过滤；新分类在当前项目上直接输入。
+  const projectCategories = useMemo(() => Array.from(new Set(tasks.map((t) => t.category).filter((c): c is string => Boolean(c)))), [tasks]);
+  const [categoryFilter, setCategoryFilter] = useState<string>("全部");
+  const filteredProjects = useMemo(() => {
+    if (categoryFilter === "全部") return projects;
+    if (categoryFilter === "未分类") return projects.filter((group) => !group[0].category);
+    return projects.filter((group) => group[0].category === categoryFilter);
+  }, [projects, categoryFilter]);
+  async function setProjectCategory(category: string) {
+    if (!activeProject) return;
+    const response = await window.h3.setTaskCategory(activeProject[0].id, category);
+    if (!response.ok) { onError(response.message); return; }
+    onNotice(category ? `已归类到「${category}」` : "已清除分类");
+  }
   async function deleteProject() {
     if (!activeProject) return;
     // 传任一真实任务 id，orchestrator 按 parentId 整组软删除。
@@ -178,18 +192,26 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
     window.dispatchEvent(new Event("h3-tasks-changed"));
   }
   return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="page-title-actions"><button className="text-button" onClick={() => setShowTrash((v) => !v)}>🗑 回收站</button><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div></div>
-    {projects.length > 0 && <div className="project-tabs">{projects.slice(0, 12).map((group) => {
+    {projects.length > 0 && <div className="category-filter">
+      {["全部", ...projectCategories, "未分类"].map((c) => <button key={c} className={categoryFilter === c ? "on" : ""} onClick={() => setCategoryFilter(c)}>{c}</button>)}
+      <button className="text-button" title="给当前项目设置分类" onClick={async () => {
+        const category = window.prompt("输入当前项目的分类名称（留空清除分类）", activeProject?.[0].category || "");
+        if (category === null) return;
+        await setProjectCategory(category);
+      }}>＋ 分类</button>
+    </div>}
+    {filteredProjects.length > 0 && <div className="project-tabs">{filteredProjects.slice(0, 12).map((group) => {
       const key = group[0].parentId || group[0].id;
       const running = group.some((t) => !["succeeded", "failed", "cancelled", "interrupted"].includes(t.status));
       const done = group.filter((t) => t.status === "succeeded").length;
       const active = activeProject === group;
       return <button key={key} className={`project-tab${active ? " active" : ""}`} onClick={() => setActiveProjectId(key)}>
         <strong>{group[0].prompt.slice(0, 18) || "未命名项目"}</strong>
-        <small>{running ? "生成中…" : `${done}/${group.length} 完成`}</small>
+        <small>{running ? "生成中…" : `${done}/${group.length} 完成`}{group[0].category ? ` · ${group[0].category}` : ""}</small>
         {running && <i className="dot" />}
       </button>;
     })}</div>}
-    {showTrash && <TrashPanel tasks={tasks} onError={onError} onNotice={onNotice} />}
+    {showTrash && <TrashPanel onError={onError} onNotice={onNotice} />}
     <div className="studio-layout"><div className="control-panel">
       {!isRb && <div className="mode-tabs">{(["text", "image", "video"] as GenerationMode[]).map((mode) => <button key={mode} className={request.mode === mode ? "active" : ""} onClick={() => setRequest({ ...request, mode })}>{mode === "text" ? "文生视频" : mode === "image" ? "图生视频" : "视频生视频"}</button>)}</div>}
       {isRb && <div className="mode-tabs">{[["reference", "贴合参考图"], ["tail_frame", "首尾过渡"], ["easy_15", "15 秒"], ["easy_30", "30 秒"], ["flashvsr_upscale", "视频变清晰"]].map(([value, label]) => <button key={value} className={rbPreset === value ? "active" : ""} onClick={() => setRbPreset(value)}>{label}</button>)}</div>}
@@ -219,12 +241,17 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
 }
 
 // 回收站面板：按项目分组展示已删除任务，支持恢复 / 彻底删除（含视频文件）。
-function TrashPanel({ tasks, onError, onNotice }: { tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void }) {
+// 删除/恢复动作广播 h3-tasks-changed 事件，本面板监听该事件实时刷新（无需关闭重开）。
+function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNotice: (s: string) => void }) {
   const [items, setItems] = useState<GenerationTask[]>([]);
   const [loading, setLoading] = useState(true);
   const retentionMs = 7 * 24 * 60 * 60 * 1_000;
-  const refresh = () => window.h3.listDeletedTasks().then((r) => { if (r.data) setItems(r.data); setLoading(false); }).catch(() => setLoading(false));
-  useEffect(() => { void refresh(); }, []);
+  const refresh = useCallback(() => window.h3.listDeletedTasks().then((r) => { if (r.data) setItems(r.data); setLoading(false); }).catch(() => setLoading(false)), []);
+  useEffect(() => {
+    void refresh();
+    window.addEventListener("h3-tasks-changed", refresh);
+    return () => window.removeEventListener("h3-tasks-changed", refresh);
+  }, [refresh]);
   const groups = new Map<string, GenerationTask[]>();
   for (const task of items) {
     const group = groups.get(task.parentId);
@@ -381,6 +408,10 @@ interface PlaygroundSession {
   title: string;
   messages: PlaygroundMessage[];
   createdAt: string;
+  /** 会话回收站：非空表示已删除，7 天后启动时自动清除。 */
+  deletedAt?: string;
+  /** 用户自定义会话分类（空 = 未分类）。 */
+  category?: string;
 }
 
 // 消息可携带内嵌的视频生成任务（任务卡片随 task:update 实时刷新）。
@@ -402,7 +433,7 @@ function loadSessions(): PlaygroundSession[] {
 
 function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
   const [sessions, setSessions] = useState<PlaygroundSession[]>(loadSessions);
-  const [activeId, setActiveId] = useState<string>(() => loadSessions()[0]?.id || "");
+  const [activeId, setActiveId] = useState<string>(() => loadSessions().find((s) => !s.deletedAt)?.id || "");
   const active = sessions.find((s) => s.id === activeId);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
@@ -445,6 +476,15 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
   // 粘底自动滚动：仅在用户接近底部时跟随。
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
+
+  // 会话回收站过期清理：启动时清除超过 7 天的已删除会话。
+  useEffect(() => {
+    const now = Date.now();
+    setSessions((all) => {
+      const kept = all.filter((s) => !s.deletedAt || now - new Date(s.deletedAt).getTime() <= 7 * 86_400_000);
+      return kept.length === all.length ? all : kept;
+    });
+  }, []);
 
   function patchLast(all: PlaygroundSession[], id: string, patch: (msg: PlaygroundMessage) => PlaygroundMessage): PlaygroundSession[] {
     return all.map((session) => session.id !== id ? session : { ...session, messages: session.messages.map((msg, i) => i === session.messages.length - 1 ? patch(msg) : msg) });
@@ -517,27 +557,66 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
 
   const activeTasks = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
+  // 会话回收站 + 分类：visibleSessions 只显示未删除会话；trashSessions 供回收站面板展示。
+  const visibleSessions = useMemo(() => sessions.filter((s) => !s.deletedAt), [sessions]);
+  const trashSessions = useMemo(() => sessions.filter((s) => s.deletedAt), [sessions]);
+  const categories = useMemo(() => Array.from(new Set(visibleSessions.map((s) => s.category).filter((c): c is string => Boolean(c)))), [visibleSessions]);
+  const [sessionFilter, setSessionFilter] = useState<string>("全部");
+  const [showPgTrash, setShowPgTrash] = useState(false);
+  const [renamingId, setRenamingId] = useState<string>();
+  const [renameDraft, setRenameDraft] = useState("");
+  const filteredSessions = sessionFilter === "全部" ? visibleSessions : visibleSessions.filter((s) => s.category === sessionFilter);
+  const current = visibleSessions.find((s) => s.id === activeId);
+  // 当前会话被删除/过滤时自动落到列表第一个。
+  useEffect(() => {
+    if (activeId && !visibleSessions.some((s) => s.id === activeId)) setActiveId(visibleSessions[0]?.id || "");
+  }, [visibleSessions, activeId]);
+  function deleteSession(session: PlaygroundSession) {
+    if (session.messages.some((m) => m.streaming)) return;
+    setSessions((all) => all.map((s) => s.id === session.id ? { ...s, deletedAt: new Date().toISOString() } : s));
+  }
+  function restoreSession(session: PlaygroundSession) {
+    setSessions((all) => all.map((s) => s.id === session.id ? { ...s, deletedAt: undefined } : s));
+    setActiveId(session.id);
+  }
+  function purgeSession(session: PlaygroundSession) {
+    setSessions((all) => all.filter((s) => s.id !== session.id));
+  }
+  function commitRename() {
+    if (!renamingId) return;
+    const title = renameDraft.trim().slice(0, 40);
+    if (title) setSessions((all) => all.map((s) => s.id === renamingId ? { ...s, title } : s));
+    setRenamingId(undefined);
+  }
+
   return <section className="page playground"><div className="page-title"><div><span className="eyebrow">PLAY</span><h1>游乐场</h1></div><button className="primary" onClick={newSession}>新对话</button></div>
     <div className="playground-layout">
       <aside className="pg-sessions">
-        {sessions.length === 0 && <p className="footnote">还没有对话。点击右上角"新对话"开始。</p>}
-        {sessions.map((session) => <div key={session.id} className={session.id === activeId ? "pg-session active" : "pg-session"}>
-          <button className="pg-session-body" onClick={() => setActiveId(session.id)} title="双击重命名" onDoubleClick={() => {
-            const title = window.prompt("重命名会话", session.title || "新对话");
-            if (title && title.trim()) setSessions((all) => all.map((s) => s.id === session.id ? { ...s, title: title.trim().slice(0, 40) } : s));
-          }}>
-            <strong>{session.title || "新对话"}</strong><small>{session.messages.length} 条消息</small>
-          </button>
-          <button className="pg-session-delete" title="删除会话" onClick={() => {
-            if (!window.confirm(`删除会话「${session.title || "新对话"}」？删除后不可恢复。`)) return;
-            setSessions((all) => {
-              const next = all.filter((s) => s.id !== session.id);
-              if (session.id === activeId) setActiveId(next[0]?.id || "");
-              return next;
-            });
-          }}>×</button>
+        <div className="pg-session-filter">
+          <button className={sessionFilter === "全部" ? "on" : ""} onClick={() => setSessionFilter("全部")}>全部</button>
+          {categories.map((c) => <button key={c} className={sessionFilter === c ? "on" : ""} onClick={() => setSessionFilter(c)}>{c}</button>)}
+          <button className={sessionFilter === "__trash" ? "on" : ""} onClick={() => setShowPgTrash(true)}>🗑 回收站{trashSessions.length > 0 ? ` (${trashSessions.length})` : ""}</button>
+        </div>
+        {filteredSessions.length === 0 && trashSessions.length === 0 && <p className="footnote">还没有对话。点击右上角"新对话"开始。</p>}
+        {filteredSessions.map((session) => <div key={session.id} className={session.id === activeId ? "pg-session active" : "pg-session"}>
+          {renamingId === session.id
+            ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(undefined); }} onFocus={(e) => e.target.select()} />
+            : <button className="pg-session-body" onClick={() => setActiveId(session.id)} onDoubleClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }} title="双击重命名">
+              <strong>{session.title || "新对话"}</strong><small>{session.messages.length} 条消息{session.category ? ` · ${session.category}` : ""}</small>
+            </button>}
+          <div className="pg-session-tools">
+            <button className="pg-tool" title="重命名" onClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }}>✎</button>
+            <button className="pg-tool" title="设置分类" onClick={() => {
+              const category = window.prompt("输入分类名称（留空清除分类）", session.category || "");
+              if (category === null) return;
+              const normalized = category.trim().slice(0, 20);
+              setSessions((all) => all.map((s) => s.id === session.id ? { ...s, category: normalized || undefined } : s));
+            }}>🏷</button>
+            <button className="pg-tool" title="删除会话（可在回收站恢复 7 天）" onClick={() => deleteSession(session)}>×</button>
+          </div>
         </div>)}
       </aside>
+      {showPgTrash && <PgTrashPanel sessions={trashSessions} onRestore={restoreSession} onPurge={purgeSession} onClose={() => setShowPgTrash(false)} retentionDays={7} />}
       <div className="pg-main">
         <div className="pg-messages">
           {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
@@ -578,6 +657,31 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
 
 function rbPresetLabel(preset: string): string {
   return ({ reference: "贴合参考图", tail_frame: "首尾过渡", easy_15: "15 秒", easy_30: "30 秒", flashvsr_upscale: "视频变清晰" } as Record<string, string>)[preset] || preset;
+}
+
+// 游乐场会话回收站：悬浮面板展示已删除会话（保留 7 天），支持恢复 / 彻底删除。
+function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: {
+  sessions: PlaygroundSession[];
+  onRestore: (session: PlaygroundSession) => void;
+  onPurge: (session: PlaygroundSession) => void;
+  onClose: () => void;
+  retentionDays: number;
+}) {
+  const daysLeft = (iso: string) => Math.max(0, Math.ceil((retentionDays * 86_400_000 - (Date.now() - new Date(iso).getTime())) / 86_400_000));
+  return <div className="pg-trash-overlay" onClick={onClose}>
+    <section className="pg-trash" onClick={(e) => e.stopPropagation()}>
+      <header><strong>会话回收站</strong><small>删除的会话保留 {retentionDays} 天，到期自动清除</small><button className="text-button" onClick={onClose}>关闭</button></header>
+      {sessions.length === 0 && <p className="footnote">回收站是空的。</p>}
+      {sessions.map((session) => <article key={session.id} className="trash-item">
+        <div><strong>{session.title || "新对话"}</strong>
+          <small>{session.messages.length} 条消息 · {session.deletedAt ? `${daysLeft(session.deletedAt)} 天后自动清除` : ""}</small></div>
+        <div className="trash-actions">
+          <button className="text-button" onClick={() => onRestore(session)}>恢复</button>
+          <button className="text-button danger" onClick={() => onPurge(session)}>彻底删除</button>
+        </div>
+      </article>)}
+    </section>
+  </div>;
 }
 
 function FilePicker({ label, path, onClick }: { label: string; path?: string; onClick: () => void }) { return <button className={`file-picker ${path ? "picked" : ""}`} onClick={onClick}><span>{path ? "✓" : "+"}</span><strong>{label}</strong><small>{path ? path.split(/[\\/]/).pop() : "点击选择文件"}</small></button>; }

@@ -83,6 +83,18 @@ export class GenerationOrchestrator {
     return [...this.tasks].filter((task) => task.deletedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
+  /** 设置项目分类：整组同值（空串 = 未分类）。 */
+  async setCategory(taskId: string, category: string): Promise<GenerationTask[]> {
+    const task = this.tasks.find((entry) => entry.id === taskId);
+    if (!task) throw new Error("任务不存在。");
+    const normalized = category.trim().slice(0, 20);
+    const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
+    for (const sibling of siblings) sibling.category = normalized || undefined;
+    await this.store.save(this.tasks);
+    siblings.forEach(this.listener);
+    return siblings;
+  }
+
   /** 启动时清理：回收站中超过 7 天的任务连同输出视频一并清除；返回被清除的输出路径。 */
   async purgeExpired(deleteFile?: (path: string) => Promise<void>): Promise<string[]> {
     const now = Date.now();

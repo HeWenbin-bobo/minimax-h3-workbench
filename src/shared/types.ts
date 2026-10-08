@@ -139,6 +139,8 @@ export interface GenerationTask {
   request?: GenerationRequest; // 原始提交参数，失败/取消后用于一键重试
   /** 回收站：非空表示已删除（软删除），7 天后被自动清除（含输出视频）。 */
   deletedAt?: string;
+  /** 用户自定义项目分类（空 = 未分类；整组任务同值）。 */
+  category?: string;
   usage?: {
     inputSeconds?: number;
     outputSeconds?: number;
@@ -213,6 +215,8 @@ export interface WorkbenchApi {
   submitGeneration(request: GenerationRequest): Promise<ApiResponse<GenerationTask[]>>;
   cancelTask(taskId: string): Promise<ApiResponse<GenerationTask>>;
   retryTask(taskId: string): Promise<ApiResponse<GenerationTask>>;
+  /** 更新任务的分类标签（整组同值；空串 = 未分类）。 */
+  setTaskCategory(taskId: string, category: string): Promise<ApiResponse<GenerationTask[]>>;
   /** 回收站：软删除任务（运行中的先取消），7 天内可恢复；传 parentId 可整组删除。 */
   deleteTasks(taskIds: string[]): Promise<ApiResponse<GenerationTask[]>>;
   /** 回收站：恢复软删除的任务（按 parentId 组恢复）。 */

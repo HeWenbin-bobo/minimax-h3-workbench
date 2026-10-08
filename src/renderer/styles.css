@@ -361,6 +361,24 @@ button { cursor: pointer; }
 .playground-layout { display: grid; grid-template-columns: 200px 1fr; gap: 14px; flex: 1; min-height: 0; }
 .pg-sessions { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
 .pg-session { position: relative; border: 1px solid var(--line); background: #fff; border-radius: 12px; padding: 0; text-align: left; overflow: hidden; flex: none; }
+.pg-session-filter { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.pg-session-filter button { border: 1px solid var(--line); background: #f7f8fa; color: var(--muted); border-radius: 14px; padding: 4px 11px; font-size: 10px; }
+.pg-session-filter button.on { border-color: #ff9b7c; background: #fff3ee; color: var(--pink); font-weight: 700; }
+.pg-session-tools { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: flex; gap: 3px; opacity: 0; transition: opacity 0.12s; }
+.pg-session:hover .pg-session-tools { opacity: 1; }
+.pg-tool { width: 22px; height: 22px; border: 0; border-radius: 8px; background: transparent; color: var(--subtle); font-size: 12px; line-height: 1; display: grid; place-items: center; }
+.pg-tool:hover { background: #fff1f1; color: var(--danger); }
+.pg-rename { width: 100%; padding: 12px 34px 12px 14px; border: 0; background: transparent; font: inherit; font-size: 11px; color: var(--ink); outline: 0; }
+.pg-trash-overlay { position: fixed; inset: 0; z-index: 6; background: rgba(24, 30, 37, 0.32); display: grid; place-items: center; }
+.pg-trash { width: min(520px, 90vw); max-height: 70vh; overflow-y: auto; background: #fff; border-radius: 16px; padding: 18px 20px; box-shadow: 0 24px 70px rgba(24, 30, 37, 0.24); display: grid; gap: 8px; }
+.pg-trash header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+.pg-trash header strong { color: var(--ink); font-size: 13px; }
+.pg-trash header small { color: var(--muted); font-size: 10px; margin-right: auto; }
+.category-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.category-filter button { border: 1px solid var(--line); background: #f7f8fa; color: var(--muted); border-radius: 14px; padding: 4px 12px; font-size: 10px; }
+.category-filter button.on { border-color: #ff9b7c; background: #fff3ee; color: var(--pink); font-weight: 700; }
+.category-filter .text-button { font-size: 10px; color: var(--pink); }
+.pg-session-delete { display: none; }
 .pg-session-body { display: grid; gap: 3px; padding: 12px 34px 12px 14px; width: 100%; background: transparent; border: 0; text-align: left; }
 .pg-session-body strong { color: var(--ink); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pg-session-body small { color: var(--muted); font-size: 9px; }

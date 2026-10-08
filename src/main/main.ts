@@ -234,6 +234,8 @@ function registerIpc(
   handle("tasks:submit", (_event, request: GenerationRequest) => orchestrator.submit(request));
   handle("tasks:cancel", (_event, id: string) => orchestrator.cancel(id));
   handle("tasks:retry", (_event, id: string) => orchestrator.retry(id));
+  handle("tasks:setCategory", (_event, payload: { taskId: string; category: string }) =>
+    orchestrator.setCategory(payload?.taskId || "", String(payload?.category || "")));
   // 回收站：删除（软）→ 恢复 → 彻底清除。彻底删除的文件同样只允许输出目录内。
   handle("tasks:delete", (_event, ids: string[]) => orchestrator.deleteTasks(Array.isArray(ids) ? ids : []));
   handle("tasks:restore", (_event, ids: string[]) => orchestrator.restoreTasks(Array.isArray(ids) ? ids : []));

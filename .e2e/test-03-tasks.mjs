@@ -72,9 +72,10 @@ await withApp({}, async (cdp) => {
   check("ComfyUI测试连接(模型就绪)", await cdp.eval(`(() => { const card = Array.from(document.querySelectorAll('.connection-card')).find(c => c.textContent.includes('本机 ComfyUI')); const r = card.querySelector('.test-result'); return r?.className.includes('ok') && r.textContent.includes('均已就绪'); })()`));
   await cdp.eval(`document.querySelector('[data-page="studio"]').click()`);
   await new Promise(r => setTimeout(r, 300));
+  // 选 1 路触发 followForm（新提交流程），提交成功后自动切到新项目视图。
   await cdp.eval(`(() => { const sel = Array.from(document.querySelectorAll('select')).find(s => Array.from(s.options).some(o => o.textContent === '1 路')); sel.value = '1'; sel.dispatchEvent(new Event('change', {bubbles:true})); })()`);
-  await cdp.eval(`document.querySelector('.submit-area .primary').click()`);
-  await new Promise(r => setTimeout(r, 3000));
+  await cdp.eval(`document.querySelector(".submit-area .primary").click()`);
+  await new Promise(r => setTimeout(r, 4500));
   check("任务创建并运行", await cdp.eval(`document.querySelector('.task-card.running, .task-card.validating, .task-card.succeeded') !== null`));
   await new Promise(r => setTimeout(r, 8000));
   check("任务成功+视频卡显示", await cdp.eval(`(() => { const card = document.querySelector('.task-card.succeeded'); return Boolean(card && card.querySelector('video')); })()`));

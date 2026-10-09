@@ -60,7 +60,12 @@ export class LlmService {
       const contentType = response.headers.get("content-type") || "";
       if (contentType.includes("text/event-stream")) {
         const received = await consumeSse(response.body, send);
-        if (!received) throw new Error("服务商未返回任何内容（响应为空或格式不兼容），请检查模型名称是否正确。");
+        if (!received) {
+          // 流式 200 却零内容（部分中转/模型的已知毛病）：自动降级发一次非流式请求，而不是直接报错。
+          const fallback = await this.nonstreamChat(payload);
+          if (fallback) send({ seq: 1, delta: fallback });
+          else throw new Error("服务商未返回任何内容（流式与非流式均为空），请检查模型名称或更换服务商。");
+        }
       } else {
         const full = (await response.json().catch(() => ({}))) as {
           choices?: Array<{ message?: { content?: string }; delta?: { content?: string }; text?: string }>;
@@ -73,6 +78,28 @@ export class LlmService {
       }
     } finally {
       this.controller = undefined;
+    }
+  }
+
+  // 非流式补发：流式空回复时的一次自动降级重试（同样载荷，stream:false）。
+  private async nonstreamChat(payload: Array<Record<string, unknown>>): Promise<string | undefined> {
+    try {
+      const response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {})
+        },
+        body: JSON.stringify({ model: this.options.model, messages: payload, stream: false })
+      });
+      if (!response.ok) return undefined;
+      const full = (await response.json().catch(() => ({}))) as {
+        choices?: Array<{ message?: { content?: string }; text?: string }>;
+        content?: string;
+      };
+      return full.choices?.[0]?.message?.content ?? full.choices?.[0]?.text ?? full.content ?? undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -176,8 +203,10 @@ export async function bundledFrameworkVersion(): Promise<string> {
 
 /**
  * AI SDK 多步智能体对话：模型可自主调用 web_search / generate_video 工具，
- * 默认最多 6 步。AI SDK 是 ESM-only——主进程 CJS 产物用动态 import 加载；
+ * 最多 10 步。AI SDK 是 ESM-only——主进程 CJS 产物用动态 import 加载；
  * model 经 createOpenAICompatible 注入（复用连接设置里的 baseUrl/Key/模型名）。
+ * 返回 { textLength, toolCalls }：调用方据此判断"模型不支持工具"（0 文本 0 工具调用）
+ * 并自动回落普通对话——这正是工具支持检测的运行时落地。
  */
 export async function chatAgent(
   options: LlmServiceOptions,
@@ -185,7 +214,7 @@ export async function chatAgent(
   callbacks: AgentToolCallbacks,
   send: ChunkSender,
   signal: AbortSignal
-): Promise<void> {
+): Promise<{ textLength: number; toolCalls: number }> {
   const [{ streamText, tool, stepCountIs }, { createOpenAICompatible }, { z }] = await Promise.all([
     import("ai"),
     import("@ai-sdk/openai-compatible"),
@@ -235,15 +264,54 @@ export async function chatAgent(
         execute: async (params) => callbacks.generateVideo(params)
       })
     },
-    stopWhen: stepCountIs(6),
+    stopWhen: stepCountIs(10),
+    maxRetries: 0, // 快速失败：不支持工具/服务异常时由调用方立即回落普通对话，不做指数退避重试
     abortSignal: signal
   });
   let seq = 0;
+  let textLength = 0;
+  let toolCalls = 0;
   for await (const part of stream.textStream) {
-    if (part) send({ seq: (seq += 1), delta: part });
+    if (part) {
+      textLength += part.length;
+      send({ seq: (seq += 1), delta: part });
+    }
+  }
+  try {
+    // ai v7 的 steps 是 PromiseLike<Array<StepResult>>——await 后按步累计工具调用数。
+    for (const step of await stream.steps) {
+      toolCalls += step.toolCalls.length;
+    }
+  } catch {
+    // steps 不可用时按 0 计（部分 provider 组合不产 steps）。
   }
   // 工具调用全程在 streamText 内部完成；这里只等最终收尾（错误抛给调用方）。
   await stream.finishReason;
+  return { textLength, toolCalls };
+}
+
+/**
+ * 工具支持探测：发一条带工具定义的最小对话，看模型是否回工具调用（或至少正常回话）。
+ * 返回 supported=false 时 UI 应提示该模型/中转不支持智能体模式。
+ */
+export async function probeToolSupport(options: LlmServiceOptions): Promise<{ supported: boolean; message: string }> {
+  const probeMessages: ChatMessage[] = [{ role: "user", content: "回复：好" }];
+  let sent = 0;
+  try {
+    const result = await chatAgent(options, probeMessages, {
+      webSearch: async () => "（探测）",
+      generateVideo: async () => "（探测）"
+    }, () => { sent += 1; }, AbortSignal.timeout(30_000));
+    const supported = result.toolCalls > 0 || result.textLength > 0;
+    return {
+      supported,
+      message: supported
+        ? (result.toolCalls > 0 ? "模型支持工具调用，智能体模式完全可用。" : "模型可正常对话（未主动触发工具，但智能体模式可用）。")
+        : "模型未返回任何内容，可能不支持工具调用（智能体模式不可用），将自动改用普通对话。"
+    };
+  } catch (error) {
+    return { supported: false, message: `工具支持探测失败：${error instanceof Error ? error.message : "未知错误"}（将自动改用普通对话）` };
+  }
 }
 
 // 解析 SSE 流：按行拆 data: 载荷，提取 choices[0].delta.content；残行跨 chunk 缓存。

@@ -439,7 +439,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
   const [webSearch, setWebSearch] = useState(false);
-  const [agentMode, setAgentMode] = useState(false);
+  // 智能体默认开启（用户指令）；模型不支持工具时主进程自动回落普通对话，前端无感。
+  const [agentMode, setAgentMode] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [showVideoForm, setShowVideoForm] = useState(false);
   const [videoRequest, setVideoRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
@@ -465,8 +466,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         ...msg,
         streaming: false,
         error: !event.ok && Boolean(event.message),
-        // 失败且气泡为空时写入错误文案——空回复永远是"显示出来的错误"，绝不静默。
-        content: !event.ok && event.message && !msg.content ? `请求失败：${event.message}` : msg.content
+        // 失败必显文案：气泡为空写完整错误；已有内容（如回落提示）在末尾追加错误详情。
+        content: !event.ok && event.message
+          ? (msg.content ? `${msg.content}\n\n请求失败：${event.message}` : `请求失败：${event.message}`)
+          : msg.content
       })));
       streamBuffer.current = "";
       setGenerating(false);

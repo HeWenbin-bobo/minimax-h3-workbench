@@ -80,11 +80,12 @@ await withApp({}, async (cdp) => {
   check("空回复显示错误文案", await cdp.eval(`(() => { const msgs = Array.from(document.querySelectorAll('.pg-msg.assistant')); const last = msgs[msgs.length-1]; return last.className.includes('error') && last.textContent.includes('请求失败'); })()`));
 
   // HTTP 500 → 错误文案
+  // HTTP 500 → agent 回落普通对话 → 仍失败 → 气泡含回落提示 + 完整错误（agent 默认开启后的新链路）
   sseBehavior = "http500";
   await cdp.eval(`(() => { ${setReactInput}; window.__set(document.querySelector('.pg-input-row textarea'), '服务器错误测试'); })()`);
   await cdp.eval(`document.querySelector('.pg-input-row .primary').click()`);
-  await new Promise(r => setTimeout(r, 2000));
-  check("HTTP500显示错误文案", await cdp.eval(`(() => { const msgs = Array.from(document.querySelectorAll('.pg-msg.assistant')); const last = msgs[msgs.length-1]; return last.className.includes('error') && last.textContent.includes('LLM 请求失败'); })()`));
+  await new Promise(r => setTimeout(r, 6000));
+  check("HTTP500显示错误文案", await cdp.eval(`(() => { const msgs = Array.from(document.querySelectorAll('.pg-msg.assistant')); const last = msgs[msgs.length-1]; return last.className.includes('error') && last.textContent.includes('LLM 请求失败') && last.textContent.includes('普通对话模式'); })()`));
 
   // 非流式回退
   sseBehavior = "nonstream";

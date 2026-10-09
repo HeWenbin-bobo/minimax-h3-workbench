@@ -286,19 +286,24 @@ function registerIpc(
       return true;
     }
     // 智能体模式：AI SDK 多步工具循环。视频工具直接接 orchestrator（提交即返回任务 ID，卡片实时刷新）。
+    // 工具支持自动检测：模型不支持工具调用（0 文本 + 0 工具调用）或 agent 路径异常但尚未输出任何内容时，
+    // 自动用相同消息回落普通对话（runtime fallback）——避免出现"又是空回复"且对用户透明。
     const controller = new AbortController();
     llmAborters.push(controller);
     void (async () => {
       const settings = await settingsStore.get();
-      await chatAgent({
+      let agentSent = 0;
+      const agentSend = (event: LlmStreamEvent) => { agentSent += 1; sendChunk(event); };
+      const agentOptions = {
         baseUrl: settings.llm.baseUrl,
         apiKey: await settingsStore.getSecret("llmApiKey"),
         model: settings.llm.model,
         systemPrompt: settings.llm.systemPrompt,
         searchBaseUrl: settings.searchApi.baseUrl || undefined,
         searchApiKey: await settingsStore.getSecret("searchApiKey")
-      }, messages, {
-        webSearch: async (query) => {
+      };
+      const agentCallbacks = {
+        webSearch: async (query: string) => {
           const response = await fetch(`${(settings.searchApi.baseUrl || "").replace(/\/+$/, "")}/search`, {
             method: "POST",
             headers: {
@@ -314,7 +319,7 @@ function registerIpc(
             .map((item, index) => `[${index + 1}] ${item.title || item.name || ""}\n${item.url || ""}\n${item.snippet || item.content || ""}`)
             .join("\n\n");
         },
-        generateVideo: async (params) => {
+        generateVideo: async (params: { prompt: string; duration: number; count: number }) => {
           const request: GenerationRequest = {
             ...initialAgentVideoRequest,
             prompt: params.prompt,
@@ -325,7 +330,28 @@ function registerIpc(
           const response = await orchestrator.submit(request);
           return `已创建 ${response.length} 个视频生成任务（${backendKindLabel(request.backend)}·${request.duration} 秒），卡片将在下方实时显示进度，也可到「生成工作台」查看。`;
         }
-      }, sendChunk, controller.signal);
+      };
+      let result: { textLength: number; toolCalls: number } | undefined;
+      try {
+        result = await chatAgent(agentOptions, messages, agentCallbacks, agentSend, controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) { sendDone(true); return; }
+        // agent 异常且还没输出内容：自动用普通对话补发（普通路径有完整的错误信息）。
+        if (agentSent === 0) {
+          sendChunk({ seq: 1, delta: "（当前模型/服务商对智能体工具调用支持不完整，已自动改用普通对话模式）\n\n" });
+          await service.chat(messages, webSearch, sendChunk);
+          sendDone(true);
+          return;
+        }
+        throw error;
+      }
+      if (agentSent === 0 && result.textLength === 0 && result.toolCalls === 0) {
+        // 模型走了 agent 路径但没出文本也没出工具调用——基本就是不支持函数调用。自动回落普通对话。
+        sendChunk({ seq: 1, delta: "（当前模型不支持工具调用，已自动改用普通对话模式）\n\n" });
+        await service.chat(messages, webSearch, sendChunk);
+        sendDone(true);
+        return;
+      }
       sendDone(true);
     })().catch((error: unknown) => {
       const aborted = controller.signal.aborted;

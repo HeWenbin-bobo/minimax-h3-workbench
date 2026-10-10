@@ -149,9 +149,9 @@ function registerIpc(
   orchestrator: GenerationOrchestrator
 ): void {
   // 智能体视频工具的兜底参数（具体 prompt/时长/数量由模型经工具入参给定）。
-  const initialAgentVideoRequest: GenerationRequest = {
+  // backend 在回调里按用户当前设置的 defaultBackend 填——不能写死（写死 rb 会让没买瞬映卡密的用户必然失败）。
+  const initialAgentVideoRequest: Omit<GenerationRequest, "backend"> = {
     mode: "text",
-    backend: "rb",
     prompt: "",
     duration: 4,
     ratio: "16:9",
@@ -324,6 +324,8 @@ function registerIpc(
         generateVideo: async (params: { prompt: string; duration: number; count: number }) => {
           const request: GenerationRequest = {
             ...initialAgentVideoRequest,
+            // 跟随用户当前默认后端；不写死（写死 rb 会让没配瞬映卡密的用户必然失败）。
+            backend: settings.defaultBackend,
             prompt: params.prompt,
             duration: Math.max(4, Math.min(15, Math.round(params.duration || 4))),
             count: Math.max(1, Math.min(4, Math.round(params.count || 1))),

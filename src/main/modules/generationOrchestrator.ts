@@ -199,6 +199,10 @@ export class GenerationOrchestrator {
   async cancel(taskId: string): Promise<GenerationTask> {
     const task = this.tasks.find((entry) => entry.id === taskId);
     if (!task) throw new Error("任务不存在。");
+    // 已到终态就原样返回：再走一遍会抹掉失败原因（"请先保存 API Key" → "已取消"），
+    // 对已成功的任务更糟——状态被翻成"已取消"，成片在界面上消失、只留一条假的中止记录。
+    // UI 不给终态任务取消入口，但 tasks:cancel 是一条可达 IPC。
+    if (["succeeded", "failed", "cancelled", "interrupted"].includes(task.status)) return { ...task };
     // 先打终态标记：排队任务据此跳过执行，运行中任务据此把 AbortError 归为取消而非失败。
     task.status = "cancelled";
     task.message = "已取消";

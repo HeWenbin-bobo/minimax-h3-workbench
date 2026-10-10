@@ -471,7 +471,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const bottomRef = useRef<HTMLDivElement>(null);
   const searchReady = Boolean(settings.searchApi.baseUrl);
 
-  useEffect(() => { localStorage.setItem(pgSessionsKey, JSON.stringify(sessions.slice(0, 50))); }, [sessions]);
+  // 落盘上限 50：内存态一并裁剪，否则 UI 显示得出来、重启后却凭空少几个（用户可感知的静默丢失）。
+  useEffect(() => {
+    const capped = sessions.length > 50 ? sessions.slice(0, 50) : sessions;
+    if (capped !== sessions) setSessions(capped);
+    localStorage.setItem(pgSessionsKey, JSON.stringify(capped));
+  }, [sessions]);
   useEffect(() => {
     // 流式事件只写入发起本轮对话的会话——期间切换会话不会污染其他会话的消息。
     const offChunk = window.h3.onLlmChunk((event: LlmStreamEvent) => {

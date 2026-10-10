@@ -55,8 +55,9 @@ export async function checkFrameworkUpdate(
   fetcher: typeof fetch = fetch
 ): Promise<{ bundledVersion: string; latestVersion?: string; updateAvailable: boolean; message: string }> {
   try {
+    // Accept 不能用 application/vnd.npm.install-v1+json：应用主进程环境实测稳定 406（裸 Node/裸 Electron 均 200，成因未明），通配即可。
     const response = await fetcher(`https://registry.npmjs.org/${AGENT_FRAMEWORK}/latest`, {
-      headers: { Accept: "application/vnd.npm.install-v1+json", "User-Agent": `MiniMax-H3-Workbench/${bundledVersion}` },
+      headers: { Accept: "*/*", "User-Agent": `MiniMax-H3-Workbench/${bundledVersion}` },
       signal: AbortSignal.timeout(10_000)
     });
     if (!response.ok) return { bundledVersion, updateAvailable: false, message: `框架更新检查失败（HTTP ${response.status}）。` };

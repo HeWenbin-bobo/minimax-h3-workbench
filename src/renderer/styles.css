@@ -381,6 +381,7 @@ button { cursor: pointer; }
 .category-filter button { border: 1px solid var(--line); background: #f7f8fa; color: var(--muted); border-radius: 14px; padding: 4px 12px; font-size: 10px; }
 .category-filter button.on { border-color: #ff9b7c; background: #fff3ee; color: var(--pink); font-weight: 700; }
 .category-filter .text-button { font-size: 10px; color: var(--pink); }
+.cat-input { border: 1px solid #ff9b7c; background: #fff3ee; color: var(--ink); border-radius: 14px; padding: 4px 12px; font: inherit; font-size: 10px; outline: 0; width: 150px; }
 .pg-session-delete { display: none; }
 .pg-session-body { display: grid; gap: 3px; padding: 12px 34px 12px 14px; width: 100%; background: transparent; border: 0; text-align: left; }
 .pg-session-body strong { color: var(--ink); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

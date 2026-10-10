@@ -333,7 +333,7 @@ function registerIpc(
       };
       let result: { textLength: number; toolCalls: number } | undefined;
       try {
-        result = await chatAgent(agentOptions, messages, agentCallbacks, agentSend, controller.signal);
+        result = await chatAgent(agentOptions, messages, agentCallbacks, agentSend, controller.signal, webSearch);
       } catch (error) {
         if (controller.signal.aborted) { sendDone(true); return; }
         // agent 异常且还没输出内容：自动用普通对话补发（普通路径有完整的错误信息）。

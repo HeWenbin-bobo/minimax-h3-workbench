@@ -172,6 +172,13 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   }
   const rbDurationOptions = rbPreset === "reference" || rbPreset === "tail_frame" ? [4, 6, 8] : rbPreset === "easy_15" ? [15] : rbPreset === "easy_30" ? [30] : [];
   const [showTrash, setShowTrash] = useState(false);
+  // 内联分类输入：window.prompt 在 Electron 中不可用（抛 "prompt() is not supported."），改用与重命名一致的输入框。
+  const [catEdit, setCatEdit] = useState<{ project: boolean; value: string }>({ project: false, value: "" });
+  async function commitProjectCategory() {
+    if (!catEdit.project) return; // Escape 时已置 project=false：视为取消
+    setCatEdit({ project: false, value: "" });
+    await setProjectCategory(catEdit.value);
+  }
   // 项目分类：所有项目出现过的分类 + "全部"/"未分类" 过滤；新分类在当前项目上直接输入。
   const projectCategories = useMemo(() => Array.from(new Set(tasks.map((t) => t.category).filter((c): c is string => Boolean(c)))), [tasks]);
   const [categoryFilter, setCategoryFilter] = useState<string>("全部");
@@ -198,12 +205,11 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="page-title-actions"><button className="text-button" onClick={() => setShowTrash((v) => !v)}>🗑 回收站</button><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div></div>
     {projects.length > 0 && <div className="category-filter">
       {["全部", ...projectCategories, "未分类"].map((c) => <button key={c} className={categoryFilter === c ? "on" : ""} onClick={() => setCategoryFilter(c)}>{c}</button>)}
-      <button className="text-button" title="给当前项目设置分类" disabled={!activeProject} onClick={async () => {
-        if (!activeProject) return;
-        const category = window.prompt("输入当前项目的分类名称（留空清除分类）", activeProject[0].category || "");
-        if (category === null) return;
-        await setProjectCategory(category);
-      }}>＋ 分类</button>
+      {catEdit.project ? <input className="cat-input" autoFocus value={catEdit.value} placeholder="分类名（留空清除）"
+        onChange={(e) => setCatEdit({ project: true, value: e.target.value })}
+        onBlur={() => commitProjectCategory()}
+        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") setCatEdit({ project: false, value: "" }); }} />
+        : <button className="text-button" title="给当前项目设置分类" disabled={!activeProject} onClick={() => { if (activeProject) setCatEdit({ project: true, value: activeProject[0].category || "" }); }}>＋ 分类</button>}
     </div>}
     <div className="project-tabs">
       <button className={`project-tab new-task${activeProjectId ? "" : " active"}`} onClick={() => setActiveProjectId(undefined)}>
@@ -610,6 +616,15 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     if (title) setSessions((all) => all.map((s) => s.id === renamingId ? { ...s, title } : s));
     setRenamingId(undefined);
   }
+  // 会话分类：同样改为内联输入（window.prompt 在 Electron 中不可用）。
+  const [catSessionId, setCatSessionId] = useState<string>();
+  const [catSessionDraft, setCatSessionDraft] = useState("");
+  function commitSessionCategory() {
+    if (!catSessionId) return;
+    const normalized = catSessionDraft.trim().slice(0, 20);
+    setSessions((all) => all.map((s) => s.id === catSessionId ? { ...s, category: normalized || undefined } : s));
+    setCatSessionId(undefined);
+  }
 
   return <section className="page playground"><div className="page-title"><div><span className="eyebrow">PLAY</span><h1>游乐场</h1></div><button className="primary" onClick={newSession}>新对话</button></div>
     <div className="playground-layout">
@@ -623,17 +638,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         {filteredSessions.map((session) => <div key={session.id} className={session.id === activeId ? "pg-session active" : "pg-session"}>
           {renamingId === session.id
             ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(undefined); }} onFocus={(e) => e.target.select()} />
+            : catSessionId === session.id
+            ? <input className="pg-rename" autoFocus value={catSessionDraft} placeholder="分类名（留空清除）" onChange={(e) => setCatSessionDraft(e.target.value)} onBlur={commitSessionCategory} onKeyDown={(e) => { if (e.key === "Enter") commitSessionCategory(); if (e.key === "Escape") setCatSessionId(undefined); }} onFocus={(e) => e.target.select()} />
             : <button className="pg-session-body" onClick={() => setActiveId(session.id)} onDoubleClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }} title="双击重命名">
               <strong>{session.title || "新对话"}</strong><small>{session.messages.length} 条消息{session.category ? ` · ${session.category}` : ""}</small>
             </button>}
           <div className="pg-session-tools">
             <button className="pg-tool" title="重命名" onClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }}>✎</button>
-            <button className="pg-tool" title="设置分类" onClick={() => {
-              const category = window.prompt("输入分类名称（留空清除分类）", session.category || "");
-              if (category === null) return;
-              const normalized = category.trim().slice(0, 20);
-              setSessions((all) => all.map((s) => s.id === session.id ? { ...s, category: normalized || undefined } : s));
-            }}>🏷</button>
+            <button className="pg-tool" title="设置分类" onClick={() => { setCatSessionId(session.id); setCatSessionDraft(session.category || ""); }}>🏷</button>
             <button className="pg-tool" title="删除会话（可在回收站恢复 7 天）" onClick={() => deleteSession(session)}>×</button>
           </div>
         </div>)}

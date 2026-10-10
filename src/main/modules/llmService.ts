@@ -213,7 +213,9 @@ export async function chatAgent(
   messages: ChatMessage[],
   callbacks: AgentToolCallbacks,
   send: ChunkSender,
-  signal: AbortSignal
+  signal: AbortSignal,
+  /** 「联网」开关：关闭时不把 web_search 工具下发给模型（否则开关形同虚设）。 */
+  enableWebSearch = false
 ): Promise<{ textLength: number; toolCalls: number }> {
   const [{ streamText, tool, stepCountIs }, { createOpenAICompatible }, { z }] = await Promise.all([
     import("ai"),
@@ -242,18 +244,21 @@ export async function chatAgent(
     system: options.systemPrompt || "你是 MiniMax H3 视频工作台内置的智能助手，可以联网搜索资料，也可以直接调用 generate_video 工具为用户生成视频。",
     messages: toModelMessages(messages),
     tools: {
-      web_search: tool({
-        description: "联网搜索最新资料。当用户询问实时信息、需要引用来源时调用。",
-        inputSchema: z.object({ query: z.string().describe("搜索关键词") }),
-        execute: async ({ query }) => {
-          try {
-            const results = await callbacks.webSearch(query);
-            return results || "未搜索到相关内容。";
-          } catch (error) {
-            return `搜索失败：${error instanceof Error ? error.message : "未知错误"}（请基于自身知识回答）`;
+      // 「联网」开关关闭时不暴露 web_search，避免模型调用一个用户已关掉的工具。
+      ...(enableWebSearch ? {
+        web_search: tool({
+          description: "联网搜索最新资料。当用户询问实时信息、需要引用来源时调用。",
+          inputSchema: z.object({ query: z.string().describe("搜索关键词") }),
+          execute: async ({ query }) => {
+            try {
+              const results = await callbacks.webSearch(query);
+              return results || "未搜索到相关内容。";
+            } catch (error) {
+              return `搜索失败：${error instanceof Error ? error.message : "未知错误"}（请基于自身知识回答）`;
+            }
           }
-        }
-      }),
+        })
+      } : {}),
       generate_video: tool({
         description: "为用户生成 AI 视频。用户明确想生成/制作视频时调用。",
         inputSchema: z.object({

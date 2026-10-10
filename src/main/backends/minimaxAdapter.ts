@@ -1,6 +1,7 @@
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { estimateCloudCost } from "../../shared/capabilities";
+import { assertSafeResultUrl } from "./resultUrl";
 import type {
   BackendTestResult,
   GenerationAdapter,
@@ -162,7 +163,11 @@ export class MiniMaxAdapter implements GenerationAdapter {
   }
 
   private async download(url: string, taskId: string, signal?: AbortSignal): Promise<string> {
-    const response = await fetch(url, { signal });
+    // content.url 来自远端响应，属不可信输入——与 RB 后端同样过 SSRF 校验，
+    // 否则被劫持的响应可让本应用替它访问内网、并把内网内容当作"生成结果"落盘。
+    const safeUrl = assertSafeResultUrl(url);
+    // redirect:"manual"：禁止自动跟随重定向，否则可用 302 绕过上面的校验指向内网。
+    const response = await fetch(safeUrl, { signal, redirect: "manual" });
     if (!response.ok) throw new Error(`生成结果下载失败：${response.status}`);
     await mkdir(this.options.outputDirectory, { recursive: true });
     const target = path.join(this.options.outputDirectory, `${taskId}.mp4`);

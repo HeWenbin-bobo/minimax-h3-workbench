@@ -155,7 +155,21 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   const activeProject = activeProjectId ? projects.find((group) => (group[0].parentId || group[0].id) === activeProjectId) : undefined;
   const isRb = request.backend === "rb";
   const rbPreset = request.preset || (request.firstFramePath && request.lastFramePath ? "tail_frame" : "reference");
-  const setRbPreset = (preset: string) => setRequest({ ...request, preset, ...(preset === "easy_15" ? { duration: 15 } : preset === "easy_30" ? { duration: 30 } : { duration: request.duration > 8 ? 8 : request.duration }) });
+  // 切换后端/预设后把时长夹回该后端的合法值域。不做这一步的话，UI 下拉会被浏览器归一化到
+  // 第一个选项（看着像 4 秒），而 request.duration 仍是旧值，提交时才被 validateRequest 拒绝
+  // （"视频时长必须在 4–15 秒之间"）——用户看到的下拉值与实际提交值不一致。
+  const clampDuration = (duration: number, options: number[]) =>
+    options.length === 0 || options.includes(duration)
+      ? duration
+      : options.reduce((best, x) => (Math.abs(x - duration) < Math.abs(best - duration) ? x : best), options[0]);
+  const durationOptionsFor = (backend: BackendKind, preset?: string): number[] => {
+    if (backend !== "rb") return [4, 6, 8, 10, 12, 15];
+    if (preset === "easy_15") return [15];
+    if (preset === "easy_30") return [30];
+    if (preset === "flashvsr_upscale") return [];
+    return [4, 6, 8]; // reference / tail_frame
+  };
+  const setRbPreset = (preset: string) => setRequest({ ...request, preset, duration: clampDuration(request.duration, durationOptionsFor("rb", preset)) });
   const clampedCount = Math.max(1, Math.min(4, request.count));
   // 新建视图：request.count 个占位；项目视图：仅该项目任务，按 index 排序。
   const currentTasks: Array<GenerationTask | undefined> = useMemo(
@@ -173,7 +187,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
     if (response.data?.[0]) setActiveProjectId(response.data[0].parentId);
     onNotice(`已创建 ${request.count} 个生成任务，可继续提交新任务并行生成`);
   }
-  const rbDurationOptions = rbPreset === "reference" || rbPreset === "tail_frame" ? [4, 6, 8] : rbPreset === "easy_15" ? [15] : rbPreset === "easy_30" ? [30] : [];
+  const rbDurationOptions = durationOptionsFor("rb", rbPreset);
   const [showTrash, setShowTrash] = useState(false);
   // 内联分类输入：window.prompt 在 Electron 中不可用（抛 "prompt() is not supported."），改用与重命名一致的输入框。
   const [catEdit, setCatEdit] = useState<{ project: boolean; value: string }>({ project: false, value: "" });
@@ -245,7 +259,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
           {isRb && rbPreset === "reference" && <FilePicker label="参考视频（可选）" path={request.sourceVideoPath} onClick={() => choose("video", "sourceVideoPath")} />}
           {isRb && rbPreset === "tail_frame" && <div className="frame-row"><FilePicker label="首帧" path={request.firstFramePath} onClick={() => choose("image", "firstFramePath")} /><FilePicker label="尾帧" path={request.lastFramePath} onClick={() => choose("image", "lastFramePath")} /></div>}
         </>}
-      <div className="form-grid"><label>生成后端<select value={request.backend} onChange={(e) => setRequest({ ...request, backend: e.target.value as BackendKind, preset: undefined })}><option value="local">本机 ComfyUI</option><option value="ssh">SSH 远程显卡</option><option value="minimax">MiniMax H3 云 API</option><option value="rb">瞬映 RB 云生成</option></select></label>
+      <div className="form-grid"><label>生成后端<select value={request.backend} onChange={(e) => { const backend = e.target.value as BackendKind; const preset = undefined; setRequest({ ...request, backend, preset, duration: clampDuration(request.duration, durationOptionsFor(backend, preset)) }); }}><option value="local">本机 ComfyUI</option><option value="ssh">SSH 远程显卡</option><option value="minimax">MiniMax H3 云 API</option><option value="rb">瞬映 RB 云生成</option></select></label>
         {(!isRb || rbDurationOptions.length > 0) && <label>时长<select value={request.duration} onChange={(e) => setRequest({ ...request, duration: Number(e.target.value) })}>{(!isRb ? [4,6,8,10,12,15] : rbDurationOptions).map((x) => <option key={x} value={x}>{x} 秒</option>)}</select></label>}
         {!isRb && <label>画幅<select value={request.ratio} onChange={(e) => setRequest({ ...request, ratio: e.target.value as GenerationRequest["ratio"] })}>{["16:9","9:16","1:1","4:3","3:4","21:9","adaptive"].map((x) => <option key={x}>{x}</option>)}</select></label>}
         {!isRb && <label>分辨率<select value={request.resolution} onChange={(e) => setRequest({ ...request, resolution: e.target.value as "768P" | "2K" })}><option>768P</option><option>2K</option></select></label>}

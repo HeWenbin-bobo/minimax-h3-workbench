@@ -47,12 +47,15 @@ export function App() {
   }, []);
 
   // 生成完成/失败系统通知：应用最小化或在后台时用户也能第一时间知道结果。
+  // 只在"本会话内首次观察到该状态"时通知：历史上从没见过的任务（应用启动加载史时的记录）
+  // before 为 undefined，若按"状态变成终态"判断会导致每次启动把全部历史任务重播一遍通知。
   const tasksRef = useRef<GenerationTask[]>([]);
   useEffect(() => {
     const prev = tasksRef.current;
     for (const task of tasks) {
       const before = prev.find((t) => t.id === task.id);
-      const entered = (status: GenerationTask["status"]) => before?.status !== status && task.status === status;
+      if (!before) continue; // 首次见到的任务不算"刚刚完成"（历史加载 / 已在别的路径通知过）
+      const entered = (status: GenerationTask["status"]) => before.status !== status && task.status === status;
       if (entered("succeeded")) {
         const notification = new Notification("MiniMax H3", { body: `视频生成完成：${task.prompt.slice(0, 40)}` });
         notification.onclick = () => window.focus();

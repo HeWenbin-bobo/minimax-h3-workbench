@@ -463,6 +463,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [videoRequest, setVideoRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
   const streamBuffer = useRef("");
   const streamingSessionId = useRef("");
+  // 智能体建任务的 id 缓冲：与 chunk 同理，事件可能早于 React 提交新会话到达。
+  const taskIdBuffer = useRef<string[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const searchReady = Boolean(settings.searchApi.baseUrl);
 
@@ -482,13 +484,18 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       // 内容只留在缓冲区。收尾时取缓冲区与消息内容的较长者写回，避免真实回复被空 content 覆盖（"发消息没回复"）。
       const buffered = streamBuffer.current;
       streamBuffer.current = "";
+      // 同样的竞态：智能体建任务的事件可能早于消息提交到达，收尾时一并写回。
+      const pendingTaskIds = taskIdBuffer.current;
+      taskIdBuffer.current = [];
       if (!targetId) return;
       setSessions((all) => patchLast(all, targetId, (msg) => {
         const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
+        const mergedTaskIds = Array.from(new Set([...(msg.taskIds ?? []), ...pendingTaskIds]));
         return {
           ...msg,
           streaming: false,
           error: !event.ok && Boolean(event.message),
+          taskIds: mergedTaskIds.length ? mergedTaskIds : undefined,
           // 失败必显文案：气泡为空写完整错误；已有内容（如回落提示）在末尾追加错误详情。
           content: !event.ok && event.message
             ? (base ? `${base}\n\n请求失败：${event.message}` : `请求失败：${event.message}`)
@@ -498,7 +505,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       setGenerating(false);
       if (!event.ok && event.message) onError(new Error(event.message));
     });
-    return () => { offChunk(); offDone(); };
+    // 智能体经 generate_video 建好任务：把卡片挂到当前正在流式的助手气泡上（否则任务只在工作台可见）。
+    const offTasks = window.h3.onLlmTasks((event) => {
+      const targetId = streamingSessionId.current;
+      if (!targetId) return;
+      taskIdBuffer.current = [...taskIdBuffer.current, ...event.taskIds];
+      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, taskIds: Array.from(new Set([...(msg.taskIds ?? []), ...event.taskIds])) })));
+    });
+    return () => { offChunk(); offDone(); offTasks(); };
   }, []);
   const activeIdRef = useRef(activeId);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
@@ -552,7 +566,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: "", streaming: true };
     const history: ChatMessage[] = [...(session.messages).filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })), { role: "user", content: userMsg.content, images: userMsg.images }];
     setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, title: s.messages.length === 0 && text ? text.slice(0, 20) : s.title, messages: [...s.messages, userMsg, assistantMsg] } : s));
-    setInput(""); setAttachments([]); setGenerating(true); streamBuffer.current = ""; streamingSessionId.current = session.id;
+    setInput(""); setAttachments([]); setGenerating(true); streamBuffer.current = ""; taskIdBuffer.current = []; streamingSessionId.current = session.id;
     const result = await window.h3.chatLlm(history, webSearch, agentMode);
     if (!result.ok) {
       setGenerating(false);

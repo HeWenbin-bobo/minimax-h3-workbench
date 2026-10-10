@@ -240,6 +240,8 @@ export interface WorkbenchApi {
   readAttachment(path: string): Promise<ApiResponse<AttachmentPayload>>;
   onLlmChunk(listener: (chunk: LlmStreamEvent) => void): () => void;
   onLlmDone(listener: (event: LlmDoneEvent) => void): () => void;
+  /** 智能体工具经 generate_video 建好任务后推送任务 id：渲染端把卡片挂到当前会话气泡上。 */
+  onLlmTasks(listener: (event: LlmTasksEvent) => void): () => void;
   onTaskUpdate(listener: (task: GenerationTask) => void): () => void;
 }
 
@@ -271,4 +273,9 @@ export interface LlmStreamEvent {
 export interface LlmDoneEvent {
   ok: boolean;
   message?: string;
+}
+
+/** 智能体工具创建视频任务事件：渲染端据此把结果卡片挂到当前会话的助手气泡上（否则任务只在工作台可见）。 */
+export interface LlmTasksEvent {
+  taskIds: string[];
 }

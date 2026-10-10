@@ -14,7 +14,7 @@ import {
 } from "electron";
 import { AdapterRegistry } from "./backends/adapterRegistry";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
-import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmDoneEvent, LlmStreamEvent, SecretName } from "../shared/types";
+import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmDoneEvent, LlmStreamEvent, LlmTasksEvent, SecretName } from "../shared/types";
 import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
@@ -179,6 +179,8 @@ function registerIpc(
   };
   const sendChunk = (event: LlmStreamEvent) => mainWindow?.webContents.send("llm:chunk", event);
   const sendDone = (ok: boolean, message?: string) => mainWindow?.webContents.send("llm:done", { ok, message } satisfies LlmDoneEvent);
+  // 智能体工具建好任务后推送任务 id：游乐场把卡片挂到当前会话气泡上。
+  const sendLlmTasks = (taskIds: string[]) => mainWindow?.webContents.send("llm:tasks", { taskIds } satisfies LlmTasksEvent);
   // LLM 连接测试（cc-switch 模式）：拉模型列表验证连通性——不发对话（不花钱），
   // 不受对话端点路径差异影响；/models 不通的服务商回退发一条最小对话。
   handle("llm:test", async () => {
@@ -328,6 +330,8 @@ function registerIpc(
             baseSeed: Math.floor(Math.random() * 1_000_000)
           };
           const response = await orchestrator.submit(request);
+          // 把新任务 id 推给渲染端：游乐场会话内直接挂结果卡片（工具文案承诺了"卡片将在下方实时显示"，此前没实现）。
+          sendLlmTasks(response.map((task) => task.id));
           return `已创建 ${response.length} 个视频生成任务（${backendKindLabel(request.backend)}·${request.duration} 秒），卡片将在下方实时显示进度，也可到「生成工作台」查看。`;
         }
       };

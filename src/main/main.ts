@@ -293,6 +293,9 @@ function registerIpc(
     // 智能体模式：AI SDK 多步工具循环。视频工具直接接 orchestrator（提交即返回任务 ID，卡片实时刷新）。
     // 工具支持自动检测：模型不支持工具调用（0 文本 + 0 工具调用）或 agent 路径异常但尚未输出任何内容时，
     // 自动用相同消息回落普通对话（runtime fallback）——避免出现"又是空回复"且对用户透明。
+    // 并发守卫：agent 不走 LlmService，绕过了它的 busy 检查；不挡的话两条流会同时往同一个
+    // streamBuffer/streamingSessionId 里写，回复交错、用户消息落两条、界面永远卡在"回复中"。
+    if (llmAborters.length > 0) throw new Error("上一轮对话还在进行中，请先停止或等待完成。");
     const controller = new AbortController();
     llmAborters.push(controller);
     void (async () => {
@@ -365,6 +368,10 @@ function registerIpc(
     })().catch((error: unknown) => {
       const aborted = controller.signal.aborted;
       sendDone(aborted, aborted ? undefined : error instanceof Error ? error.message : "智能体对话失败");
+    }).finally(() => {
+      // 收尾必摘：不摘的话 llmAborters 会被历轮对话撑满，上面的并发守卫从此永久拒绝新对话。
+      const index = llmAborters.indexOf(controller);
+      if (index >= 0) llmAborters.splice(index, 1);
     });
     return true;
   });

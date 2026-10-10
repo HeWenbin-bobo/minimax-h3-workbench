@@ -468,6 +468,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const streamingSessionId = useRef("");
   // 智能体建任务的 id 缓冲：与 chunk 同理，事件可能早于 React 提交新会话到达。
   const taskIdBuffer = useRef<string[]>([]);
+  // 同步发送守卫：generating 是异步 state，挡不住同一 tick 内的连发。
+  const sendingRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const searchReady = Boolean(settings.searchApi.baseUrl);
 
@@ -511,6 +513,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         };
       }));
       setGenerating(false);
+      sendingRef.current = false; // 同步守卫随本轮结束释放
       if (!event.ok && event.message) onError(new Error(event.message));
     });
     // 智能体经 generate_video 建好任务：把卡片挂到当前正在流式的助手气泡上（否则任务只在工作台可见）。
@@ -559,8 +562,11 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
 
   async function send() {
     const text = input.trim();
-    if ((!text && attachments.length === 0) || generating) return;
+    // generating 是异步 React state：同一 tick 内连发两次（快速连按 Enter）会双双读到 false，
+    // 于是重复落用户消息与空气泡、两条流抢同一个缓冲区。用 ref 做同步守卫。
+    if ((!text && attachments.length === 0) || generating || sendingRef.current) return;
     if (!settings.llm.baseUrl) { onError(new Error("请先在连接设置中配置游乐场 LLM。")); return; }
+    sendingRef.current = true;
     // 无会话时先本地创建会话对象再继续（不 return），避免首条消息被丢弃。
     let session = active;
     if (!session) {
@@ -578,6 +584,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const result = await window.h3.chatLlm(history, webSearch, agentMode);
     if (!result.ok) {
       setGenerating(false);
+      sendingRef.current = false;
       setSessions((all) => patchLast(all, session!.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
     }
   }
@@ -585,6 +592,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   async function stop() {
     await window.h3.abortLlm();
     setGenerating(false);
+    sendingRef.current = false;
     setSessions((all) => patchLast(all, activeIdRef.current, (msg) => ({ ...msg, streaming: false })));
   }
 

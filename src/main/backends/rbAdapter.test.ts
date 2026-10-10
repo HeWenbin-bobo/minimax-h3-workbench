@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GenerationRequest } from "../../shared/types";
-import { RbAdapter } from "./rbAdapter";
+import { RbAdapter, assertSafeResultUrl } from "./rbAdapter";
 
 const base: GenerationRequest = {
   mode: "text",
@@ -65,5 +65,36 @@ describe("RbAdapter.buildJobBody", () => {
     globalThis.fetch = fetchMock;
     const task = { id: "t1", seed: 1, prompt: base.prompt } as never;
     await expect(adapter().generate(base, task, () => undefined)).rejects.toThrow("内容审核未通过");
+  });
+});
+
+describe("assertSafeResultUrl（SSRF 防护）", () => {
+  it("放行公网 HTTPS 结果地址", () => {
+    expect(assertSafeResultUrl("https://cdn.example.com/v/1.mp4").hostname).toBe("cdn.example.com");
+  });
+
+  it("拒绝非 HTTPS（含 http 与 file）", () => {
+    expect(() => assertSafeResultUrl("http://cdn.example.com/1.mp4")).toThrow("HTTPS");
+    expect(() => assertSafeResultUrl("file:///C:/Windows/win.ini")).toThrow("HTTPS");
+  });
+
+  it("拒绝回环 / 私网 / 链路本地 / 云元数据地址", () => {
+    for (const url of [
+      "https://127.0.0.1/1.mp4",
+      "https://localhost/1.mp4",
+      "https://10.0.0.8/1.mp4",
+      "https://192.168.1.10/1.mp4",
+      "https://172.16.5.4/1.mp4",
+      "https://169.254.169.254/latest/meta-data/",
+      "https://[::1]/1.mp4",
+      "https://[fd00::1]/1.mp4",
+      "https://0.0.0.0/1.mp4"
+    ]) {
+      expect(() => assertSafeResultUrl(url), url).toThrow("内网");
+    }
+  });
+
+  it("拒绝无效地址", () => {
+    expect(() => assertSafeResultUrl("not-a-url")).toThrow("无效");
   });
 });

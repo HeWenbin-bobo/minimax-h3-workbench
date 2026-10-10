@@ -22,6 +22,12 @@ const server = createServer((req, res) => {
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       if (sseBehavior === "http500") { res.writeHead(500); res.end("mock error"); return; }
+      // 不支持工具调用的服务商：带 tools 的请求直接 400 —— 验证 agent→普通对话自动回落不吞内容
+      if (sseBehavior === "reject-tools" && body.includes('"tools"')) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "model does not support tools" } }));
+        return;
+      }
       if (sseBehavior === "nonstream") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ choices: [{ message: { content: "非流式回复OK" } }] }));
@@ -93,6 +99,13 @@ await withApp({}, async (cdp) => {
   await cdp.eval(`document.querySelector('.pg-input-row .primary').click()`);
   await new Promise(r => setTimeout(r, 2000));
   check("非流式响应正常显示", await cdp.eval(`(() => { const bubbles = Array.from(document.querySelectorAll('.pg-msg.assistant .pg-bubble')); const last = bubbles[bubbles.length-1]; return last?.textContent.includes('非流式回复OK'); })()`));
+
+  // 不支持工具的服务商 → agent 自动回落普通对话，且回复内容必须显示（回归"发消息没回复"）
+  sseBehavior = "reject-tools";
+  await cdp.eval(`(() => { ${setReactInput}; window.__set(document.querySelector('.pg-input-row textarea'), '工具回落测试'); })()`);
+  await cdp.eval(`document.querySelector('.pg-input-row .primary').click()`);
+  await new Promise(r => setTimeout(r, 6000));
+  check("不支持工具时回落并显示回复", await cdp.eval(`(() => { const bubbles = Array.from(document.querySelectorAll('.pg-msg.assistant .pg-bubble')); const last = bubbles[bubbles.length-1]; return Boolean(last) && (last.textContent.includes('Mock') || last.textContent.includes('你好，我是')); })()`));
 
   // 持久化 + 刷新恢复
   check("会话localStorage持久化", await cdp.eval(`JSON.parse(localStorage.getItem('h3-playground-sessions') || '[]').length >= 1`));

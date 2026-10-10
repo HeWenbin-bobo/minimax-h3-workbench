@@ -266,6 +266,9 @@ export async function chatAgent(
     },
     stopWhen: stepCountIs(10),
     maxRetries: 0, // 快速失败：不支持工具/服务异常时由调用方立即回落普通对话，不做指数退避重试
+    // 超时兜底：分块间隔超 2 分钟视为服务商卡死（抛错触发回落），整轮上限 10 分钟——
+    // 否则"没收到回复"会表现为永远转圈。
+    timeout: { chunkMs: 120_000, totalMs: 600_000 },
     abortSignal: signal
   });
   let seq = 0;

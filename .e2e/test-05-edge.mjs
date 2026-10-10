@@ -129,6 +129,32 @@ await withApp({}, async (cdp) => {
   check("E-项目条存在(有历史任务时)", await cdp.eval(`document.querySelector('.project-tabs') !== null || document.querySelectorAll('.task-card').length === 0`));
   check("E-项目tab显示进度", await cdp.eval(`(() => { const tab = document.querySelector('.project-tab'); return !tab || Boolean(tab.querySelector('strong') && tab.querySelector('small')); })()`));
 
+  // ===== Part G: 新建任务视图与已有项目视图分离（此前两者混为一谈）=====
+  check("G-新建任务tab存在且默认选中", await cdp.eval(`(() => { const tab = document.querySelector('.project-tab.new-task'); return Boolean(tab) && tab.className.includes('active'); })()`));
+  // 选 4 路 → 新建视图 = 4 个占位格（无真实任务）
+  await cdp.eval(`(() => { const sel = Array.from(document.querySelectorAll('select')).find(s => Array.from(s.options).some(o => o.textContent === '4 路')); sel.value = '4'; sel.dispatchEvent(new Event('change', {bubbles:true})); })()`);
+  await new Promise(r => setTimeout(r, 400));
+  check("G-新建选4路显示4占位格", await cdp.eval(`document.querySelectorAll('.result-grid .task-card').length === 4 && document.querySelectorAll('.result-grid .task-card.ready').length === 4`));
+  check("G-新建视图有预览提示", await cdp.eval(`(document.querySelector('.result-pane-hint')?.textContent || '').includes('4 路')`));
+  // 切到已有项目 → 格子数 = 该项目任务数（不含新建占位）
+  const projectInfo = JSON.parse(await cdp.eval(`(async () => {
+    const tasks = (await window.h3.listTasks()).data || [];
+    const tabs = document.querySelectorAll('.project-tab:not(.new-task)');
+    if (!tabs.length || !tasks.length) return JSON.stringify({ skip: true });
+    const group = tasks.filter((t) => t.parentId === tasks[0].parentId);
+    return JSON.stringify({ skip: false, expected: group.length });
+  })()`));
+  if (!projectInfo.skip) {
+    await cdp.eval(`document.querySelectorAll('.project-tab:not(.new-task)')[0].click()`);
+    await new Promise(r => setTimeout(r, 500));
+    const shown = await cdp.eval(`document.querySelectorAll('.result-grid .task-card').length`);
+    check("G-项目视图格子数=项目任务数", shown === projectInfo.expected, `shown=${shown} expected=${projectInfo.expected}`);
+    check("G-项目视图无多余占位格", await cdp.eval(`document.querySelectorAll('.result-grid .task-card.ready').length === 0`));
+  } else {
+    check("G-跳过(无已有项目)", true);
+    check("G-跳过(无已有项目)", true);
+  }
+
   // ===== Part F: 回收站全流程（提交→删除→回收站可见→恢复→彻底删除）=====
   const before = JSON.parse(await cdp.eval(`(async () => JSON.stringify((await window.h3.listTasks()).data || []))()`));
   const targetTask = before[0];

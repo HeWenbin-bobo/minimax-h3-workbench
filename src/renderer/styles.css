@@ -208,6 +208,9 @@ button { cursor: pointer; }
 .project-tab strong { color: var(--ink); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-tab small { color: var(--muted); font-size: 9px; }
 .project-tab .dot { position: absolute; right: 12px; top: 50%; width: 7px; height: 7px; margin-top: -3px; border-radius: 50%; background: var(--brand-gradient); animation: pg-blink 1.1s steps(2) infinite; }
+.project-tab.new-task { border-style: dashed; border-color: #ff9b7c; background: #fffaf7; max-width: none; padding-right: 13px; }
+.project-tab.new-task strong { color: var(--pink); }
+.result-pane-hint { color: var(--muted); font-size: 10px; }
 .control-panel { background: #fff; border: 1px solid var(--line); border-radius: 18px; padding: 20px; box-shadow: var(--shadow); }
 .mode-tabs { display: grid; grid-template-columns: repeat(3, 1fr); background: #f2f3f5; padding: 4px; border-radius: 12px; margin-bottom: 20px; }
 .mode-tabs button { border: 0; background: transparent; color: var(--muted); padding: 10px 5px; border-radius: 9px; font-size: 11px; }

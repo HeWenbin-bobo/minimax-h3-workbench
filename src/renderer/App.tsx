@@ -145,18 +145,21 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
     }
     return Array.from(groups.values()).sort((a, b) => b[0].createdAt.localeCompare(a[0].createdAt));
   }, [tasks]);
+  // 视图分两种，互不混淆（此前两者混在一起，导致"新建 4 路"里塞进已有项目的单路结果）：
+  // - 新建任务：activeProjectId 为空。结果区严格按表单的 request.count 显示占位框（待生成）。
+  // - 已有任务：点某个项目 tab 进入，只显示该项目自己的结果（格子数 = 该项目任务数）。
   const [activeProjectId, setActiveProjectId] = useState<string>();
-  const activeProject = projects.find((group) => (group[0].parentId || group[0].id) === activeProjectId) ?? projects[0];
+  const activeProject = activeProjectId ? projects.find((group) => (group[0].parentId || group[0].id) === activeProjectId) : undefined;
   const isRb = request.backend === "rb";
   const rbPreset = request.preset || (request.firstFramePath && request.lastFramePath ? "tail_frame" : "reference");
   const setRbPreset = (preset: string) => setRequest({ ...request, preset, ...(preset === "easy_15" ? { duration: 15 } : preset === "easy_30" ? { duration: 30 } : { duration: request.duration > 8 ? 8 : request.duration }) });
-  // 结果格子：数量直接跟表单选择（选 1/2/3/4 路时格子立刻增减——即时反馈）；
-  // 当前项目的任务按 index 对应填入格子，多余的格子保持占位（新提交的预览形态）。
-  const shownCount = Math.max(1, Math.min(4, request.count));
-  const currentTasks = useMemo(() => {
-    const group = activeProject ?? [];
-    return Array.from({ length: shownCount }, (_, i) => group.find((task) => task.index === i));
-  }, [activeProject, shownCount]);
+  const clampedCount = Math.max(1, Math.min(4, request.count));
+  // 新建视图：request.count 个占位；项目视图：仅该项目任务，按 index 排序。
+  const currentTasks: Array<GenerationTask | undefined> = useMemo(
+    () => activeProject ? [...activeProject].sort((a, b) => a.index - b.index) : Array.from({ length: clampedCount }, () => undefined),
+    [activeProject, clampedCount]
+  );
+  const shownCount = currentTasks.length;
   async function choose(kind: "image" | "video", field: keyof GenerationRequest) { const response = await window.h3.selectFile(kind); if (response.data) setRequest((r) => ({ ...r, [field]: response.data })); }
   async function submit() {
     setSubmitting(true);
@@ -195,23 +198,29 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="page-title-actions"><button className="text-button" onClick={() => setShowTrash((v) => !v)}>🗑 回收站</button><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div></div>
     {projects.length > 0 && <div className="category-filter">
       {["全部", ...projectCategories, "未分类"].map((c) => <button key={c} className={categoryFilter === c ? "on" : ""} onClick={() => setCategoryFilter(c)}>{c}</button>)}
-      <button className="text-button" title="给当前项目设置分类" onClick={async () => {
-        const category = window.prompt("输入当前项目的分类名称（留空清除分类）", activeProject?.[0].category || "");
+      <button className="text-button" title="给当前项目设置分类" disabled={!activeProject} onClick={async () => {
+        if (!activeProject) return;
+        const category = window.prompt("输入当前项目的分类名称（留空清除分类）", activeProject[0].category || "");
         if (category === null) return;
         await setProjectCategory(category);
       }}>＋ 分类</button>
     </div>}
-    {filteredProjects.length > 0 && <div className="project-tabs">{filteredProjects.slice(0, 12).map((group) => {
-      const key = group[0].parentId || group[0].id;
-      const running = group.some((t) => !["succeeded", "failed", "cancelled", "interrupted"].includes(t.status));
-      const done = group.filter((t) => t.status === "succeeded").length;
-      const active = activeProject === group;
-      return <button key={key} className={`project-tab${active ? " active" : ""}`} onClick={() => setActiveProjectId(key)}>
-        <strong>{group[0].prompt.slice(0, 18) || "未命名项目"}</strong>
-        <small>{running ? "生成中…" : `${done}/${group.length} 完成`}{group[0].category ? ` · ${group[0].category}` : ""}</small>
-        {running && <i className="dot" />}
-      </button>;
-    })}</div>}
+    <div className="project-tabs">
+      <button className={`project-tab new-task${activeProjectId ? "" : " active"}`} onClick={() => setActiveProjectId(undefined)}>
+        <strong>＋ 新建任务</strong><small>按下方参数生成 {clampedCount} 路</small>
+      </button>
+      {filteredProjects.slice(0, 12).map((group) => {
+        const key = group[0].parentId || group[0].id;
+        const running = group.some((t) => !["succeeded", "failed", "cancelled", "interrupted"].includes(t.status));
+        const done = group.filter((t) => t.status === "succeeded").length;
+        const active = activeProjectId === key;
+        return <button key={key} className={`project-tab${active ? " active" : ""}`} onClick={() => setActiveProjectId(key)}>
+          <strong>{group[0].prompt.slice(0, 18) || "未命名项目"}</strong>
+          <small>{running ? "生成中…" : `${done}/${group.length} 完成`}{group[0].category ? ` · ${group[0].category}` : ""}</small>
+          {running && <i className="dot" />}
+        </button>;
+      })}
+    </div>
     {showTrash && <TrashPanel onError={onError} onNotice={onNotice} />}
     <div className="studio-layout"><div className="control-panel">
       {!isRb && <div className="mode-tabs">{(["text", "image", "video"] as GenerationMode[]).map((mode) => <button key={mode} className={request.mode === mode ? "active" : ""} onClick={() => setRequest({ ...request, mode })}>{mode === "text" ? "文生视频" : mode === "image" ? "图生视频" : "视频生视频"}</button>)}</div>}
@@ -237,7 +246,9 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       </div>
       <label>基础随机种子<input type="number" value={request.baseSeed} onChange={(e) => setRequest({ ...request, baseSeed: Number(e.target.value) })}/></label>
       <div className="submit-area"><div>{request.backend === "minimax" ? <><span>云端估算</span><strong>约 ${estimateCloudCost(request.resolution, request.duration, request.count).toFixed(2)} / {request.count} 条</strong></> : request.backend === "rb" ? <><span>云端估算</span><strong>卡密计费 · {request.count} 条消耗 {request.count} 次</strong></> : <><span>本地生成</span><strong>不产生 API 费用</strong></>}</div><button className="primary" disabled={submitting} onClick={submit}>{submitting ? "提交中…" : `生成 ${request.count} 个结果`}</button></div>
-    </div><div className="result-pane"><div className="result-pane-head">{activeProject && <button className="text-button danger" onClick={deleteProject}>🗑 删除此项目</button>}</div><div className={`result-grid${shownCount === 1 ? " single" : ""}`}>{currentTasks.map((task, index) => <TaskCard key={task?.id || index} task={task} index={index} onError={onError} />)}</div></div></div>
+    </div><div className="result-pane"><div className="result-pane-head">{activeProject
+      ? <button className="text-button danger" onClick={deleteProject}>🗑 删除此项目</button>
+      : <span className="result-pane-hint">新建任务预览 · 将生成 {clampedCount} 路结果</span>}</div><div className={`result-grid${shownCount === 1 ? " single" : ""}`}>{currentTasks.map((task, index) => <TaskCard key={task?.id || `slot-${index}`} task={task} index={index} onError={onError} />)}</div></div></div>
   </section>;
 }
 
@@ -461,17 +472,23 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const offDone = window.h3.onLlmDone((event) => {
       const targetId = streamingSessionId.current;
       streamingSessionId.current = "";
-      if (!targetId) return;
-      setSessions((all) => patchLast(all, targetId, (msg) => ({
-        ...msg,
-        streaming: false,
-        error: !event.ok && Boolean(event.message),
-        // 失败必显文案：气泡为空写完整错误；已有内容（如回落提示）在末尾追加错误详情。
-        content: !event.ok && event.message
-          ? (msg.content ? `${msg.content}\n\n请求失败：${event.message}` : `请求失败：${event.message}`)
-          : msg.content
-      })));
+      // 兜底：chunk 可能在 React 提交"新增会话+user+assistant"之前就到达，此时 patchLast 落空，
+      // 内容只留在缓冲区。收尾时取缓冲区与消息内容的较长者写回，避免真实回复被空 content 覆盖（"发消息没回复"）。
+      const buffered = streamBuffer.current;
       streamBuffer.current = "";
+      if (!targetId) return;
+      setSessions((all) => patchLast(all, targetId, (msg) => {
+        const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
+        return {
+          ...msg,
+          streaming: false,
+          error: !event.ok && Boolean(event.message),
+          // 失败必显文案：气泡为空写完整错误；已有内容（如回落提示）在末尾追加错误详情。
+          content: !event.ok && event.message
+            ? (base ? `${base}\n\n请求失败：${event.message}` : `请求失败：${event.message}`)
+            : base
+        };
+      }));
       setGenerating(false);
       if (!event.ok && event.message) onError(new Error(event.message));
     });

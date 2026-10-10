@@ -94,7 +94,7 @@ export class RbAdapter implements GenerationAdapter {
     onProgress("running", 15, "瞬映 RB 正在生成");
     const result = await this.wait(jobId, onProgress, signal);
     onProgress("downloading", 95, "正在保存生成结果");
-    const outputPath = await this.downloadVideo(jobId, task.id, signal);
+    const outputPath = await this.downloadVideo(jobId, task.id, result.videoUrl, signal);
     onProgress("succeeded", 100, "生成完成");
     return {
       providerTaskId: jobId,
@@ -248,26 +248,39 @@ export class RbAdapter implements GenerationAdapter {
       };
       if (!response.ok) throw new Error(`瞬映 RB 查询失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
       const hasVideo = payload.has_video ?? payload.hasVideo;
-      if (payload.status === "succeeded") {
+      const status = (payload.status || "").toLowerCase();
+      if (status === "succeeded") {
         if (hasVideo || payload.video_url || payload.videoUrl) {
           return { videoUrl: payload.video_url ?? payload.videoUrl };
         }
         // succeeded 但视频尚未就绪（转码中）：继续轮询。
         onProgress("decoding", Math.min(92, progress), "视频转码中");
-      } else if (payload.status === "failed") {
-        throw new Error(payload.error?.message || payload.message || "瞬映 RB 任务失败");
+      } else if (status === "failed" || status.includes("fail") || status.includes("error")) {
+        // 兼容失败态的各种写法（failed / extract_failed …）：带服务端原文抛出，别再静默轮询。
+        throw new Error(payload.error?.message || payload.message || `瞬映 RB 任务失败（状态：${payload.status || "unknown"}）`);
+      } else if (status === "extracting" || status === "decoding" || status === "processing") {
+        // 生成完成后的提取/转码阶段（官网状态机）：属进行中，不是失败。
+        onProgress("decoding", Math.min(92, progress), "正在提取生成结果");
       }
       progress = Math.min(92, progress + 2);
-      onProgress("running", progress, payload.status === "queued" ? "云端排队中" : "瞬映 RB 正在生成");
+      onProgress("running", progress, status === "queued" ? "云端排队中" : "瞬映 RB 正在生成");
       await delay(5_000, signal);
     }
   }
 
-  private async downloadVideo(jobId: string, taskId: string, signal?: AbortSignal): Promise<string> {
-    const response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/video`, {
+  // 结果下载：/video 直链失败时回落查询接口给的 video_url（官网两种形态都出现过）。
+  private async downloadVideo(jobId: string, taskId: string, videoUrl: string | undefined, signal?: AbortSignal): Promise<string> {
+    let response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/video`, {
       headers: this.headers()
     }, 300_000, signal);
-    if (!response.ok) throw new Error(`生成结果下载失败：${response.status}`);
+    if (!response.ok && videoUrl) {
+      response = await this.fetchWithRetry(videoUrl, {}, 300_000, signal);
+    }
+    if (!response.ok) {
+      // 带上服务端响应片段：定位是 404（产物未就绪）还是鉴权/网关问题。
+      const detail = (await response.text().catch(() => "")).slice(0, 200);
+      throw new Error(`生成结果下载失败：${response.status}${detail ? ` ${detail}` : ""}`);
+    }
     await mkdir(this.options.outputDirectory, { recursive: true });
     const target = path.join(this.options.outputDirectory, `${taskId}.mp4`);
     await writeFile(target, Buffer.from(await response.arrayBuffer()));

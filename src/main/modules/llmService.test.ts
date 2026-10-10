@@ -1,5 +1,17 @@
-import { describe, expect, it } from "vitest";
-import { consumeSse } from "./llmService";
+import { describe, expect, it, vi } from "vitest";
+
+// chatAgent 动态 import("ai")，用 mock 拦截以免真调模型；vi.hoisted 保证 mock 工厂可用。
+const { streamTextMock } = vi.hoisted(() => ({ streamTextMock: vi.fn() }));
+vi.mock("ai", () => ({
+  streamText: streamTextMock,
+  tool: (definition: unknown) => definition,
+  stepCountIs: (count: number) => count
+}));
+vi.mock("@ai-sdk/openai-compatible", () => ({
+  createOpenAICompatible: () => ({ chatModel: (id: string) => ({ id }) })
+}));
+
+import { consumeSse, chatAgent, type LlmServiceOptions } from "./llmService";
 
 // 构造一个 ReadableStream，把字符串分块推送（模拟网络分包边界不齐）。
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
@@ -51,5 +63,62 @@ describe("consumeSse", () => {
       "data: [DONE]\n\n"
     ]), (event) => received.push(event));
     expect(received).toEqual([{ seq: 1, delta: "x" }]);
+  });
+});
+
+describe("chatAgent 工具暴露", () => {
+  const options: LlmServiceOptions = { baseUrl: "https://example.com/v1", apiKey: "k", model: "m", systemPrompt: "" };
+  const callbacks = { webSearch: async () => "结果", generateVideo: async () => "已创建" };
+  const messages = [{ role: "user" as const, content: "hi" }];
+
+  // 让假 streamText 返回可控的异步流
+  function stubStream(chunks: string[]) {
+    streamTextMock.mockImplementation(() => ({
+      textStream: (async function* () { for (const c of chunks) yield c; })(),
+      steps: Promise.resolve([]),
+      finishReason: Promise.resolve("stop")
+    }));
+  }
+  function lastTools(): Record<string, unknown> {
+    return (streamTextMock.mock.calls.at(-1)?.[0] as { tools: Record<string, unknown> }).tools;
+  }
+
+  // 回归护栏：曾无条件下发 web_search，导致游乐场「联网」开关形同虚设。
+  it("联网开关关闭时不暴露 web_search 工具", async () => {
+    stubStream(["好"]);
+    await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, false);
+    expect(Object.keys(lastTools())).not.toContain("web_search");
+    expect(Object.keys(lastTools())).toContain("generate_video");
+  });
+
+  it("联网开关开启时暴露 web_search 工具", async () => {
+    stubStream(["好"]);
+    await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true);
+    expect(Object.keys(lastTools())).toContain("web_search");
+    expect(Object.keys(lastTools())).toContain("generate_video");
+  });
+
+  it("默认（不传参）不下发 web_search", async () => {
+    stubStream(["好"]);
+    await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal);
+    expect(Object.keys(lastTools())).not.toContain("web_search");
+  });
+
+  it("文本分块按序推送给渲染端，并统计文本长度", async () => {
+    stubStream(["你", "好"]);
+    const sent: string[] = [];
+    const result = await chatAgent(options, messages, callbacks, (event) => sent.push(event.delta), new AbortController().signal, false);
+    expect(sent).toEqual(["你", "好"]);
+    expect(result.textLength).toBe(2);
+  });
+
+  it("按步累计工具调用数（供调用方判断模型是否支持工具）", async () => {
+    streamTextMock.mockImplementation(() => ({
+      textStream: (async function* () { yield "ok"; })(),
+      steps: Promise.resolve([{ toolCalls: [{}, {}] }, { toolCalls: [{}] }]),
+      finishReason: Promise.resolve("stop")
+    }));
+    const result = await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, false);
+    expect(result.toolCalls).toBe(3);
   });
 });

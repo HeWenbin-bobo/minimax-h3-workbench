@@ -61,6 +61,16 @@ describe("checkFrameworkUpdate", () => {
     expect(result.updateAvailable).toBe(false);
     expect(result.message).toContain("500");
   });
+
+  // 回归护栏：Accept 曾用 application/vnd.npm.install-v1+json，在应用主进程内实测稳定 406
+  // （裸 Node/裸 Electron 均 200），导致框架更新检查永远失败。必须保持通配。
+  it("请求 npm registry 时使用通配 Accept（避免主进程环境 406）", async () => {
+    const fetcher = vi.fn(async () => json({ version: "5.0.0" }));
+    await checkFrameworkUpdate("5.0.0", fetcher);
+    const [url, init] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain("registry.npmjs.org");
+    expect((init.headers as Record<string, string>).Accept).toBe("*/*");
+  });
 });
 
 function json(value: unknown): Response {

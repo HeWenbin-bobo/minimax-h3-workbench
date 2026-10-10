@@ -37,6 +37,14 @@ app.whenReady().then(async () => {
   if (process.env.H3_USER_DATA) app.setPath("userData", path.resolve(process.env.H3_USER_DATA));
   const settingsStore = new SettingsStore();
   void settingsStore.get().then((s) => { settingsCache = s; });
+
+  adapters = new AdapterRegistry(settingsStore);
+  const orchestrator = new GenerationOrchestrator(
+    new TaskStore(),
+    adapters,
+    (task) => mainWindow?.webContents.send("task:update", task)
+  );
+  await orchestrator.initialize();
   // h3media 只允许读取输出目录内的生成结果，防止渲染进程借协议读任意本地文件。
   const allowedMediaRoot = async () => path.resolve((settingsCache ?? await settingsStore.get()).outputDirectory);
 
@@ -47,19 +55,14 @@ app.whenReady().then(async () => {
     const mediaRoot = await allowedMediaRoot();
     // path.relative 为空或以 .. 开头 = 目标不在根内；用分隔符判断避免 "C:\out2" 误匹配 "C:\out" 前缀。
     const relative = path.relative(mediaRoot, resolved);
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    const outside = !relative || relative.startsWith("..") || path.isAbsolute(relative);
+    // 用户改过输出目录后，历史结果仍留在原目录——按任务记录放行，否则整个历史都变成打不开的死链。
+    if (outside && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) {
       return new Response("Path outside output directory", { status: 403 });
     }
     return net.fetch(pathToFileURL(resolved).toString());
   });
 
-  adapters = new AdapterRegistry(settingsStore);
-  const orchestrator = new GenerationOrchestrator(
-    new TaskStore(),
-    adapters,
-    (task) => mainWindow?.webContents.send("task:update", task)
-  );
-  await orchestrator.initialize();
   // 回收站过期清理：删除超过 7 天的任务，连同输出目录内的视频文件一并清除（安全删除白名单内）。
   void orchestrator.purgeExpired(async (filePath) => {
     const settings = await settingsStore.get();
@@ -389,17 +392,20 @@ function registerIpc(
   });
   handle("shell:showItem", async (_event, filePath: string) => {
     if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
-    // 与 h3media 同类防护：只允许在输出目录或 ComfyUI 模型目录内定位文件/文件夹。
+    // 与 h3media 同类防护：只允许在输出目录、ComfyUI 模型目录或本应用产出过的结果路径内定位。
     const settings = await settingsStore.get();
     const roots = [settings.outputDirectory, settings.comfyuiRoot]
       .filter((value): value is string => Boolean(value))
       .map((value) => path.resolve(value));
     const resolved = path.resolve(filePath);
-    const allowed = roots.some((rootDir) => {
+    const insideRoot = roots.some((rootDir) => {
       const rel = path.relative(rootDir, resolved);
       return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
     });
-    if (!allowed) throw new Error("只能打开输出目录或 ComfyUI 模型目录中的位置。");
+    // 同 h3media：改过输出目录后，历史结果仍应能"在文件夹中显示"。
+    if (!insideRoot && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) {
+      throw new Error("只能打开输出目录或 ComfyUI 模型目录中的位置。");
+    }
     shell.showItemInFolder(resolved);
     return true;
   });
@@ -409,6 +415,23 @@ function registerIpc(
     await shell.openExternal(url);
     return true;
   });
+}
+
+// h3media / showItem 白名单的补充放行集合：本应用自己产出过的结果路径。
+// 用户改过输出目录后，历史结果仍留在旧目录；只认当前目录会让历史视频全部变成打不开的死链。
+// 安全性不降：放行的只是任务记录里记着的、由本应用写出的文件，渲染端仍无法随意读本地文件。
+function knownOutputPaths(orchestrator: GenerationOrchestrator): Set<string> {
+  const paths = new Set<string>();
+  for (const task of [...orchestrator.list(), ...orchestrator.listDeleted()]) {
+    if (task.outputPath) paths.add(normalizeForCompare(task.outputPath));
+  }
+  return paths;
+}
+
+// Windows 路径大小写不敏感：统一小写再比对，避免同一文件因盘符/目录大小写不同被判越界。
+function normalizeForCompare(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function handle<TArgs extends unknown[], TResult>(

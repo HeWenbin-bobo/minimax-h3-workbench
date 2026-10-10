@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { GenerationTask } from "../../shared/types";
+import type { GenerationRequest, GenerationTask } from "../../shared/types";
 import { AdapterRegistry } from "../backends/adapterRegistry";
 import { GenerationOrchestrator } from "./generationOrchestrator";
 import type { TaskStore } from "./taskStore";
@@ -67,5 +67,58 @@ describe("GenerationOrchestrator 回收站", () => {
     const files = await orchestrator.purgeExpired(deleteFile);
     expect(files).toEqual(["C:\\out\\old.mp4"]);
     expect(orchestrator.listDeleted().map((t) => t.id)).toEqual(["t-fresh"]);
+  });
+});
+
+describe("GenerationOrchestrator 历史淘汰", () => {
+  const baseRequest: GenerationRequest = {
+    mode: "text", backend: "local", prompt: "容量用例", duration: 4,
+    ratio: "16:9", resolution: "768P", width: 1280, height: 720, count: 4, baseSeed: 1
+  };
+
+  // 造 groupCount 组 × 4 路；组内同 parentId，createdAt 随组递增（组号越大越旧）
+  const makeGroups = (groupCount: number): GenerationTask[] => {
+    const tasks: GenerationTask[] = [];
+    for (let group = 0; group < groupCount; group += 1) {
+      const createdAt = new Date(Date.UTC(2026, 0, 1, 0, group)).toISOString();
+      for (let index = 0; index < 4; index += 1) {
+        tasks.push(makeTask({ id: `g${group}-${index}`, parentId: `p${group}`, index, createdAt, updatedAt: createdAt }));
+      }
+    }
+    return tasks;
+  };
+
+  it("超过上限时淘汰到上限内，且不切断任何项目组", async () => {
+    const { orchestrator, store } = makeOrchestrator(makeGroups(51)); // 204 条
+    await orchestrator.submit({ ...baseRequest, count: 4 });
+
+    const listed = orchestrator.list();
+    expect(listed.length).toBeLessThanOrEqual(GenerationOrchestrator.MAX_TASKS);
+
+    // 逐组检查完整性：留下的每组必须仍是 4 路（按条数硬截会切成 2 路）
+    const perGroup = new Map<string, number>();
+    for (const task of listed) perGroup.set(task.parentId, (perGroup.get(task.parentId) ?? 0) + 1);
+    for (const [parentId, size] of perGroup) expect(`${parentId}:${size}`).toBe(`${parentId}:4`);
+
+    // 内存态与落盘一致（曾只裁剪落盘，导致重启后静默丢任务）
+    const saved = (store.save as unknown as { mock: { calls: GenerationTask[][] } }).mock.calls.at(-1)?.[0];
+    expect(saved?.length).toBe(listed.length);
+  });
+
+  it("回收站中的任务不参与容量淘汰（7 天可恢复的承诺不被打破）", async () => {
+    const active = makeGroups(50); // 恰 200 条
+    const recycled = [makeTask({ id: "r1", parentId: "pr", deletedAt: "2026-10-01T00:00:00.000Z" })];
+    const { orchestrator } = makeOrchestrator([...active, ...recycled]);
+
+    await orchestrator.submit({ ...baseRequest, count: 4 }); // 触发超限淘汰
+
+    expect(orchestrator.listDeleted().map((t) => t.id)).toEqual(["r1"]);
+    expect(orchestrator.list().length).toBeLessThanOrEqual(GenerationOrchestrator.MAX_TASKS);
+  });
+
+  it("未超限时不做任何淘汰（保留全部历史）", async () => {
+    const { orchestrator } = makeOrchestrator(makeGroups(10)); // 40 条
+    await orchestrator.submit({ ...baseRequest, count: 4 });
+    expect(orchestrator.list()).toHaveLength(44);
   });
 });

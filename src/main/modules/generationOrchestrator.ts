@@ -8,6 +8,9 @@ type TaskListener = (task: GenerationTask) => void;
 export class GenerationOrchestrator {
   private tasks: GenerationTask[] = [];
   private readonly controllers = new Map<string, AbortController>();
+  // 任务历史上限。TaskStore 落盘时的截断只是防御；真正的淘汰在这里按「项目整组」做——
+  // 按条数硬截会切断项目组（4 路只剩 2 路），且内存态不裁剪会让 UI 显示得出来、重启后凭空少一批。
+  static readonly MAX_TASKS = 200;
 
   constructor(
     private readonly store: TaskStore,
@@ -22,6 +25,31 @@ export class GenerationOrchestrator {
   list(): GenerationTask[] {
     // 回收站中的任务不进常规列表（渲染端经 tasks:listDeleted 单独获取）。
     return [...this.tasks].filter((task) => !task.deletedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  // 历史淘汰：超过上限时按项目整组丢掉最旧的组（不切断组内 4 路），并同步内存态。
+  // 回收站中的任务不参与淘汰——它们归 purgeExpired 的 7 天保留策略管，
+  // 否则"删除后 7 天内可恢复"的承诺会被容量淘汰悄悄打破。
+  private trimHistory(): void {
+    const active = this.tasks.filter((task) => !task.deletedAt);
+    if (active.length <= GenerationOrchestrator.MAX_TASKS) return;
+    const byGroup = new Map<string, GenerationTask[]>();
+    for (const task of active) {
+      const group = byGroup.get(task.parentId);
+      if (group) group.push(task); else byGroup.set(task.parentId, [task]);
+    }
+    // 组按最新任务时间倒序（新组在前），从头累积到放不下为止，其余整组丢弃。
+    const newestOf = (group: GenerationTask[]) => group.reduce((max, task) => (task.createdAt > max ? task.createdAt : max), "");
+    const groups = Array.from(byGroup.values()).sort((a, b) => newestOf(b).localeCompare(newestOf(a)));
+    const keep = new Set<string>();
+    let total = 0;
+    for (const group of groups) {
+      // 第一组无论多大都保留，避免上限被设得过小时把项目全清空。
+      if (keep.size > 0 && total + group.length > GenerationOrchestrator.MAX_TASKS) break;
+      for (const task of group) keep.add(task.id);
+      total += group.length;
+    }
+    this.tasks = this.tasks.filter((task) => task.deletedAt || keep.has(task.id));
   }
 
   // 回收站：软删除（运行中的先取消）→ 7 天内可恢复 → 到期彻底清除（含输出视频）。
@@ -127,6 +155,7 @@ export class GenerationOrchestrator {
       request
     }));
     this.tasks.unshift(...created);
+    this.trimHistory();
     await this.store.save(this.tasks);
     created.forEach(this.listener);
 
@@ -160,6 +189,7 @@ export class GenerationOrchestrator {
       request: task.request
     };
     this.tasks.unshift(created);
+    this.trimHistory();
     await this.store.save(this.tasks);
     this.listener({ ...created });
     void runPool([created], request.backend === "minimax" ? 2 : 1, (item) => this.runTask(request, item));

@@ -1,5 +1,6 @@
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { describeError } from "../../shared/errors";
 import { assertSafeResultUrl } from "./resultUrl";
 import type {
   BackendTestResult,
@@ -72,9 +73,7 @@ export class RbAdapter implements GenerationAdapter {
         label: "瞬映 RB 云生成",
         latencyMs: Date.now() - start,
         details: {},
-        message: error instanceof Error
-          ? (error.name === "TimeoutError" ? "连接瞬映服务超时（已自动重试）。请检查网络后重试。" : error.message)
-          : "瞬映 RB 不可达"
+        message: describeError(error, "瞬映 RB 不可达")
       };
     }
   }
@@ -230,12 +229,31 @@ export class RbAdapter implements GenerationAdapter {
     let progress = 15;
     const startedAt = Date.now();
     const timeoutMs = 60 * 60 * 1_000; // 与 MiniMax 云后端一致：1 小时兜底超时
+    // 实测 rb.coolhs.com 在 Electron/undici 下相当比例的请求会瞬时报连接超时（Cloudflare 冷连接），
+    // 紧接着重试几乎必然成功。旧实现在轮询里一次抖动就抛错——云端任务还在跑、卡密次数已经扣掉，
+    // 用户却看到"失败"。改为容忍连续抖动：只有连续失败到上限才认定服务不可用。
+    const MAX_CONSECUTIVE_NETWORK_ERRORS = 5;
+    let consecutiveNetworkErrors = 0;
     for (;;) {
       if (signal?.aborted) throw new DOMException("任务已取消", "AbortError");
       if (Date.now() - startedAt > timeoutMs) throw new Error("瞬映 RB 任务超过 1 小时未完成，已停止轮询。请到瞬映工作台确认任务状态。");
-      const response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}`, {
-        headers: this.headers()
-      }, 20_000, signal);
+      let response: Response;
+      try {
+        response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}`, {
+          headers: this.headers()
+        }, 20_000, signal);
+      } catch (error) {
+        // 用户主动取消照旧抛出；网络抖动则在原任务上继续轮询（不重新提交、不重复扣次）。
+        if (signal?.aborted) throw error;
+        consecutiveNetworkErrors += 1;
+        if (consecutiveNetworkErrors >= MAX_CONSECUTIVE_NETWORK_ERRORS) {
+          throw new Error(`连续 ${consecutiveNetworkErrors} 次查询瞬映任务失败：${describeError(error, "网络异常")}任务可能仍在云端生成，请到瞬映工作台确认。`);
+        }
+        onProgress("running", progress, `网络抖动，正在重试（第 ${consecutiveNetworkErrors} 次）`);
+        await delay(5_000, signal);
+        continue;
+      }
+      consecutiveNetworkErrors = 0;
       // 官网 API 返回 {job:{...}} 包装（官网 bundle 实证）；兼容老网关平铺字段。
       const raw = (await response.json().catch(() => ({}))) as Record<string, unknown>;
       const payload = (raw.job ?? raw) as {
@@ -250,11 +268,15 @@ export class RbAdapter implements GenerationAdapter {
       if (!response.ok) throw new Error(`瞬映 RB 查询失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
       const hasVideo = payload.has_video ?? payload.hasVideo;
       const status = (payload.status || "").toLowerCase();
-      if (status === "succeeded") {
+      // 实测官网真实词汇表是 done / failed（progress 为"已完成"/"已失败"），并非 OpenAI 式的 succeeded。
+      // 旧实现只认 succeeded：任务早已生成完成（has_video=true）却永远匹配不上，界面卡在"正在生成 92%"，
+      // 成片永远不下载——卡密已扣、结果拿不到。这里把两种写法都收下。
+      const isDone = status === "succeeded" || status === "done" || status === "success" || status === "completed";
+      if (isDone) {
         if (hasVideo || payload.video_url || payload.videoUrl) {
           return { videoUrl: payload.video_url ?? payload.videoUrl };
         }
-        // succeeded 但视频尚未就绪（转码中）：继续轮询。
+        // 已完成但视频尚未就绪（转码中）：继续轮询。
         onProgress("decoding", Math.min(92, progress), "视频转码中");
       } else if (status === "failed" || status.includes("fail") || status.includes("error")) {
         // 兼容失败态的各种写法（failed / extract_failed …）：带服务端原文抛出，别再静默轮询。

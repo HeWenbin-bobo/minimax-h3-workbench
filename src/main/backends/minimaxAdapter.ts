@@ -1,5 +1,6 @@
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { describeError } from "../../shared/errors";
 import { estimateCloudCost } from "../../shared/capabilities";
 import { assertSafeResultUrl } from "./resultUrl";
 import type {
@@ -52,7 +53,7 @@ export class MiniMaxAdapter implements GenerationAdapter {
         label: "MiniMax 云 API",
         latencyMs: Date.now() - start,
         details: {},
-        message: error instanceof Error ? error.message : "MiniMax API 不可达"
+        message: describeError(error, "MiniMax API 不可达")
       };
     }
   }
@@ -146,18 +147,22 @@ export class MiniMaxAdapter implements GenerationAdapter {
         error?: { message?: string };
       };
       if (!response.ok) throw new Error(payload.error?.message || `查询失败：${response.status}`);
-      if (payload.task?.status === "succeeded" && payload.task.content?.url) {
+      // MiniMax 官方文档的成功态是 "Success"（首字母大写），不是 succeeded；比对前统一小写并收下常见写法。
+      // 只认 succeeded 的话，生成已完成的任务永远匹配不上，界面会一直"正在生成"直到 1 小时超时。
+      // （本机无 MiniMax API Key，未能真机验证；该改动只放宽匹配、不放宽下载条件，故不会误判未完成任务。）
+      const taskStatus = String(payload.task?.status ?? "").toLowerCase();
+      if (["success", "succeeded", "done", "completed"].includes(taskStatus) && payload.task?.content?.url) {
         return {
           url: payload.task.content.url,
           inputSeconds: payload.task.usage?.input_seconds,
           outputSeconds: payload.task.usage?.output_seconds
         };
       }
-      if (payload.task?.status === "failed" || payload.task?.status === "cancelled") {
-        throw new Error(payload.task.error?.message || `任务${payload.task.status}`);
+      if (["failed", "fail", "cancelled", "canceled"].includes(taskStatus)) {
+        throw new Error(payload.task?.error?.message || `任务${payload.task?.status}`);
       }
       progress = Math.min(92, progress + 3);
-      onProgress("running", progress, payload.task?.status === "queued" ? "云端排队中" : "MiniMax H3 正在生成");
+      onProgress("running", progress, taskStatus === "queued" ? "云端排队中" : "MiniMax H3 正在生成");
       await delay(10_000, signal);
     }
   }

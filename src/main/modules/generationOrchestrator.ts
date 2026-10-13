@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { describeError } from "../../shared/errors";
 import type { GenerationRequest, GenerationTask, TaskStatus } from "../../shared/types";
+import { MAX_PROMPT_LENGTH } from "../../shared/types";
 import { AdapterRegistry } from "../backends/adapterRegistry";
 import { TaskStore } from "./taskStore";
 
@@ -271,6 +273,11 @@ export class GenerationOrchestrator {
 }
 
 function validateRequest(request: GenerationRequest): void {
+  // 长度上限在工作台/游乐场 UI 已由 maxlength 挡住，但 IPC 与智能体工具是可达入口：
+  // 不在这里兜住的话，超长提示词会被真的塞进云端请求体。
+  if ((request.prompt?.length ?? 0) > MAX_PROMPT_LENGTH) {
+    throw new Error(`视频描述不能超过 ${MAX_PROMPT_LENGTH} 字。`);
+  }
   if (request.backend === "rb") {
     // RB 预设自带时长约束（easy_15/30 固定，flashvsr 只收视频）；prompt 仅 flashvsr 不需要。
     if (request.preset !== "flashvsr_upscale" && !request.prompt?.trim()) throw new Error("请输入视频描述。");
@@ -298,5 +305,5 @@ async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => 
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : "生成失败，请检查连接与参数。";
+  return describeError(error, "生成失败，请检查连接与参数。");
 }

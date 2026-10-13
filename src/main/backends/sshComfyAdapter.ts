@@ -1,3 +1,4 @@
+import { describeError } from "../../shared/errors";
 import type {
   AppSettings,
   BackendTestResult,
@@ -42,7 +43,7 @@ export class SshComfyAdapter implements GenerationAdapter {
         label: "SSH 远程 ComfyUI",
         latencyMs: Date.now() - start,
         details: {},
-        message: error instanceof Error ? error.message : "SSH 连接失败"
+        message: describeError(error, "SSH 连接失败")
       };
     }
   }

@@ -67,7 +67,9 @@ export class SettingsStore {
       ssh: patch.ssh ? { ...current.ssh, ...patch.ssh } : current.ssh
     };
     await this.atomicWrite(this.filePath, next);
-    return next;
+    // 回读而非直接返回 next：get() 会做归一化（非法 defaultBackend 落到 local、未知字段被丢弃），
+    // 直接返回 next 会让"保存后立刻读回"拿到与磁盘不同的值，渲染端据此渲染就会用到脏状态。
+    return this.get();
   }
 
   async setSecret(name: SecretName, value: string): Promise<void> {

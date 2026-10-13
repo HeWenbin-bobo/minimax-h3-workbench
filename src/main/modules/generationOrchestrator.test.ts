@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GenerationRequest, GenerationTask } from "../../shared/types";
+import { MAX_PROMPT_LENGTH } from "../../shared/types";
 import { AdapterRegistry } from "../backends/adapterRegistry";
 import { GenerationOrchestrator } from "./generationOrchestrator";
 import type { TaskStore } from "./taskStore";
@@ -120,5 +121,33 @@ describe("GenerationOrchestrator 历史淘汰", () => {
     const { orchestrator } = makeOrchestrator(makeGroups(10)); // 40 条
     await orchestrator.submit({ ...baseRequest, count: 4 });
     expect(orchestrator.list()).toHaveLength(44);
+  });
+});
+
+// 背景：工作台计数器标称 2000 字，但文本域曾无 maxlength、主进程也不校验，
+// 2500 字的描述能一路提交到云端。这里固化"标称上限就是真实约束"。
+describe("GenerationOrchestrator 提示词长度校验", () => {
+  const request: GenerationRequest = {
+    mode: "text", backend: "local", prompt: "描述", duration: 4,
+    ratio: "16:9", resolution: "768P", width: 1280, height: 720, count: 1, baseSeed: 1
+  };
+
+  it("恰好达到上限时放行", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    const created = await orchestrator.submit({ ...request, prompt: "长".repeat(MAX_PROMPT_LENGTH) });
+    expect(created).toHaveLength(1);
+  });
+
+  it("超过上限时拒绝且不建任务", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    await expect(orchestrator.submit({ ...request, prompt: "长".repeat(MAX_PROMPT_LENGTH + 1) }))
+      .rejects.toThrow(`视频描述不能超过 ${MAX_PROMPT_LENGTH} 字。`);
+    expect(orchestrator.list()).toHaveLength(0);
+  });
+
+  it("RB 后端同样受限", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    await expect(orchestrator.submit({ ...request, backend: "rb", prompt: "长".repeat(MAX_PROMPT_LENGTH + 1) }))
+      .rejects.toThrow("视频描述不能超过");
   });
 });

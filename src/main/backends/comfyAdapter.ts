@@ -8,6 +8,7 @@ import type {
   GenerationTask,
   TaskStatus
 } from "../../shared/types";
+import { describeError } from "../../shared/errors";
 import { inspectH3Readiness } from "./comfyReadiness";
 import { buildFl2vaWorkflow, buildRef2vaWorkflow, type ComfyPrompt, type UploadedMedia } from "./workflows";
 
@@ -59,7 +60,7 @@ export class ComfyAdapter implements GenerationAdapter {
         label: "ComfyUI",
         latencyMs: Date.now() - start,
         details: {},
-        message: error instanceof Error ? error.message : "无法连接 ComfyUI"
+        message: describeError(error, "无法连接 ComfyUI")
       };
     }
   }

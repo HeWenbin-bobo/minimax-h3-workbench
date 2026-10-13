@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { GenerationRequest } from "../../shared/types";
 import { RbAdapter, assertSafeResultUrl } from "./rbAdapter";
 
@@ -65,6 +65,87 @@ describe("RbAdapter.buildJobBody", () => {
     globalThis.fetch = fetchMock;
     const task = { id: "t1", seed: 1, prompt: base.prompt } as never;
     await expect(adapter().generate(base, task, () => undefined)).rejects.toThrow("内容审核未通过");
+  });
+
+  // 背景：rb.coolhs.com 在 Electron 下会瞬时报连接超时（实测连续 12 次请求里 5 次失败），
+  // 旧实现轮询中一次抖动就抛错——云端任务仍在跑、卡密次数已扣，用户却看到"失败"。
+  it("轮询中的瞬时网络抖动不终止任务，恢复后继续拿到结果", async () => {
+    let polls = 0;
+    const fetchMock = (async (url: string | URL) => {
+      const target = String(url);
+      if (target.endsWith("/api/v1/jobs")) {
+        return new Response(JSON.stringify({ job: { id: "job-1" } }), { status: 200 });
+      }
+      if (target.endsWith("/api/v1/jobs/job-1/video")) {
+        return new Response(new Uint8Array([0, 0, 0, 1]), { status: 200 });
+      }
+      polls += 1;
+      // 前两次查询模拟连接抖动（undici 形态：cause.code = UND_ERR_CONNECT_TIMEOUT）。
+      if (polls <= 2) {
+        const error = new Error("fetch failed");
+        (error as { cause?: unknown }).cause = { code: "UND_ERR_CONNECT_TIMEOUT" };
+        throw error;
+      }
+      return new Response(JSON.stringify({ job: { id: "job-1", status: "succeeded", video_url: "https://rb.test/job-1/video" } }), { status: 200 });
+    }) as typeof fetch;
+    globalThis.fetch = fetchMock;
+    const task = { id: "t1", seed: 1, prompt: base.prompt } as never;
+    // 重试走 5s 退避睡眠：用假定时器推进，避免单测真等 10s+。
+    vi.useFakeTimers();
+    try {
+      const pending = adapter().generate(base, task, () => undefined);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+      // 抖动 2 次后恢复：不应抛错，且应下载到结果（说明是在原任务上继续轮询，而非重新提交）。
+      expect(result.providerTaskId).toBe("job-1");
+      expect(polls).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // 实测官网真实词汇表是 done/failed（progress 为"已完成"），不是 succeeded。
+  // 旧实现只认 succeeded：任务早已 has_video=true 却永远匹配不上，界面卡在"正在生成 92%"、成片永不下载。
+  it("识别官网真实成功态 done（而非只认 succeeded）并下载成片", async () => {
+    const fetchMock = (async (url: string | URL) => {
+      const target = String(url);
+      if (target.endsWith("/api/v1/jobs")) {
+        return new Response(JSON.stringify({ job: { id: "job-done" } }), { status: 200 });
+      }
+      if (target.endsWith("/api/v1/jobs/job-done/video")) {
+        return new Response(new Uint8Array([0, 0, 0, 1]), { status: 200 });
+      }
+      // 官网实证响应形态：status/progress 为中英混排，has_video 为蛇形。
+      return new Response(JSON.stringify({ job: { id: "job-done", status: "done", progress: "已完成", has_video: true, error: "" } }), { status: 200 });
+    }) as typeof fetch;
+    globalThis.fetch = fetchMock;
+    const task = { id: "t3", seed: 1, prompt: base.prompt } as never;
+    const result = await adapter().generate(base, task, () => undefined);
+    expect(result.providerTaskId).toBe("job-done");
+    expect(result.outputPath).toContain("t3.mp4");
+  });
+
+  it("连续查询全部失败时才报错，并提示任务可能仍在云端", async () => {
+    const fetchMock = (async (url: string | URL) => {
+      const target = String(url);
+      if (target.endsWith("/api/v1/jobs")) {
+        return new Response(JSON.stringify({ job: { id: "job-2" } }), { status: 200 });
+      }
+      const error = new Error("fetch failed");
+      (error as { cause?: unknown }).cause = { code: "UND_ERR_CONNECT_TIMEOUT" };
+      throw error;
+    }) as typeof fetch;
+    globalThis.fetch = fetchMock;
+    const task = { id: "t2", seed: 1, prompt: base.prompt } as never;
+    vi.useFakeTimers();
+    try {
+      const pending = adapter().generate(base, task, () => undefined);
+      const assertion = expect(pending).rejects.toThrow(/连续 5 次查询瞬映任务失败/);
+      await vi.advanceTimersByTimeAsync(120_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

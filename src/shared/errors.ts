@@ -1,0 +1,100 @@
+// 网络层异常在 Node/Electron 里只有英文骨架文案（undici 的 "fetch failed"、DOMException 的 "TimeoutError"），
+// 直接透传给最终用户等于没给信息。所有面向用户的错误出口统一走这里翻译成中文；
+// 业务异常（本来就是中文）原样返回，不会二次包装。
+const NETWORK_CODES: Record<string, string> = {
+  ECONNREFUSED: "目标服务未在监听（连接被拒绝）",
+  ENOTFOUND: "域名无法解析",
+  EAI_AGAIN: "域名解析超时",
+  ECONNRESET: "连接被对方重置",
+  ETIMEDOUT: "连接超时",
+  EHOSTUNREACH: "主机不可达",
+  ENETUNREACH: "网络不可达",
+  EPROTO: "协议协商失败（检查地址是 HTTP 还是 HTTPS）",
+  CERT_HAS_EXPIRED: "TLS 证书已过期",
+  DEPTH_ZERO_SELF_SIGNED_CERT: "TLS 证书为自签名",
+  // undici（Node/Electron 内置 fetch）的码：不收录的话用户看到的就是裸英文码。
+  UND_ERR_CONNECT_TIMEOUT: "连接上游超时（网络受限或服务无响应）",
+  UND_ERR_HEADERS_TIMEOUT: "等待响应头超时",
+  UND_ERR_BODY_TIMEOUT: "响应体传输超时",
+  UND_ERR_SOCKET: "连接被提前关闭"
+};
+
+const HINT = "请检查地址、端口与服务是否已启动。";
+
+// 流式中途被对端断开时，undici 抛的 cause 是"英文短句"而不是 errno（实测中途 reset 的 cause.message = "terminated"，
+// 且不带 code）——只认 cause.code 会把这类失败漏判成业务异常，界面上透出 AI SDK 的英文占位文案。
+const STREAM_BROKEN_MESSAGES: Record<string, string> = {
+  terminated: "连接在传输过程中被对端关闭",
+  "premature close": "连接被提前关闭",
+  "other side closed": "连接被对端关闭",
+  aborted: "连接被中止"
+};
+
+/** 网络层异常的关键词（同时用于 cause 与 AI SDK 包裹层文本）。 */
+const NETWORK_HINT_RE = /fetch failed|failed to fetch|network ?error|socket hang up|other side closed|cannot connect to api|failed to process successful response|terminated|premature close|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR_/i;
+
+/** 从异常的 cause 提取网络层信号：cause 可能是 Error（带 code/message）、字符串或普通对象，三种都要认。 */
+function causeSignal(error: Error): { code?: string; message?: string } {
+  const cause = (error as { cause?: unknown }).cause;
+  if (typeof cause === "string") return { code: cause, message: cause };
+  if (cause && typeof cause === "object") {
+    const record = cause as { code?: unknown; message?: unknown };
+    return {
+      code: typeof record.code === "string" ? record.code : undefined,
+      message: typeof record.message === "string" ? record.message : undefined
+    };
+  }
+  return {};
+}
+
+export function describeError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) {
+    return typeof error === "string" && error.trim() ? error.trim() : fallback;
+  }
+  // AbortSignal.timeout() 抛的 DOMException：超时和"用户主动取消"要分开说。
+  if (error.name === "TimeoutError") return `连接超时：目标服务未在规定时间内响应。${HINT}`;
+  if (error.name === "AbortError") return "操作已取消。";
+  const cause = causeSignal(error);
+  const causeCode = cause.code ?? cause.message;
+  if (causeCode) return `网络连接失败：${NETWORK_CODES[causeCode] ?? STREAM_BROKEN_MESSAGES[causeCode.toLowerCase()] ?? `网络错误 ${causeCode}`}。${HINT}`;
+  // AI SDK 的 APICallError 会把 errno 塞在 message 里（"Cannot connect to API: read ECONNRESET"），
+  // 不设 cause.code——只认 cause 的话这类异常会以裸英文透传到界面。
+  // 仅当该 token 是已收录的 errno，或整条 message 本身带网络语境时才翻译，
+  // 避免把普通单词（如 "ERROR"）误判成 errno。
+  const candidate = /\b(UND_ERR_[A-Z_]+|E[A-Z]{4,})\b/.exec(error.message)?.[1];
+  if (candidate && (NETWORK_CODES[candidate] || /connect|socket|network|reset|refused|reach|timeout|timed out/i.test(error.message))) {
+    return `网络连接失败：${NETWORK_CODES[candidate] ?? `网络错误 ${candidate}`}。${HINT}`;
+  }
+  // 中途断开时 AI SDK 只给 "Failed to process successful response"，真正的信号在 cause.message（terminated）里，
+  // 上面 causeCode 分支没命中时兜底按网络语境翻译，避免透出英文占位。
+  if (NETWORK_HINT_RE.test(error.message) || NETWORK_HINT_RE.test(cause.message ?? "")) {
+    return `网络连接失败：连接在传输过程中被中断。${HINT}`;
+  }
+  // AI SDK 的包裹层会把真实原因藏起来，直接透传等于没信息：
+  // 重试失败形如 "Failed after 2 attempts. Last error: AI_APICallError: Internal Server Error"。
+  const lastError = /Last error:\s*(?:AI_\w+Error:\s*)?(.+)$/is.exec(error.message)?.[1]?.trim();
+  if (lastError) return `上游服务返回错误：${lastError}（已重试仍未成功）。`;
+  // 流式失败且未产内容：AI SDK 只留这句占位，对用户毫无信息量。
+  if (/no output generated/i.test(error.message)) return "上游未返回任何内容（可能是服务暂时异常或模型不支持当前请求方式）。";
+  return error.message.trim() || fallback;
+}
+
+/**
+ * 网络层异常判定（连接重置/超时/拒绝等），用于"整轮重试"这类网络专项兜底。
+ * 与 describeError 分开：这里要的是布尔判断，且作用在原始异常对象上（含 AI SDK 的多层包裹）。
+ */
+export function isNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "TimeoutError") return true;
+  // undici/Node 的 errno（ECONNRESET 等）挂 cause.code；流式中途断开则是 cause.message = "terminated"（无 code）。
+  // 两种都要认，并兼容 cause 为字符串的形态——漏判会让"整轮重试"不触发，用户直接看到回落提示。
+  const cause = causeSignal(error);
+  if ((cause.code && cause.code.trim()) || (cause.message && NETWORK_HINT_RE.test(cause.message))) return true;
+  const wrapped = error as { lastError?: { message?: string }; errors?: Array<{ message?: string }> };
+  const text = [
+    error.message,
+    wrapped.lastError?.message ?? "",
+    ...(wrapped.errors ?? []).map((entry) => entry.message ?? "")
+  ].join(" ");
+  return NETWORK_HINT_RE.test(text);
+}

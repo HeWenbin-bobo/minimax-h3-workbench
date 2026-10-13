@@ -11,3 +11,6 @@ release/
 coverage/
 .e2e/probe-*.mjs
 .smoke-userdata/
+.omc/
+.claude/
+.e2e/verify-*.mjs

@@ -296,11 +296,15 @@ export interface LlmTasksEvent {
   sessionId?: string;
 }
 
-/** 智能体工具调用开始事件：渲染端把"正在搜索/正在生成视频"实时显示在气泡上（工具透明度）。 */
+/** 智能体工具调用事件：渲染端把"正在搜索/正在生成视频"及其结果实时显示在气泡上（工具透明度）。 */
 export interface LlmToolEvent {
   /** 工具名（web_search / generate_video）。 */
   tool: string;
-  /** 人类可读的调用摘要（如搜索关键词、视频描述截断）。 */
+  /** start 阶段为人类可读的调用摘要；end 阶段为结果摘要（如"找到 6 条结果"）。 */
   input: string;
+  /** 阶段：start=工具开始执行，end=工具执行完成。旧事件可能缺省，按 start 处理。 */
+  phase?: "start" | "end";
+  /** end 阶段的结果摘要文本。 */
+  result?: string;
   sessionId?: string;
 }

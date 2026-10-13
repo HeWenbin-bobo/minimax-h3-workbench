@@ -445,7 +445,13 @@ interface PlaygroundMessage {
   content: string;
   images?: string[];
   streaming?: boolean;
+  /** 旧字段（扁平 id 列表）：读取时迁移为 taskGroups 单组。 */
   taskIds?: string[];
+  /**
+   * 智能体按工具调用轮次分组的任务卡片：一次对话里模型可能先后创建多批视频任务
+   * （如"先 1 路再补 2 路"），扁平列表会丢掉"哪几路是一起提交的"这一结构。
+   */
+  taskGroups?: string[][];
   error?: boolean;
   /** 瞬态：智能体工具调用状态（"正在搜索：xxx"），仅流式期间存在，落盘前与读取时都剥离。 */
   toolStatus?: string;
@@ -484,9 +490,12 @@ function loadSessions(): PlaygroundSession[] {
     return parsed.map((session) => ({
       ...session,
       // toolStatus 与 streaming 同理是瞬态：流式途中关闭应用会残留，读取时强制剥离。
+      // 旧数据迁移：扁平 taskIds → 单组 taskGroups（旧消息没有分组结构）。
       messages: (session.messages ?? []).map((msg) => {
         const { toolStatus: _dropped, ...rest } = msg;
-        return rest.streaming ? { ...rest, streaming: false } : rest;
+        const normalized = rest.taskGroups ?? (rest.taskIds?.length ? [rest.taskIds] : undefined);
+        const migrated = { ...rest, taskGroups: normalized, taskIds: undefined };
+        return migrated.streaming ? { ...migrated, streaming: false } : migrated;
       })
     }));
   } catch { return []; }
@@ -545,7 +554,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const offDone = window.h3.onLlmDone((event) => {
       const targetId = event.sessionId;
       const buffered = targetId ? streamBuffers.current.get(targetId) ?? "" : "";
-      const pendingTaskIds = targetId ? taskIdBuffers.current.get(targetId) ?? [] : [];
+      const pendingGroups = targetId ? taskIdBuffers.current.get(targetId) ?? [] : [];
       if (targetId) {
         streamBuffers.current.delete(targetId);
         taskIdBuffers.current.delete(targetId);
@@ -554,13 +563,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         setSessions((all) => patchLast(all, targetId, (msg) => {
           // 收尾取缓冲区与消息内容的较长者：避免真实回复被空 content 覆盖（"发消息没回复"）。
           const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
-          const mergedTaskIds = Array.from(new Set([...(msg.taskIds ?? []), ...pendingTaskIds]));
+          // 收尾把缓冲的整组任务并入分组结构（保持"哪几路是一起提交的"）。
+          const mergedGroups = [...(msg.taskGroups ?? []), ...(pendingGroups.length ? [pendingGroups] : [])];
           return {
             ...msg,
             streaming: false,
             toolStatus: undefined,
             error: !event.ok && Boolean(event.message),
-            taskIds: mergedTaskIds.length ? mergedTaskIds : undefined,
+            taskGroups: mergedGroups.length ? mergedGroups : undefined,
             // 失败必显文案：气泡为空写完整错误；已有内容（如回落提示）在末尾追加错误详情。
             content: !event.ok && event.message
               ? (base ? `${base}\n\n请求失败：${event.message}` : `请求失败：${event.message}`)
@@ -574,12 +584,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       }
       if (!event.ok && event.message) onError(new Error(event.message));
     });
-    // 智能体经 generate_video 建好任务：把卡片挂到对应会话正在流式的助手气泡上（否则任务只在工作台可见）。
+    // 智能体经 generate_video 建好任务：卡片按"本次工具调用的批次"分组挂到气泡上（候选 3：多任务分组）。
     const offTasks = window.h3.onLlmTasks((event) => {
       const targetId = event.sessionId;
       if (!targetId) return;
+      // 缓冲整组（事件可能早于 React 提交到达，收尾统一并入）。
       taskIdBuffers.current.set(targetId, [...(taskIdBuffers.current.get(targetId) ?? []), ...event.taskIds]);
-      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, taskIds: Array.from(new Set([...(msg.taskIds ?? []), ...event.taskIds])) })));
+      // 实时显示：把本次批次作为一个新组追加（工具可能在一轮里多次调用）。
+      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, taskGroups: [...(msg.taskGroups ?? []), event.taskIds] })));
     });
     return () => { offChunk(); offDone(); offTasks(); offTool(); };
   }, []);
@@ -669,7 +681,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     if (!result.ok) { onError(result.message); return; }
     const taskIds = result.data?.map((task) => task.id) ?? [];
     const summary = `已提交视频生成（${backendLabel(videoRequest.backend)}${videoRequest.preset ? ` · ${rbPresetLabel(videoRequest.preset)}` : ""}）：${videoRequest.prompt.slice(0, 60)}${videoRequest.prompt.length > 60 ? "…" : ""}`;
-    const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: summary, taskIds };
+    const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: summary, taskGroups: taskIds.length ? [taskIds] : undefined };
     const stamp = new Date().toISOString();
     setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, updatedAt: stamp, messages: [...s.messages, { id: crypto.randomUUID(), role: "user" as const, content: `🎬 生成视频：${videoRequest.prompt.slice(0, 80)}` }, assistantMsg] } : s));
     setShowVideoForm(false);
@@ -760,7 +772,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
               {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
               <div className="pg-bubble">{msg.toolStatus && <span className="pg-tool-status">{msg.toolStatus}</span>}{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}</div>
-              {msg.taskIds && msg.taskIds.length > 0 && <div className="result-grid pg-task-grid">{msg.taskIds.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} />)}</div>}
+              {msg.taskGroups && msg.taskGroups.length > 0 && msg.taskGroups.map((group, gi) => group.length > 0 && <div key={`${msg.id}-${gi}`} className="result-grid pg-task-grid">{group.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} />)}</div>)}
             </div>)}
           <div ref={bottomRef} />
         </div>

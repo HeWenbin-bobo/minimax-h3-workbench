@@ -26,6 +26,7 @@ import { TaskStore } from "./modules/taskStore";
 import { checkForUpdates, checkFrameworkUpdate } from "./modules/updateChecker";
 import { renderHtml, clearBrowserFetchCache } from "./modules/browserFetch";
 import { searchWeb } from "./modules/webSearch";
+import { buildAgentMemoryHint } from "./modules/agentMemory";
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "h3media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
@@ -343,7 +344,9 @@ function registerIpc(
         baseUrl: settings.llm.baseUrl,
         apiKey: await settingsStore.getSecret("llmApiKey"),
         model: settings.llm.model,
-        systemPrompt: settings.llm.systemPrompt,
+        // 历史感知（候选 4）：从既有任务提炼常用时长/数量/后端/主题，注入系统提示词；
+        // 用户自定义 systemPrompt 优先，习惯提示只作追加。
+        systemPrompt: `${settings.llm.systemPrompt || "你是 MiniMax H3 视频工作台内置的智能助手，可以联网搜索资料，也可以直接调用 generate_video 工具为用户生成视频。"}${buildAgentMemoryHint(orchestrator.list())}`,
         searchBaseUrl: settings.searchApi.baseUrl || undefined,
         searchApiKey: await settingsStore.getSecret("searchApiKey")
       };
@@ -369,7 +372,8 @@ function registerIpc(
           const response = await orchestrator.submit(request);
           // 把新任务 id 推给渲染端：对应会话气泡下直接挂结果卡片（工具文案承诺了"卡片将在下方实时显示"）。
           sendTasks(response.map((task) => task.id));
-          return `已创建 ${response.length} 个视频生成任务（${backendKindLabel(request.backend)}·${request.duration} 秒），卡片将在下方实时显示进度，也可到「生成工作台」查看。`;
+          // 返回文本带全量参数：模型据此在收尾时能准确复述任务细节（收尾质量），而不是含糊的"已创建"。
+          return `已创建 ${response.length} 个视频生成任务：后端=${backendKindLabel(request.backend)}，时长=${request.duration} 秒，数量=${request.count} 路，画面描述="${params.prompt}"。任务卡片已实时显示在本会话气泡下方，完成后可直接预览与下载。请向用户简短确认这些任务参数（一两句话即可，不要重复长描述）。`;
         }
       };
       let result: { textLength: number; toolCalls: number } | undefined;
@@ -386,9 +390,11 @@ function registerIpc(
           // 「浏览器搜索」也要暴露 web_search 工具：enableWebSearch 是"本轮允许联网"的总开关，
           // browserOnly 只是改变搜索的执行方式（只用 Chromium 渲染）。漏传会导致工具不暴露，
           // 模型只能凭训练知识回答"该商品尚未发布"——UI 实测抓到的就是这个 bug。
-          // 工具调用开始即推送 llm:tool：气泡实时显示"正在搜索/正在生成视频"。
+          // 工具调用开始即推送 llm:tool：气泡实时显示"正在搜索/正在生成视频"；完成时显示结果摘要（全链路透明）。
           result = await chatAgent(agentOptions, messages, agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
-            sendLlmTool({ tool, input, sessionId: session });
+            sendLlmTool({ tool, input, phase: "start", sessionId: session });
+          }, (tool, summary) => {
+            sendLlmTool({ tool, input: "", phase: "end", result: summary, sessionId: session });
           });
           break;
         } catch (error) {

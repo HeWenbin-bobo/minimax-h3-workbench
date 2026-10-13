@@ -201,6 +201,20 @@ export async function bundledFrameworkVersion(): Promise<string> {
  * 返回 { textLength, toolCalls }：调用方据此判断"模型不支持工具"（0 文本 0 工具调用）
  * 并自动回落普通对话——这正是工具支持检测的运行时落地。
  */
+/** 工具执行结果的人类可读摘要（onToolExecutionEnd 的 toolOutput.output 形态随工具而异）。 */
+function humanizeToolOutput(toolName: string, output: unknown): string {
+  if (output == null) return "完成";
+  if (typeof output === "string") {
+    // web_search 返回 "[n] 标题…" 格式的参考段落：数条目数给用户确定感。
+    if (toolName === "web_search") {
+      const count = (output.match(/^\[\d+\]/gm) || []).length;
+      return count > 0 ? `找到 ${count} 条结果` : "未找到结果";
+    }
+    return output.length > 60 ? "完成" : output;
+  }
+  return "完成";
+}
+
 /** 工具调用入参的人类可读摘要：状态条展示用，别把原始 JSON 糊到用户脸上。 */
 function humanizeToolInput(toolName: string, input: unknown): string {
   if (input == null) return "";
@@ -228,7 +242,9 @@ export async function chatAgent(
   /** 「联网」开关：关闭时不把 web_search 工具下发给模型（否则开关形同虚设）。 */
   enableWebSearch = false,
   /** 工具调用开始回调：渲染端据此在气泡上实时显示"正在搜索/正在生成视频"（透明度）。 */
-  onToolStart?: (tool: string, input: string) => void
+  onToolStart?: (tool: string, input: string) => void,
+  /** 工具执行完成回调：渲染端显示结果摘要（"找到 N 条结果"/"已建 N 个任务"），工具全链路透明。 */
+  onToolEnd?: (tool: string, summary: string) => void
 ): Promise<{ textLength: number; toolCalls: number }> {
   const [{ streamText, tool, stepCountIs }, { createOpenAICompatible }, { z }] = await Promise.all([
     import("ai"),
@@ -301,6 +317,12 @@ export async function chatAgent(
       if (!onToolStart || !event) return;
       const toolName = String(event.toolCall.toolName ?? "");
       onToolStart(toolName, humanizeToolInput(toolName, event.toolCall.input));
+    },
+    // 工具执行完成：渲染端显示结果摘要，工具全链路可见（开始 → 完成）。
+    onToolExecutionEnd: (event) => {
+      if (!onToolEnd || !event) return;
+      const toolName = String(event.toolCall.toolName ?? "");
+      onToolEnd(toolName, humanizeToolOutput(toolName, (event as { toolOutput?: { output?: unknown } }).toolOutput?.output));
     }
   });
   let seq = 0;

@@ -1,6 +1,9 @@
 export type BackendKind = "local" | "ssh" | "minimax" | "rb";
 export type SecretName = "minimaxApiKey" | "sshPassword" | "rbCardCode" | "llmApiKey" | "searchApiKey";
 export type GenerationMode = "text" | "image" | "video";
+
+/** 视频描述长度上限。工作台计数器、文本域 maxlength 与主进程校验共用同一来源，避免标称值与实际约束不一致。 */
+export const MAX_PROMPT_LENGTH = 2000;
 export type TaskStatus =
   | "draft"
   | "validating"
@@ -227,11 +230,17 @@ export interface WorkbenchApi {
   listDeletedTasks(): Promise<ApiResponse<GenerationTask[]>>;
   showItem(filePath: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
-  /** 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。agent=true 走 AI SDK 工具循环。 */
-  chatLlm(messages: ChatMessage[], webSearch: boolean, agent?: boolean): Promise<ApiResponse<boolean>>;
+  /**
+   * 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。agent=true 走 AI SDK 工具循环。
+   * sessionId 由渲染端生成：不同会话可并发对话，事件按该 id 路由回各自的会话，互不串流。
+   * browserSearch=true 走「浏览器搜索」：只用应用自带 Chromium 渲染抓取（跳过搜索 API 与 HTTP 直抓），
+   * 与 webSearch 互斥。
+   */
+  chatLlm(messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch?: boolean): Promise<ApiResponse<boolean>>;
   /** 智能体框架独立更新检查（npm registry 最新版 vs 打包版本）。 */
   checkAgentFrameworkUpdate(): Promise<ApiResponse<{ bundledVersion: string; latestVersion?: string; updateAvailable: boolean; message: string }>>;
-  abortLlm(): Promise<ApiResponse<boolean>>;
+  /** 中止指定会话的对话（省略则中止全部会话）。 */
+  abortLlm(sessionId?: string): Promise<ApiResponse<boolean>>;
   /** 游乐场：从上游拉取模型列表（OpenAI 兼容 GET /models）；不支持的服务商返回 ok=false + 提示。 */
   listLlmModels(): Promise<ApiResponse<{ ok: boolean; models: string[]; message: string }>>;
   /** 游乐场：LLM 连接测试（发一条最小对话验证 Key/模型/端点全链路）。 */
@@ -267,15 +276,20 @@ export interface LlmStreamEvent {
   /** 递增序号，渲染端用于去重与排序。 */
   seq: number;
   delta: string;
+  /** 发起该轮的会话 id：多会话并发时用于把分块路由回正确的会话。 */
+  sessionId?: string;
 }
 
 /** LLM 单轮流结束事件。 */
 export interface LlmDoneEvent {
   ok: boolean;
   message?: string;
+  /** 发起该轮的会话 id（老调用方可能不带，渲染端按"当前流式会话"兜底）。 */
+  sessionId?: string;
 }
 
 /** 智能体工具创建视频任务事件：渲染端据此把结果卡片挂到当前会话的助手气泡上（否则任务只在工作台可见）。 */
 export interface LlmTasksEvent {
   taskIds: string[];
+  sessionId?: string;
 }

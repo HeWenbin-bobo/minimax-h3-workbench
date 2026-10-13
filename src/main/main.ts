@@ -14,6 +14,7 @@ import {
 } from "electron";
 import { AdapterRegistry } from "./backends/adapterRegistry";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
+import { describeError, isNetworkError } from "../shared/errors";
 import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmDoneEvent, LlmStreamEvent, LlmTasksEvent, SecretName } from "../shared/types";
 import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
@@ -23,6 +24,8 @@ import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
 import { checkForUpdates, checkFrameworkUpdate } from "./modules/updateChecker";
+import { renderHtml, clearBrowserFetchCache } from "./modules/browserFetch";
+import { searchWeb } from "./modules/webSearch";
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "h3media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
@@ -115,7 +118,7 @@ app.on("activate", () => {
   }
 });
 
-app.on("before-quit", () => adapters?.close());
+app.on("before-quit", () => { adapters?.close(); void clearBrowserFetchCache(); });
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -165,9 +168,11 @@ function registerIpc(
     baseSeed: 1
   };
   const backendKindLabel = (kind: BackendKind) => kind === "local" ? "本机 ComfyUI" : kind === "ssh" ? "SSH 远程显卡" : kind === "rb" ? "瞬映 RB" : "MiniMax H3";
-  // 游乐场 LLM：单例服务，随设置刷新重建；流式分块经 llm:chunk 推送，结束经 llm:done 推送。
-  let llm: LlmService | undefined;
-  const llmAborters: Array<AbortController> = []; // agent 模式的取消器（llm:abort 时全部中止）
+  // 游乐场 LLM：按会话各建一个服务实例，互不干扰；流式分块经 llm:chunk 推送（带 sessionId），结束经 llm:done 推送。
+  // 早期是单例 + 全局并发守卫，导致"一个会话在回复时其它会话完全不能发消息"；改为按会话隔离后天然支持并发。
+  let llm: LlmService | undefined; // 共享实例：仅用于 llm:test / llm:models 这类无状态探测
+  const sessionServices = new Map<string, LlmService>();
+  const sessionAborters = new Map<string, AbortController>();
   const rebuildLlm = async (): Promise<LlmService> => {
     const settings = await settingsStore.get();
     llm = new LlmService({
@@ -176,14 +181,36 @@ function registerIpc(
       model: settings.llm.model,
       systemPrompt: settings.llm.systemPrompt,
       searchBaseUrl: settings.searchApi.baseUrl || undefined,
-      searchApiKey: await settingsStore.getSecret("searchApiKey")
+      searchApiKey: await settingsStore.getSecret("searchApiKey"),
+      searchRenderHtml: renderHtml
     });
     return llm;
   };
+  // 会话级服务实例：同一会话内复用（LlmService.busy 只挡"同一会话"的并发），Key/地址变更后由 invalidate 清理重建。
+  const serviceForSession = async (sessionId: string): Promise<LlmService> => {
+    const existing = sessionServices.get(sessionId);
+    if (existing) return existing;
+    const settings = await settingsStore.get();
+    const service = new LlmService({
+      baseUrl: settings.llm.baseUrl,
+      apiKey: await settingsStore.getSecret("llmApiKey"),
+      model: settings.llm.model,
+      systemPrompt: settings.llm.systemPrompt,
+      searchBaseUrl: settings.searchApi.baseUrl || undefined,
+      searchApiKey: await settingsStore.getSecret("searchApiKey"),
+      searchRenderHtml: renderHtml
+    });
+    sessionServices.set(sessionId, service);
+    return service;
+  };
+  const invalidateLlmSessions = () => {
+    llm = undefined;
+    sessionServices.clear();
+  };
   const sendChunk = (event: LlmStreamEvent) => mainWindow?.webContents.send("llm:chunk", event);
-  const sendDone = (ok: boolean, message?: string) => mainWindow?.webContents.send("llm:done", { ok, message } satisfies LlmDoneEvent);
-  // 智能体工具建好任务后推送任务 id：游乐场把卡片挂到当前会话气泡上。
-  const sendLlmTasks = (taskIds: string[]) => mainWindow?.webContents.send("llm:tasks", { taskIds } satisfies LlmTasksEvent);
+  const sendDone = (event: LlmDoneEvent) => mainWindow?.webContents.send("llm:done", event);
+  // 智能体工具建好任务后推送任务 id：游乐场把卡片挂到对应会话气泡上。
+  const sendLlmTasks = (event: LlmTasksEvent) => mainWindow?.webContents.send("llm:tasks", event);
   // LLM 连接测试（cc-switch 模式）：拉模型列表验证连通性——不发对话（不花钱），
   // 不受对话端点路径差异影响；/models 不通的服务商回退发一条最小对话。
   handle("llm:test", async () => {
@@ -201,7 +228,7 @@ function registerIpc(
       if (!streamed.trim()) throw new Error("服务商未返回内容，请检查模型名称。");
       return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: settings.llm.model }, message: `连接成功，模型已回复（${Date.now() - start}ms；该服务商不支持模型列表，走的对话验证）。` };
     } catch (error) {
-      return { ok: false, label: "游乐场 LLM", latencyMs: Date.now() - start, details: {}, message: error instanceof Error ? error.message : "连接失败" };
+      return { ok: false, label: "游乐场 LLM", latencyMs: Date.now() - start, details: {}, message: describeError(error, "连接失败") };
     }
   });
   // 从上游拉取模型列表（OpenAI 兼容 GET /models）；需先保存 Key。
@@ -215,13 +242,13 @@ function registerIpc(
     const next = await settingsStore.update(patch);
     settingsCache = next; // 同步刷新 h3media/showItem 白名单缓存，改输出目录后新结果立即可预览
     registry.invalidate(next);
-    llm = undefined; // LLM 配置可能已变，下一轮对话重建服务
+    invalidateLlmSessions(); // LLM 配置可能已变，下一次对话按新配置重建
     return next;
   });
   handle("secret:set", async (_event, name: SecretName, value: string) => {
     await settingsStore.setSecret(name, value);
     registry.invalidate();
-    llm = undefined; // Key 可能已变，下一轮对话重建服务
+    invalidateLlmSessions(); // Key 可能已变，下一次对话按新 Key 重建
     return true;
   });
   handle("secret:has", (_event, name: SecretName) => settingsStore.hasSecret(name));
@@ -278,30 +305,38 @@ function registerIpc(
   });
   // 游乐场：流式对话（异步跑完，期间 llm:chunk/llm:done 推送）、中断、附件读取。
   // agent 模式走 AI SDK 工具循环（web_search / generate_video），普通聊天走原路径零回归。
-  handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean, agent: boolean) => {
-    const service = llm ?? await rebuildLlm();
+  handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch: boolean) => {
+    // sessionId 由渲染端生成；缺失时退化成一次性的匿名会话（老调用方兼容），不再共用全局单例。
+    // browserSearch=true 是「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取，与 webSearch 互斥。
+    const browserOnly = Boolean(browserSearch) && !webSearch;
+    const session = typeof sessionId === "string" && sessionId ? sessionId : `anon-${Math.random().toString(36).slice(2)}`;
+    const service = await serviceForSession(session);
+    // 同一会话不允许并发（会往同一个气泡里写两股流）；不同会话各自独立，可同时生成。
+    if (sessionAborters.has(session) || service.busy) throw new Error("该会话的上一轮回复还在进行中，请先停止或等待完成。");
+    const chunk = (event: LlmStreamEvent) => sendChunk({ ...event, sessionId: session });
+    const done = (event: LlmDoneEvent) => sendDone({ ...event, sessionId: session });
     if (!agent) {
-      void service.chat(messages, webSearch, sendChunk)
-        .then(() => sendDone(true))
+      void service.chat(messages, webSearch || browserOnly, chunk, browserOnly)
+        .then(() => done({ ok: true }))
         .catch((error: unknown) => {
           // 用户主动停止（abort）不算错误：正常收尾，不显示红色报错。
           const aborted = error instanceof DOMException && error.name === "AbortError";
-          sendDone(aborted, aborted ? undefined : error instanceof Error ? error.message : "对话失败");
+          done({ ok: aborted, message: aborted ? undefined : describeError(error, "对话失败") });
         });
       return true;
     }
     // 智能体模式：AI SDK 多步工具循环。视频工具直接接 orchestrator（提交即返回任务 ID，卡片实时刷新）。
     // 工具支持自动检测：模型不支持工具调用（0 文本 + 0 工具调用）或 agent 路径异常但尚未输出任何内容时，
     // 自动用相同消息回落普通对话（runtime fallback）——避免出现"又是空回复"且对用户透明。
-    // 并发守卫：agent 不走 LlmService，绕过了它的 busy 检查；不挡的话两条流会同时往同一个
-    // streamBuffer/streamingSessionId 里写，回复交错、用户消息落两条、界面永远卡在"回复中"。
-    if (llmAborters.length > 0) throw new Error("上一轮对话还在进行中，请先停止或等待完成。");
+    // agent 不走 LlmService，绕过了它的 busy 检查，故这里按会话登记取消器并挡住同会话并发。
     const controller = new AbortController();
-    llmAborters.push(controller);
+    sessionAborters.set(session, controller);
     void (async () => {
       const settings = await settingsStore.get();
       let agentSent = 0;
-      const agentSend = (event: LlmStreamEvent) => { agentSent += 1; sendChunk(event); };
+      let agentTaskCount = 0; // 本轮已建任务数：非 0 时不得整轮重试（否则会重复建任务）
+      const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
+      const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
       const agentOptions = {
         baseUrl: settings.llm.baseUrl,
         apiKey: await settingsStore.getSecret("llmApiKey"),
@@ -311,22 +346,14 @@ function registerIpc(
         searchApiKey: await settingsStore.getSecret("searchApiKey")
       };
       const agentCallbacks = {
-        webSearch: async (query: string) => {
-          const response = await fetch(`${(settings.searchApi.baseUrl || "").replace(/\/+$/, "")}/search`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(await settingsStore.getSecret("searchApiKey") ? { Authorization: `Bearer ${await settingsStore.getSecret("searchApiKey")}` } : {})
-            },
-            body: JSON.stringify({ query, count: 6 }),
-            signal: controller.signal
-          });
-          if (!response.ok) throw new Error(`搜索请求失败：${response.status}`);
-          const payload = await response.json() as { results?: Array<{ title?: string; name?: string; url?: string; snippet?: string; content?: string }> };
-          return (payload.results ?? [])
-            .map((item, index) => `[${index + 1}] ${item.title || item.name || ""}\n${item.url || ""}\n${item.snippet || item.content || ""}`)
-            .join("\n\n");
-        },
+        // 与普通对话共用同一条搜索链路：配了搜索 API 就优先用它，未配置则回落免 key 抓取 Bing/搜狗。
+        // browserOnly（「浏览器搜索」联网项）时只用 Chromium 渲染，跳过 API 与 HTTP 直抓。
+        webSearch: async (query: string) => searchWeb(query, {
+          apiBaseUrl: settings.searchApi.baseUrl || undefined,
+          apiKey: await settingsStore.getSecret("searchApiKey"),
+          renderHtml,
+          browserOnly
+        }, controller.signal),
         generateVideo: async (params: { prompt: string; duration: number; count: number }) => {
           const request: GenerationRequest = {
             ...initialAgentVideoRequest,
@@ -338,46 +365,76 @@ function registerIpc(
             baseSeed: Math.floor(Math.random() * 1_000_000)
           };
           const response = await orchestrator.submit(request);
-          // 把新任务 id 推给渲染端：游乐场会话内直接挂结果卡片（工具文案承诺了"卡片将在下方实时显示"，此前没实现）。
-          sendLlmTasks(response.map((task) => task.id));
+          // 把新任务 id 推给渲染端：对应会话气泡下直接挂结果卡片（工具文案承诺了"卡片将在下方实时显示"）。
+          sendTasks(response.map((task) => task.id));
           return `已创建 ${response.length} 个视频生成任务（${backendKindLabel(request.backend)}·${request.duration} 秒），卡片将在下方实时显示进度，也可到「生成工作台」查看。`;
         }
       };
       let result: { textLength: number; toolCalls: number } | undefined;
-      try {
-        result = await chatAgent(agentOptions, messages, agentCallbacks, agentSend, controller.signal, webSearch);
-      } catch (error) {
-        if (controller.signal.aborted) { sendDone(true); return; }
-        // agent 异常且还没输出内容：自动用普通对话补发（普通路径有完整的错误信息）。
-        if (agentSent === 0) {
-          sendChunk({ seq: 1, delta: "（当前模型/服务商对智能体工具调用支持不完整，已自动改用普通对话模式）\n\n" });
-          await service.chat(messages, webSearch, sendChunk);
-          sendDone(true);
-          return;
+      let agentError: unknown;
+      let attempts = 0;
+      // 整轮重试：智能体是多步工具循环，而 SDK 的 maxRetries 只覆盖"首个请求"——
+      // 后续步骤（或重试那一次本身）撞上中转偶发 ECONNRESET 时，整轮会被一个抖动打挂，
+      // 随即回落普通对话、视频生成意图就丢了。实测该中转的连接重置属低频偶发，
+      // 所以"整轮再来一次"是有效且低成本的兜底；仅当尚未产出任何内容/任务时才重试，
+      // 避免重复落消息、重复建任务。
+      while (attempts < 2) {
+        attempts += 1;
+        try {
+          // 「浏览器搜索」也要暴露 web_search 工具：enableWebSearch 是"本轮允许联网"的总开关，
+          // browserOnly 只是改变搜索的执行方式（只用 Chromium 渲染）。漏传会导致工具不暴露，
+          // 模型只能凭训练知识回答"该商品尚未发布"——UI 实测抓到的就是这个 bug。
+          result = await chatAgent(agentOptions, messages, agentCallbacks, agentSend, controller.signal, webSearch || browserOnly);
+          break;
+        } catch (error) {
+          if (controller.signal.aborted) { done({ ok: true }); return; }
+          agentError = error;
+          const retryable = attempts === 1 && agentSent === 0 && agentTaskCount === 0 && isNetworkError(error);
+          if (!retryable) break;
         }
-        throw error;
+      }
+      if (!result) {
+        // 已经出过内容就不能再补发普通对话（会与已流出的文本拼接成两份回答）。
+        if (agentSent > 0) throw agentError;
+        // 到此说明整轮重试后仍未成功（或本就不该重试）：如实报出原因再回落——
+        // 原因可能是上游 5xx、连接重置、也可能服务商拒绝带 tools 的请求；统一说成
+        // "模型不支持工具"会误导用户去换模型。（真"不支持工具"走下面全 0 分支，不抛错。）
+        const reason = describeError(agentError, "智能体请求失败");
+        chunk({ seq: 1, delta: `（智能体模式请求失败：${reason}，已自动改用普通对话模式）\n\n` });
+        await service.chat(messages, webSearch || browserOnly, chunk, browserOnly);
+        done({ ok: true });
+        return;
       }
       if (agentSent === 0 && result.textLength === 0 && result.toolCalls === 0) {
         // 模型走了 agent 路径但没出文本也没出工具调用——基本就是不支持函数调用。自动回落普通对话。
-        sendChunk({ seq: 1, delta: "（当前模型不支持工具调用，已自动改用普通对话模式）\n\n" });
-        await service.chat(messages, webSearch, sendChunk);
-        sendDone(true);
+        chunk({ seq: 1, delta: "（当前模型不支持工具调用，已自动改用普通对话模式）\n\n" });
+        await service.chat(messages, webSearch || browserOnly, chunk, browserOnly);
+        done({ ok: true });
         return;
       }
-      sendDone(true);
+      if (agentSent === 0 && result.toolCalls > 0) {
+        // 工具调成功了（任务卡片已经推给渲染端）但模型没再输出收尾文本：不能留空气泡让用户看到"（空回复）"。
+        chunk({ seq: 1, delta: "已按你的要求创建视频生成任务，结果卡片在下方实时显示，也可到「生成工作台」查看。" });
+      }
+      done({ ok: true });
     })().catch((error: unknown) => {
       const aborted = controller.signal.aborted;
-      sendDone(aborted, aborted ? undefined : error instanceof Error ? error.message : "智能体对话失败");
+      done({ ok: aborted, message: aborted ? undefined : describeError(error, "智能体对话失败") });
     }).finally(() => {
-      // 收尾必摘：不摘的话 llmAborters 会被历轮对话撑满，上面的并发守卫从此永久拒绝新对话。
-      const index = llmAborters.indexOf(controller);
-      if (index >= 0) llmAborters.splice(index, 1);
+      // 收尾必摘：不摘的话该会话的取消器一直占着，同会话的并发守卫从此永久拒绝新对话。
+      sessionAborters.delete(session);
     });
     return true;
   });
-  handle("llm:abort", async () => {
-    llm?.abort();
-    while (llmAborters.length > 0) llmAborters.pop()?.abort(); // agent 模式的取消
+  // 取消：给了 sessionId 就只中止该会话（多会话并发时不能连坐），否则中止全部。
+  handle("llm:abort", async (_event, sessionId?: string) => {
+    if (sessionId) {
+      sessionAborters.get(sessionId)?.abort();
+      sessionServices.get(sessionId)?.abort();
+      return true;
+    }
+    for (const controller of sessionAborters.values()) controller.abort();
+    for (const service of sessionServices.values()) service.abort();
     return true;
   });  handle("attachment:read", async (_event, filePath: string) => {
     if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
@@ -454,7 +511,7 @@ function handle<TArgs extends unknown[], TResult>(
         ok: false,
         requestId,
         errorCode: "OPERATION_FAILED",
-        message: error instanceof Error ? error.message : "操作失败",
+        message: describeError(error, "操作失败"),
         retryable: true
       };
     }

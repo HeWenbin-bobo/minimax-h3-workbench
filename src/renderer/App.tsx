@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMessage, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LlmStreamEvent, LocalModelStatus, ResourceLink, UpdateInfo } from "../shared/types";
-import { LLM_PROVIDERS } from "../shared/types";
+import { LLM_PROVIDERS, MAX_PROMPT_LENGTH } from "../shared/types";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
+import { describeError } from "../shared/errors";
 import { renderMarkdown } from "./markdown";
 
 type Page = "ready" | "studio" | "playground" | "downloads" | "guide" | "connections";
@@ -25,7 +26,7 @@ export function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo>();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installing, setInstalling] = useState(false);
-  const showError = (error: unknown) => setNotice({ text: error instanceof Error ? error.message : String(error || "操作失败"), error: true });
+  const showError = (error: unknown) => setNotice({ text: describeError(error, "操作失败"), error: true });
 
   useEffect(() => {
     Promise.all([window.h3.getSettings(), window.h3.getResourceLinks(), window.h3.listTasks()])
@@ -155,20 +156,6 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   const activeProject = activeProjectId ? projects.find((group) => (group[0].parentId || group[0].id) === activeProjectId) : undefined;
   const isRb = request.backend === "rb";
   const rbPreset = request.preset || (request.firstFramePath && request.lastFramePath ? "tail_frame" : "reference");
-  // 切换后端/预设后把时长夹回该后端的合法值域。不做这一步的话，UI 下拉会被浏览器归一化到
-  // 第一个选项（看着像 4 秒），而 request.duration 仍是旧值，提交时才被 validateRequest 拒绝
-  // （"视频时长必须在 4–15 秒之间"）——用户看到的下拉值与实际提交值不一致。
-  const clampDuration = (duration: number, options: number[]) =>
-    options.length === 0 || options.includes(duration)
-      ? duration
-      : options.reduce((best, x) => (Math.abs(x - duration) < Math.abs(best - duration) ? x : best), options[0]);
-  const durationOptionsFor = (backend: BackendKind, preset?: string): number[] => {
-    if (backend !== "rb") return [4, 6, 8, 10, 12, 15];
-    if (preset === "easy_15") return [15];
-    if (preset === "easy_30") return [30];
-    if (preset === "flashvsr_upscale") return [];
-    return [4, 6, 8]; // reference / tail_frame
-  };
   const setRbPreset = (preset: string) => setRequest({ ...request, preset, duration: clampDuration(request.duration, durationOptionsFor("rb", preset)) });
   const clampedCount = Math.max(1, Math.min(4, request.count));
   // 新建视图：request.count 个占位；项目视图：仅该项目任务，按 index 排序。
@@ -232,7 +219,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       <button className={`project-tab new-task${activeProjectId ? "" : " active"}`} onClick={() => setActiveProjectId(undefined)}>
         <strong>＋ 新建任务</strong><small>按下方参数生成 {clampedCount} 路</small>
       </button>
-      {filteredProjects.slice(0, 12).map((group) => {
+      {filteredProjects.map((group) => {
         const key = group[0].parentId || group[0].id;
         const running = group.some((t) => !["succeeded", "failed", "cancelled", "interrupted"].includes(t.status));
         const done = group.filter((t) => t.status === "succeeded").length;
@@ -251,7 +238,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       {isRb && rbPreset === "flashvsr_upscale"
         ? <FilePicker label="源视频（要变清晰的视频）" path={request.sourceVideoPath} onClick={() => choose("video", "sourceVideoPath")} />
         : <>
-          <label>视频描述<textarea rows={7} value={request.prompt} onChange={(e) => setRequest({ ...request, prompt: e.target.value })} placeholder="描述主体、动作、镜头、光线与风格…"/><small>{request.prompt.length} / 2000</small></label>
+          <label>视频描述<textarea rows={7} maxLength={MAX_PROMPT_LENGTH} value={request.prompt} onChange={(e) => setRequest({ ...request, prompt: e.target.value })} placeholder="描述主体、动作、镜头、光线与风格…"/><small>{request.prompt.length} / {MAX_PROMPT_LENGTH}</small></label>
           {!isRb && request.mode === "text" && <div className="frame-row"><FilePicker label="首帧（可选）" path={request.firstFramePath} onClick={() => choose("image", "firstFramePath")} /><FilePicker label="尾帧（可选）" path={request.lastFramePath} onClick={() => choose("image", "lastFramePath")} /></div>}
           {!isRb && request.mode === "image" && <FilePicker label="参考图片" path={request.sourceImagePath} onClick={() => choose("image", "sourceImagePath")} />}
           {!isRb && request.mode === "video" && <FilePicker label="参考视频" path={request.sourceVideoPath} onClick={() => choose("video", "sourceVideoPath")} />}
@@ -432,7 +419,7 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
     <ConnectionCard title="瞬映 RB 云生成" badge="RB-CLOUD" result={results.rb} onTest={() => test("rb")} testing={testing === "rb"}><label>API 地址<input value={draft.rbBaseUrl} onChange={(e) => setDraft({...draft,rbBaseUrl:e.target.value})}/></label><label>瞬映卡密<input type="password" value={rbCardCode} onChange={(e) => setRbCardCode(e.target.value)} placeholder="已保存的卡密不会回显；留空不修改"/></label></ConnectionCard>
     <ConnectionCard title="SSH 远程显卡" badge="REMOTE" result={results.ssh} onTest={() => test("ssh")} testing={testing === "ssh"}><div className="form-grid"><label>主机<input value={draft.ssh.host} onChange={(e)=>setSsh({host:e.target.value})} placeholder="gpu.example.com"/></label><label>端口<input type="number" value={draft.ssh.port} onChange={(e)=>setSsh({port:Number(e.target.value)})}/></label><label>用户名<input value={draft.ssh.username} onChange={(e)=>setSsh({username:e.target.value})}/></label><label>远端 ComfyUI 端口<input type="number" value={draft.ssh.remoteComfyPort} onChange={(e)=>setSsh({remoteComfyPort:Number(e.target.value)})}/></label></div><label>私钥路径<div className="input-button"><input value={draft.ssh.privateKeyPath} onChange={(e)=>setSsh({privateKeyPath:e.target.value})}/><button onClick={async()=>{const x=await window.h3.selectFile("key");if(x.data)setSsh({privateKeyPath:x.data});}}>选择</button></div></label><label>SSH 密码（仅无私钥时）<input type="password" value={sshPassword} onChange={(e)=>setSshPassword(e.target.value)} placeholder="使用系统安全存储"/></label><label>主机 SHA-256 指纹<input value={draft.ssh.hostFingerprint} onChange={(e)=>setSsh({hostFingerprint:e.target.value})} placeholder="首次测试确认后填入"/></label></ConnectionCard>
     <ConnectionCard title="游乐场 LLM（OpenAI 兼容）" badge="PLAY" result={llmResult} onTest={testLlm} testing={llmTesting}><div className="form-grid"><label>提供商<select value={draft.llm.provider} onChange={(e) => setLlmProvider(e.target.value)}>{LLM_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}</select></label><label>API 地址<input value={draft.llm.baseUrl} onChange={(e) => setLlm({baseUrl: e.target.value})} placeholder="https://api.example.com/v1"/></label><label>模型名称<div className="input-button"><input value={draft.llm.model} onChange={(e) => setLlm({model: e.target.value})} placeholder="deepseek-chat"/>{llmModels && llmModels.length > 0 && <select className="pg-model-select" value="" onChange={(e) => { if (e.target.value) setLlm({model: e.target.value}); }}><option value="">从列表选择…</option>{llmModels.map((m) => <option key={m} value={m}>{m}</option>)}</select>}<button onClick={fetchModels} disabled={fetchingModels}>{fetchingModels ? "获取中…" : "获取列表"}</button></div></label></div><label>API Key<input type="password" value={llmKey} onChange={(e) => setLlmKey(e.target.value)} placeholder="已保存的密钥不会回显；留空不修改（Ollama 本机可留空）"/></label><label>系统提示词（可选）<input value={draft.llm.systemPrompt} onChange={(e) => setLlm({systemPrompt: e.target.value})} placeholder="例如：你是视频创作助手，帮我润色视频描述。"/></label><p className="footnote">测试连接优先拉取上游模型列表验证连通性（不发对话、不消耗额度），不支持列表接口的服务商回退发一条最小对话。改 API 地址为第三方中转时自动使用标准 /chat/completions 端点。</p></ConnectionCard>
-    <ConnectionCard title="联网搜索（可选）" badge="SEARCH"><label>搜索 API 地址<input value={draft.searchApi.baseUrl} onChange={(e) => setDraft({...draft, searchApi: {baseUrl: e.target.value}})} placeholder="博查/Tavily 转接等，POST /search 返回 results 数组；留空隐藏搜索开关"/></label><label>搜索 API Key<input type="password" value={searchKey} onChange={(e) => setSearchKey(e.target.value)} placeholder="已保存的密钥不会回显；留空不修改"/></label></ConnectionCard>
+    <ConnectionCard title="联网搜索（可选）" badge="SEARCH"><label>搜索 API 地址<input value={draft.searchApi.baseUrl} onChange={(e) => setDraft({...draft, searchApi: {baseUrl: e.target.value}})} placeholder="博查/Tavily 转接等，POST /search 返回 results 数组；留空则用免 key 抓取 Bing/搜狗"/></label><label>搜索 API Key<input type="password" value={searchKey} onChange={(e) => setSearchKey(e.target.value)} placeholder="已保存的密钥不会回显；留空不修改"/></label></ConnectionCard>
   </section>;
 }
 
@@ -443,6 +430,8 @@ interface PlaygroundSession {
   title: string;
   messages: PlaygroundMessage[];
   createdAt: string;
+  /** 最近使用时间：会话列表按它倒序，刚用过的排最前（多会话并发时能一眼看出哪几个在跑）。 */
+  updatedAt?: string;
   /** 会话回收站：非空表示已删除，7 天后启动时自动清除。 */
   deletedAt?: string;
   /** 用户自定义会话分类（空 = 未分类）。 */
@@ -462,8 +451,39 @@ interface PlaygroundMessage {
 
 const pgSessionsKey = "h3-playground-sessions";
 
+/** 会话落盘上限。 */
+const PG_SESSION_CAP = 50;
+
+/** 会话"最近使用"时间戳：新建会话还没用过时退回创建时间。 */
+function sessionRecency(session: PlaygroundSession): string {
+  return session.updatedAt || session.createdAt;
+}
+
+/**
+ * 裁到上限：按最近使用保留最新的，但正在生成回复的会话一律保留——
+ * 否则并发场景下一段还在跑的对话会被静默砍掉，回复流到一半目标就没了。
+ */
+function capSessions(sessions: PlaygroundSession[], generatingIds: string[]): PlaygroundSession[] {
+  if (sessions.length <= PG_SESSION_CAP) return sessions;
+  const running = sessions.filter((s) => generatingIds.includes(s.id));
+  const rest = sessions.filter((s) => !generatingIds.includes(s.id)).sort((a, b) => sessionRecency(b).localeCompare(sessionRecency(a)));
+  const kept = new Set([...running.map((s) => s.id), ...rest.slice(0, Math.max(0, PG_SESSION_CAP - running.length)).map((s) => s.id)]);
+  return sessions.filter((s) => kept.has(s.id));
+}
+
 function loadSessions(): PlaygroundSession[] {
-  try { return JSON.parse(localStorage.getItem(pgSessionsKey) || "[]") as PlaygroundSession[]; } catch { return []; }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(pgSessionsKey) || "[]") as PlaygroundSession[];
+    // 归一化残留的 streaming 标记：应用在流式回复途中被关闭时，消息上的 streaming:true 会被原样存下来，
+    // 而重启后并没有任何流在跑。残留标记会让两个功能失灵：
+    //   1) 删除按钮被 deleteSession 的"正在生成不能删"守卫静默拦掉，点了毫无反应；
+    //   2) 气泡永久显示闪烁光标，像卡在回复中。
+    // 读取时就地清掉——这是唯一能把历史脏数据一次性修好的地方。
+    return parsed.map((session) => ({
+      ...session,
+      messages: (session.messages ?? []).map((msg) => (msg.streaming ? { ...msg, streaming: false } : msg))
+    }));
+  } catch { return []; }
 }
 
 function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
@@ -473,74 +493,82 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
   const [webSearch, setWebSearch] = useState(false);
+  // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
+  const [browserSearch, setBrowserSearch] = useState(false);
   // 智能体默认开启（用户指令）；模型不支持工具时主进程自动回落普通对话，前端无感。
   const [agentMode, setAgentMode] = useState(true);
-  const [generating, setGenerating] = useState(false);
+  // generating 从"全局"改为"按会话"：多会话可并发生成，每个会话各有自己的发送守卫与流缓冲。
+  const [generatingIds, setGeneratingIds] = useState<string[]>([]);
   const [showVideoForm, setShowVideoForm] = useState(false);
   const [videoRequest, setVideoRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
-  const streamBuffer = useRef("");
-  const streamingSessionId = useRef("");
-  // 智能体建任务的 id 缓冲：与 chunk 同理，事件可能早于 React 提交新会话到达。
-  const taskIdBuffer = useRef<string[]>([]);
-  // 同步发送守卫：generating 是异步 state，挡不住同一 tick 内的连发。
-  const sendingRef = useRef(false);
+  // 与工作台共用同一份合法时长定义：RB 的 reference/tail_frame 只收 4/6/8 秒，
+  // 若这里仍放开 10/12/15，非法 seconds+preset 组合会真的发到云端——失败也照样扣卡密次数。
+  const videoDurationOptions = durationOptionsFor(videoRequest.backend, videoRequest.preset);
+  // 每个会话一条流：sessionId → 累积文本 / 已收到的任务 id / 同步发送守卫。
+  const streamBuffers = useRef(new Map<string, string>());
+  const taskIdBuffers = useRef(new Map<string, string[]>());
+  const sendingRef = useRef(new Set<string>());
   const bottomRef = useRef<HTMLDivElement>(null);
   const searchReady = Boolean(settings.searchApi.baseUrl);
+  const generating = generatingIds.includes(activeId);
 
   // 落盘上限 50：内存态一并裁剪，否则 UI 显示得出来、重启后却凭空少几个（用户可感知的静默丢失）。
+  // 按"最近使用"裁剪，且绝不丢弃正在生成回复的会话——否则一段正在跑的对话会被静默砍掉。
   useEffect(() => {
-    const capped = sessions.length > 50 ? sessions.slice(0, 50) : sessions;
+    const capped = sessions.length > 50 ? capSessions(sessions, generatingIds) : sessions;
     if (capped !== sessions) setSessions(capped);
     localStorage.setItem(pgSessionsKey, JSON.stringify(capped));
-  }, [sessions]);
+  }, [sessions, generatingIds]);
   useEffect(() => {
-    // 流式事件只写入发起本轮对话的会话——期间切换会话不会污染其他会话的消息。
+    // 流式事件按事件里带的 sessionId 路由：多会话并发时各写各的气泡，不会互相覆盖。
+    // 极端时序下事件可能早于 React 提交新会话+消息到达，此时把分块暂存进缓冲区，收尾时统一写回。
     const offChunk = window.h3.onLlmChunk((event: LlmStreamEvent) => {
-      if (!streamingSessionId.current) return;
-      streamBuffer.current += event.delta;
-      const targetId = streamingSessionId.current;
-      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, content: streamBuffer.current })));
+      const targetId = event.sessionId;
+      if (!targetId) return;
+      streamBuffers.current.set(targetId, (streamBuffers.current.get(targetId) ?? "") + event.delta);
+      const buffered = streamBuffers.current.get(targetId) ?? "";
+      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, content: buffered })));
     });
     const offDone = window.h3.onLlmDone((event) => {
-      const targetId = streamingSessionId.current;
-      streamingSessionId.current = "";
-      // 兜底：chunk 可能在 React 提交"新增会话+user+assistant"之前就到达，此时 patchLast 落空，
-      // 内容只留在缓冲区。收尾时取缓冲区与消息内容的较长者写回，避免真实回复被空 content 覆盖（"发消息没回复"）。
-      const buffered = streamBuffer.current;
-      streamBuffer.current = "";
-      // 同样的竞态：智能体建任务的事件可能早于消息提交到达，收尾时一并写回。
-      const pendingTaskIds = taskIdBuffer.current;
-      taskIdBuffer.current = [];
-      if (!targetId) return;
-      setSessions((all) => patchLast(all, targetId, (msg) => {
-        const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
-        const mergedTaskIds = Array.from(new Set([...(msg.taskIds ?? []), ...pendingTaskIds]));
-        return {
-          ...msg,
-          streaming: false,
-          error: !event.ok && Boolean(event.message),
-          taskIds: mergedTaskIds.length ? mergedTaskIds : undefined,
-          // 失败必显文案：气泡为空写完整错误；已有内容（如回落提示）在末尾追加错误详情。
-          content: !event.ok && event.message
-            ? (base ? `${base}\n\n请求失败：${event.message}` : `请求失败：${event.message}`)
-            : base
-        };
-      }));
-      setGenerating(false);
-      sendingRef.current = false; // 同步守卫随本轮结束释放
+      const targetId = event.sessionId;
+      const buffered = targetId ? streamBuffers.current.get(targetId) ?? "" : "";
+      const pendingTaskIds = targetId ? taskIdBuffers.current.get(targetId) ?? [] : [];
+      if (targetId) {
+        streamBuffers.current.delete(targetId);
+        taskIdBuffers.current.delete(targetId);
+      }
+      if (targetId) {
+        setSessions((all) => patchLast(all, targetId, (msg) => {
+          // 收尾取缓冲区与消息内容的较长者：避免真实回复被空 content 覆盖（"发消息没回复"）。
+          const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
+          const mergedTaskIds = Array.from(new Set([...(msg.taskIds ?? []), ...pendingTaskIds]));
+          return {
+            ...msg,
+            streaming: false,
+            error: !event.ok && Boolean(event.message),
+            taskIds: mergedTaskIds.length ? mergedTaskIds : undefined,
+            // 失败必显文案：气泡为空写完整错误；已有内容（如回落提示）在末尾追加错误详情。
+            content: !event.ok && event.message
+              ? (base ? `${base}\n\n请求失败：${event.message}` : `请求失败：${event.message}`)
+              : base
+          };
+        }));
+      }
+      if (targetId) {
+        setGeneratingIds((all) => all.filter((id) => id !== targetId));
+        sendingRef.current.delete(targetId);
+      }
       if (!event.ok && event.message) onError(new Error(event.message));
     });
-    // 智能体经 generate_video 建好任务：把卡片挂到当前正在流式的助手气泡上（否则任务只在工作台可见）。
+    // 智能体经 generate_video 建好任务：把卡片挂到对应会话正在流式的助手气泡上（否则任务只在工作台可见）。
     const offTasks = window.h3.onLlmTasks((event) => {
-      const targetId = streamingSessionId.current;
+      const targetId = event.sessionId;
       if (!targetId) return;
-      taskIdBuffer.current = [...taskIdBuffer.current, ...event.taskIds];
+      taskIdBuffers.current.set(targetId, [...(taskIdBuffers.current.get(targetId) ?? []), ...event.taskIds]);
       setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, taskIds: Array.from(new Set([...(msg.taskIds ?? []), ...event.taskIds])) })));
     });
     return () => { offChunk(); offDone(); offTasks(); };
   }, []);
-  const activeIdRef = useRef(activeId);
-  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
   // 粘底自动滚动：仅在用户接近底部时跟随。
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
 
@@ -577,10 +605,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   async function send() {
     const text = input.trim();
     // generating 是异步 React state：同一 tick 内连发两次（快速连按 Enter）会双双读到 false，
-    // 于是重复落用户消息与空气泡、两条流抢同一个缓冲区。用 ref 做同步守卫。
-    if ((!text && attachments.length === 0) || generating || sendingRef.current) return;
+    // 于是重复落用户消息与空气泡、两条流抢同一个缓冲区。用 Set 做同步守卫（按会话粒度，不影响其它会话并发）。
+    const targetSessionId = active?.id;
+    if ((!text && attachments.length === 0) || (targetSessionId ? generatingIds.includes(targetSessionId) : false) || (targetSessionId ? sendingRef.current.has(targetSessionId) : false)) return;
     if (!settings.llm.baseUrl) { onError(new Error("请先在连接设置中配置游乐场 LLM。")); return; }
-    sendingRef.current = true;
     // 无会话时先本地创建会话对象再继续（不 return），避免首条消息被丢弃。
     let session = active;
     if (!session) {
@@ -588,26 +616,32 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       setSessions((all) => [session as PlaygroundSession, ...all]);
       setActiveId(session.id);
     }
+    const sessionId = session.id;
+    sendingRef.current.add(sessionId);
     const userImages = attachments.map((a) => a.dataUrl).filter((url): url is string => Boolean(url));
     const extraText = attachments.map((a) => a.text ? `\n\n--- 附件 ${a.name} ---\n${a.text}` : `\n\n（附件：${a.name}）`).join("");
     const userMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "user", content: text + extraText, images: userImages.length ? userImages : undefined };
     const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: "", streaming: true };
     const history: ChatMessage[] = [...(session.messages).filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })), { role: "user", content: userMsg.content, images: userMsg.images }];
-    setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, title: s.messages.length === 0 && text ? text.slice(0, 20) : s.title, messages: [...s.messages, userMsg, assistantMsg] } : s));
-    setInput(""); setAttachments([]); setGenerating(true); streamBuffer.current = ""; taskIdBuffer.current = []; streamingSessionId.current = session.id;
-    const result = await window.h3.chatLlm(history, webSearch, agentMode);
+    setSessions((all) => all.map((s) => s.id === sessionId ? { ...s, title: s.messages.length === 0 && text ? text.slice(0, 20) : s.title, updatedAt: new Date().toISOString(), messages: [...s.messages, userMsg, assistantMsg] } : s));
+    setInput(""); setAttachments([]);
+    setGeneratingIds((all) => all.includes(sessionId) ? all : [...all, sessionId]);
+    streamBuffers.current.set(sessionId, "");
+    taskIdBuffers.current.delete(sessionId);
+    const result = await window.h3.chatLlm(history, webSearch, agentMode, sessionId, browserSearch);
     if (!result.ok) {
-      setGenerating(false);
-      sendingRef.current = false;
-      setSessions((all) => patchLast(all, session!.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
+      setGeneratingIds((all) => all.filter((id) => id !== sessionId));
+      sendingRef.current.delete(sessionId);
+      setSessions((all) => patchLast(all, sessionId, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
     }
   }
 
   async function stop() {
-    await window.h3.abortLlm();
-    setGenerating(false);
-    sendingRef.current = false;
-    setSessions((all) => patchLast(all, activeIdRef.current, (msg) => ({ ...msg, streaming: false })));
+    // 只中止当前会话；其它会话的生成不受影响（并发场景下不能连坐）。
+    await window.h3.abortLlm(activeId);
+    setGeneratingIds((all) => all.filter((id) => id !== activeId));
+    sendingRef.current.delete(activeId);
+    setSessions((all) => patchLast(all, activeId, (msg) => ({ ...msg, streaming: false })));
   }
 
   async function submitVideo() {
@@ -622,7 +656,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const taskIds = result.data?.map((task) => task.id) ?? [];
     const summary = `已提交视频生成（${backendLabel(videoRequest.backend)}${videoRequest.preset ? ` · ${rbPresetLabel(videoRequest.preset)}` : ""}）：${videoRequest.prompt.slice(0, 60)}${videoRequest.prompt.length > 60 ? "…" : ""}`;
     const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: summary, taskIds };
-    setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, messages: [...s.messages, { id: crypto.randomUUID(), role: "user" as const, content: `🎬 生成视频：${videoRequest.prompt.slice(0, 80)}` }, assistantMsg] } : s));
+    const stamp = new Date().toISOString();
+    setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, updatedAt: stamp, messages: [...s.messages, { id: crypto.randomUUID(), role: "user" as const, content: `🎬 生成视频：${videoRequest.prompt.slice(0, 80)}` }, assistantMsg] } : s));
     setShowVideoForm(false);
     onNotice(`已创建 ${videoRequest.count} 个生成任务`);
   }
@@ -630,7 +665,11 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const activeTasks = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
   // 会话回收站 + 分类：visibleSessions 只显示未删除会话；trashSessions 供回收站面板展示。
-  const visibleSessions = useMemo(() => sessions.filter((s) => !s.deletedAt), [sessions]);
+  // 排序按最近使用倒序（刚发过消息的排最前），并发时正在生成的会话自然浮到顶部。
+  const visibleSessions = useMemo(() => {
+    const recency = (s: PlaygroundSession) => s.updatedAt || s.createdAt;
+    return sessions.filter((s) => !s.deletedAt).slice().sort((a, b) => recency(b).localeCompare(recency(a)));
+  }, [sessions]);
   const trashSessions = useMemo(() => sessions.filter((s) => s.deletedAt), [sessions]);
   const categories = useMemo(() => Array.from(new Set(visibleSessions.map((s) => s.category).filter((c): c is string => Boolean(c)))), [visibleSessions]);
   const [sessionFilter, setSessionFilter] = useState<string>("全部");
@@ -644,8 +683,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     if (activeId && !visibleSessions.some((s) => s.id === activeId)) setActiveId(visibleSessions[0]?.id || "");
   }, [visibleSessions, activeId]);
   function deleteSession(session: PlaygroundSession) {
-    if (session.messages.some((m) => m.streaming)) return;
+    // 正在生成时不允许删除（否则流事件会写进已被删掉的会话）。但必须给反馈——
+    // 早先这里是静默 return，用户点删除"毫无反应"，无从判断是坏了还是被拦了。
+    if (generatingIds.includes(session.id)) {
+      onNotice("该会话正在生成回复，请先点「停止」再删除。");
+      return;
+    }
     setSessions((all) => all.map((s) => s.id === session.id ? { ...s, deletedAt: new Date().toISOString() } : s));
+    onNotice("会话已移入回收站，7 天内可恢复");
   }
   function restoreSession(session: PlaygroundSession) {
     setSessions((all) => all.map((s) => s.id === session.id ? { ...s, deletedAt: undefined } : s));
@@ -679,13 +724,13 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           <button className={sessionFilter === "__trash" ? "on" : ""} onClick={() => setShowPgTrash(true)}>🗑 回收站{trashSessions.length > 0 ? ` (${trashSessions.length})` : ""}</button>
         </div>
         {filteredSessions.length === 0 && trashSessions.length === 0 && <p className="footnote">还没有对话。点击右上角"新对话"开始。</p>}
-        {filteredSessions.map((session) => <div key={session.id} className={session.id === activeId ? "pg-session active" : "pg-session"}>
+        {filteredSessions.map((session) => <div key={session.id} className={`pg-session${session.id === activeId ? " active" : ""}${generatingIds.includes(session.id) ? " running" : ""}`}>
           {renamingId === session.id
             ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(undefined); }} onFocus={(e) => e.target.select()} />
             : catSessionId === session.id
             ? <input className="pg-rename" autoFocus value={catSessionDraft} placeholder="分类名（留空清除）" onChange={(e) => setCatSessionDraft(e.target.value)} onBlur={commitSessionCategory} onKeyDown={(e) => { if (e.key === "Enter") commitSessionCategory(); if (e.key === "Escape") setCatSessionId(undefined); }} onFocus={(e) => e.target.select()} />
             : <button className="pg-session-body" onClick={() => setActiveId(session.id)} onDoubleClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }} title="双击重命名">
-              <strong>{session.title || "新对话"}</strong><small>{session.messages.length} 条消息{session.category ? ` · ${session.category}` : ""}</small>
+              <strong>{session.title || "新对话"}</strong><small>{generatingIds.includes(session.id) ? "正在回复…" : `${session.messages.length} 条消息`}{session.category ? ` · ${session.category}` : ""}</small>
             </button>}
           <div className="pg-session-tools">
             <button className="pg-tool" title="重命名" onClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }}>✎</button>
@@ -707,7 +752,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         </div>
         <div className="pg-composer">
           <div className="pg-chips">
-            <button className={webSearch ? "pg-chip on" : "pg-chip"} onClick={() => { if (!searchReady && !webSearch) { onNotice("联网搜索需要先在连接设置配置搜索 API；若 LLM 自带联网也可不接。"); } setWebSearch(!webSearch); }}>🌐 联网{searchReady ? "" : "（未配置 API）"}</button>
+            <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => { if (!searchReady && !webSearch) { onNotice("未配置搜索 API，将用免 key 抓取 Bing/搜狗（稳定性一般）；可在「连接设置 → 联网搜索」配置 API 获得更可靠结果。"); } setWebSearch(!webSearch); if (!webSearch) setBrowserSearch(false); }}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
+            <button className={browserSearch ? "pg-chip on" : "pg-chip"} title="浏览器搜索：用应用自带的浏览器真实打开搜索页再读取结果（最接近人工浏览，结果质量最稳，速度稍慢）" onClick={() => { setBrowserSearch(!browserSearch); if (!browserSearch) setWebSearch(false); }}>🖥 浏览器搜索</button>
             <button className={agentMode ? "pg-chip on" : "pg-chip"} title="智能体模式：AI 可自主联网搜索、直接帮你提交视频生成任务（Codex/Claude Code 形态的多步工具循环）" onClick={() => setAgentMode(!agentMode)}>🤖 智能体</button>
             <button className={showVideoForm ? "pg-chip on" : "pg-chip"} onClick={() => setShowVideoForm(!showVideoForm)}>🎬 生成视频</button>
             <button className="pg-chip" onClick={pickAttachment}>📎 附件</button>
@@ -716,11 +762,11 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           </div>
           {showVideoForm && <div className="pg-video-form">
             <div className="form-grid">
-              <label>生成后端<select value={videoRequest.backend} onChange={(e) => setVideoRequest({ ...videoRequest, backend: e.target.value as BackendKind, preset: undefined })}>{(["local", "ssh", "minimax", "rb"] as BackendKind[]).map((kind) => <option key={kind} value={kind}>{backendLabel(kind)}</option>)}</select></label>
-              <label>时长<select value={videoRequest.duration} onChange={(e) => setVideoRequest({ ...videoRequest, duration: Number(e.target.value) })}>{[4, 6, 8, 10, 12, 15].map((x) => <option key={x} value={x}>{x} 秒</option>)}</select></label>
+              <label>生成后端<select value={videoRequest.backend} onChange={(e) => { const backend = e.target.value as BackendKind; const preset = undefined; setVideoRequest({ ...videoRequest, backend, preset, duration: clampDuration(videoRequest.duration, durationOptionsFor(backend, preset)) }); }}>{(["local", "ssh", "minimax", "rb"] as BackendKind[]).map((kind) => <option key={kind} value={kind}>{backendLabel(kind)}</option>)}</select></label>
+              {videoDurationOptions.length > 0 && <label>时长<select value={videoRequest.duration} onChange={(e) => setVideoRequest({ ...videoRequest, duration: Number(e.target.value) })}>{videoDurationOptions.map((x) => <option key={x} value={x}>{x} 秒</option>)}</select></label>}
               <label>结果数量<select value={videoRequest.count} onChange={(e) => setVideoRequest({ ...videoRequest, count: Number(e.target.value) })}>{[1, 2, 3, 4].map((x) => <option key={x} value={x}>{x} 路</option>)}</select></label>
             </div>
-            <label>视频描述（留空则使用下方聊天输入内容）<textarea rows={2} value={videoRequest.prompt} onChange={(e) => setVideoRequest({ ...videoRequest, prompt: e.target.value })} /></label>
+            <label>视频描述（留空则使用下方聊天输入内容）<textarea rows={2} maxLength={MAX_PROMPT_LENGTH} value={videoRequest.prompt} onChange={(e) => setVideoRequest({ ...videoRequest, prompt: e.target.value })} /></label>
             <button className="primary" onClick={submitVideo}>提交生成任务</button>
           </div>}
           {attachments.length > 0 && <div className="pg-attachments">{attachments.map((a, i) => <span key={i} className="pg-attachment">{a.dataUrl ? <img src={a.dataUrl} alt={a.name} /> : `📄 ${a.name}`}<button onClick={() => setAttachments((all) => all.filter((_, j) => j !== i))}>×</button></span>)}</div>}
@@ -736,6 +782,25 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
 
 function rbPresetLabel(preset: string): string {
   return ({ reference: "贴合参考图", tail_frame: "首尾过渡", easy_15: "15 秒", easy_30: "30 秒", flashvsr_upscale: "视频变清晰" } as Record<string, string>)[preset] || preset;
+}
+
+// 各后端的合法时长档位。RB 预设自带约束：easy_15/30 固定时长，flashvsr 只收源视频（无时长），
+// reference/tail_frame 仅 4/6/8 秒。工作台与游乐场共用同一份定义——只改一处不会两边跑偏。
+function durationOptionsFor(backend: BackendKind, preset?: string): number[] {
+  if (backend !== "rb") return [4, 6, 8, 10, 12, 15];
+  if (preset === "easy_15") return [15];
+  if (preset === "easy_30") return [30];
+  if (preset === "flashvsr_upscale") return [];
+  return [4, 6, 8]; // reference / tail_frame
+}
+
+// 切换后端/预设后把时长夹回该后端的合法值域。不做这一步的话，UI 下拉会被浏览器归一化到
+// 第一个选项（看着像 4 秒），而 request.duration 仍是旧值，提交时才被 validateRequest 拒绝
+// （"视频时长必须在 4–15 秒之间"）——用户看到的下拉值与实际提交值不一致。
+// 对云后端更糟：非法的 seconds+preset 组合会真的发到服务端，失败也照样扣费。
+function clampDuration(duration: number, options: number[]): number {
+  if (options.length === 0 || options.includes(duration)) return duration;
+  return options.reduce((best, x) => (Math.abs(x - duration) < Math.abs(best - duration) ? x : best), options[0]);
 }
 
 // 游乐场会话回收站：悬浮面板展示已删除会话（保留 7 天），支持恢复 / 彻底删除。

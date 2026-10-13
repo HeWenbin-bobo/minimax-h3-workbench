@@ -335,6 +335,25 @@ button { cursor: pointer; }
 .pg-cursor { display: inline-block; width: 7px; height: 14px; background: var(--pink); border-radius: 2px; vertical-align: -2px; margin-left: 2px; animation: pg-blink 0.9s steps(2) infinite; }
 @keyframes pg-blink { 50% { opacity: 0; } }
 .pg-task-grid { margin-top: 10px; }
+
+/* 会话列表里"正在生成回复"的标识：左侧高亮条 + 呼吸圆点 + 高亮小字。
+   多会话并发时用户要能一眼看出哪几个会话还在跑，以及自己刚用的是哪一个（列表已按最近使用倒序）。 */
+.pg-session.running { border-color: var(--pink); box-shadow: inset 3px 0 0 var(--pink); }
+.pg-session.running .pg-session-body small { color: var(--pink); font-weight: 700; }
+.pg-session.running .pg-session-body strong::before {
+  content: "";
+  display: inline-block;
+  width: 6px; height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--pink);
+  vertical-align: 1px;
+  animation: pg-pulse 1.1s ease-in-out infinite;
+}
+@keyframes pg-pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) {
+  .pg-session.running .pg-session-body strong::before { animation: none; }
+}
 .pg-chips { display: flex; align-items: center; gap: 8px; padding: 10px 16px 0; flex-wrap: wrap; }
 .pg-chip { border: 1px solid var(--line); background: #f7f8fa; color: var(--muted); border-radius: 20px; padding: 6px 13px; font-size: 10px; }
 .pg-chip.on { border-color: #ff9b7c; background: #fff3ee; color: var(--pink); font-weight: 700; }

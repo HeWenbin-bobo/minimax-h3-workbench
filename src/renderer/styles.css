@@ -343,8 +343,9 @@ button { cursor: pointer; }
 .pg-artifact-name small { color: #8b93a5; font-size: 11px; }
 .pg-artifact-card button { background: transparent; border: 1px solid var(--line); color: var(--cyan); border-radius: 8px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
 .pg-artifact-card button:hover { border-color: var(--cyan); }
-/* 预览面板占主区约 6 成宽（截图实测 WorkBuddy 形态），预览区才是主角。 */
-.pg-preview { display: flex; flex-direction: column; width: 62%; min-width: 480px; border-left: 1px solid var(--line); background: #0e1117; }
+/* 预览面板平时隐藏，点「预览」时从右侧滑出（mount 时播放一次滑入动画）。 */
+@keyframes pg-preview-in { from { transform: translateX(40px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+.pg-preview { display: flex; flex-direction: column; width: 62%; min-width: 480px; border-left: 1px solid var(--line); background: #0e1117; animation: pg-preview-in 0.22s ease-out; }
 .pg-preview-bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
 .pg-preview-tab { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 12px; background: #141821; border: 1px solid var(--line); border-bottom: none; border-radius: 8px 8px 0 0; align-self: flex-end; margin-bottom: -1px; }
 .pg-preview-actions { display: flex; gap: 4px; }

@@ -634,6 +634,13 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     return all.map((session) => session.id !== id ? session : { ...session, messages: session.messages.map((msg, i) => i === session.messages.length - 1 ? patch(msg) : msg) });
   }
 
+  // 切换会话：若当前会话是空对话（没真的聊过天），切换时即永久删除——不留空壳在列表里。
+  function switchSession(id: string) {
+    const leavingId = active?.id;
+    setSessions((all) => all.filter((s) => !(s.id === leavingId && s.id !== id && s.messages.length === 0)));
+    setActiveId(id);
+  }
+
   function newSession() {
     const session: PlaygroundSession = { id: crypto.randomUUID(), title: "新对话", messages: [], createdAt: new Date().toISOString() };
     // 空对话最多只保留一个：新建时顺手清掉已有的空会话（用户没打过字就点了"新对话"的情况）。
@@ -779,7 +786,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(undefined); }} onFocus={(e) => e.target.select()} />
             : catSessionId === session.id
             ? <input className="pg-rename" autoFocus value={catSessionDraft} placeholder="分类名（留空清除）" onChange={(e) => setCatSessionDraft(e.target.value)} onBlur={commitSessionCategory} onKeyDown={(e) => { if (e.key === "Enter") commitSessionCategory(); if (e.key === "Escape") setCatSessionId(undefined); }} onFocus={(e) => e.target.select()} />
-            : <button className="pg-session-body" onClick={() => setActiveId(session.id)} onDoubleClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }} title="双击重命名">
+            : <button className="pg-session-body" onClick={() => { switchSession(session.id); }} onDoubleClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }} title="双击重命名">
               <strong>{session.title || "新对话"}</strong><small>{generatingIds.includes(session.id) ? "正在回复…" : `${session.messages.length} 条消息`}{session.category ? ` · ${session.category}` : ""}</small>
             </button>}
           <div className="pg-session-tools">
@@ -904,7 +911,10 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
     const move = (ev: MouseEvent) => {
       if (!dragRef.current) return;
       // 向左拖增宽：面板在右侧，宽度 = 起点 + (起点X - 当前X)。
-      onResize(Math.min(Math.max(dragRef.current.startWidth + (dragRef.current.startX - ev.clientX), 360), window.innerWidth - 480));
+      const available = dragRef.current.startWidth + (dragRef.current.startX - ev.clientX);
+      // 聊天列保底 300px：面板最宽 = pg-main 总宽 - 300，拖再宽也不会把聊天区压没。
+      const mainWidth = document.querySelector(".pg-main")?.getBoundingClientRect().width ?? 0;
+      onResize(Math.max(360, Math.min(available, Math.max(360, mainWidth - 300))));
     };
     const up = () => {
       dragRef.current = undefined;
@@ -914,7 +924,8 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   }
-  return <aside className="pg-preview" style={{ width }}>    <div className="pg-preview-drag" onMouseDown={onDragStart} title="拖动调整宽度" />
+  return <aside className="pg-preview" style={{ width }}>
+    <div className="pg-preview-drag" onMouseDown={onDragStart} title="拖动调整宽度" />
     <div className="pg-preview-bar">
       <span className="pg-preview-tab">📄 {artifact.name}</span>
       <span className="pg-preview-actions">

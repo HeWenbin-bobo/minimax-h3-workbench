@@ -331,6 +331,10 @@ button { cursor: pointer; }
 .pg-msg.assistant .pg-bubble a { color: var(--cyan); }
 .pg-msg.assistant .pg-bubble code { background: rgba(122, 39, 255, 0.08); color: #7a27ff; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
 .md-code { background: #141821; color: #e6e8eb; border-radius: 10px; padding: 12px 14px; overflow-x: auto; margin: 8px 0; font-size: 11px; line-height: 1.6; }
+/* Markdown 表格：模型常用表格输出结构化结果（如热搜榜单），无样式时挤成一坨纯文本。 */
+.pg-msg.assistant .pg-bubble table { border-collapse: collapse; margin: 8px 0; font-size: 11px; width: auto; max-width: 100%; display: block; overflow-x: auto; }
+.pg-msg.assistant .pg-bubble th, .pg-msg.assistant .pg-bubble td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; white-space: nowrap; }
+.pg-msg.assistant .pg-bubble th { background: rgba(122, 39, 255, 0.08); font-weight: 600; }
 .pg-thumb { width: 88px; height: 88px; object-fit: cover; border-radius: 10px; margin-bottom: 6px; margin-right: 6px; border: 1px solid var(--line); }
 .pg-cursor { display: inline-block; width: 7px; height: 14px; background: var(--pink); border-radius: 2px; vertical-align: -2px; margin-left: 2px; animation: pg-blink 0.9s steps(2) infinite; }
 @keyframes pg-blink { 50% { opacity: 0; } }

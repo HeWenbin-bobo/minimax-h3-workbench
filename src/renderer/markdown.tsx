@@ -31,6 +31,25 @@ export function renderMarkdown(text: string): ReactNode[] {
       continue;
     }
 
+    // 表格：| a | b | 行 + 下一行 |---|---| 分隔行。模型常用表格输出结构化结果，
+    // 不支持时整块沦为挤在一起的纯文本（实测热搜 10 条渲染成一坨）。
+    if (/^\s*\|.*\|\s*$/.test(line) && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(lines[index + 1] ?? "")) {
+      const header = parseTableRow(line);
+      index += 2; // 跳过表头与分隔行
+      const rows: string[][] = [];
+      while (index < lines.length && /^\s*\|.*\|\s*$/.test(lines[index])) {
+        rows.push(parseTableRow(lines[index]));
+        index += 1;
+      }
+      nodes.push(
+        <table key={key++}>
+          <thead><tr>{header.map((cell, i) => <th key={i}>{inline(cell, key++)}</th>)}</tr></thead>
+          <tbody>{rows.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{inline(cell, key++)}</td>)}</tr>)}</tbody>
+        </table>
+      );
+      continue;
+    }
+
     // 标题 # 到 ####
     const heading = /^(#{1,4})\s+(.*)$/.exec(line);
     if (heading) {
@@ -70,6 +89,11 @@ export function renderMarkdown(text: string): ReactNode[] {
     nodes.push(<p key={key++}>{inline(paragraph.join("\n"), key++)}</p>);
   }
   return nodes;
+}
+
+/** 解析表格行 "| a | b |" → ["a","b"]：去首尾竖线后按 | 切分并修剪。 */
+function parseTableRow(line: string): string[] {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
 }
 
 // 行内：`code`、**bold**、[text](https-url)。先切行内元素再拼纯文本。

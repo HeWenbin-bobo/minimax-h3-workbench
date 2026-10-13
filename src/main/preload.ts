@@ -26,6 +26,7 @@ const api: WorkbenchApi = {
   purgeTasks: (taskIds) => invoke("tasks:purge", taskIds),
   listDeletedTasks: () => invoke("tasks:listDeleted"),
   showItem: (filePath) => invoke("shell:showItem", filePath),
+  saveArtifact: (sessionId, name, html) => invoke("artifact:save", { sessionId, name, html }),
   openExternal: (url) => invoke("shell:openExternal", url),
   chatLlm: (messages, webSearch, agent, sessionId, browserSearch) => invoke("llm:chat", messages, webSearch, Boolean(agent), String(sessionId || ""), Boolean(browserSearch)),
   checkAgentFrameworkUpdate: () => invoke("update:checkFramework"),

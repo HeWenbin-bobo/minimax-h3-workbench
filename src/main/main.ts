@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, stat, writeFile, unlink } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -485,7 +485,7 @@ function registerIpc(
     if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
     // 与 h3media 同类防护：只允许在输出目录、ComfyUI 模型目录或本应用产出过的结果路径内定位。
     const settings = await settingsStore.get();
-    const roots = [settings.outputDirectory, settings.comfyuiRoot]
+    const roots = [settings.outputDirectory, settings.comfyuiRoot, path.join(app.getPath("userData"), "artifacts")]
       .filter((value): value is string => Boolean(value))
       .map((value) => path.resolve(value));
     const resolved = path.resolve(filePath);
@@ -505,6 +505,17 @@ function registerIpc(
     if (parsed.protocol !== "https:") throw new Error("只允许打开 HTTPS 链接。");
     await shell.openExternal(url);
     return true;
+  });
+  // 游乐场 HTML 产物落盘：存 userData/artifacts/<sessionId>/，返回 {name,path,size} 供文件卡片展示。
+  // 渲染端只传文本与文件名，路径由主进程生成——渲染端无法指定任意位置写文件。
+  handle("artifact:save", async (_event, payload: { sessionId: string; name: string; html: string }) => {
+    const safeName = path.basename(String(payload.name || "artifact.html")).replace(/[\\/:*?"<>|]/g, "_") || "artifact.html";
+    if (!safeName.toLowerCase().endsWith(".html")) throw new Error("只支持保存 HTML 产物。");
+    const dir = path.join(app.getPath("userData"), "artifacts", path.basename(String(payload.sessionId || "unknown")));
+    await mkdir(dir, { recursive: true });
+    const filePath = path.join(dir, safeName);
+    await writeFile(filePath, payload.html, "utf8");
+    return { name: safeName, path: filePath, size: Buffer.byteLength(payload.html, "utf8") };
   });
 }
 

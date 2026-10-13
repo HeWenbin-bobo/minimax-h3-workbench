@@ -508,8 +508,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [activeId, setActiveId] = useState<string>(() => loadSessions().find((s) => !s.deletedAt)?.id || "");
   const active = sessions.find((s) => s.id === activeId);
   const [input, setInput] = useState("");
-  // HTML 产物侧栏预览（Artifacts 式）：气泡代码块上的「▶ 预览」按钮触发，iframe sandbox 渲染。
-  const [previewHtml, setPreviewHtml] = useState<string>();
+  // HTML 产物侧栏预览（WorkBuddy 形态）：文件卡片「预览」触发，产物落盘 userData/artifacts/。
+  const [preview, setPreview] = useState<ArtifactInfo>();
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
   const [webSearch, setWebSearch] = useState(false);
   // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
@@ -785,13 +785,13 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
               <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <div className="pg-tool-steps">{msg.toolSteps.map((step, i) => <div key={i} className="pg-tool-step">{step}</div>)}</div>}{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
                 // 消息含完整 HTML 产物时给「预览」按钮（Artifacts 式侧栏）。流式未结束先不亮，避免半截 HTML。
                 const html = msg.role === "assistant" && !msg.streaming ? extractHtmlArtifact(msg.content) : undefined;
-                return html && <button className="pg-preview-btn" title="在侧栏预览该网页" onClick={() => setPreviewHtml(html)}>▶ 预览</button>;
+                return html && <PgArtifactCard html={html} sessionId={activeId} onPreview={setPreview} onError={onError} />;
               })()}</div>
               {msg.taskGroups && msg.taskGroups.length > 0 && msg.taskGroups.map((group, gi) => group.length > 0 && <div key={`${msg.id}-${gi}`} className="result-grid pg-task-grid">{group.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} />)}</div>)}
             </div>)}
           <div ref={bottomRef} />
         </div>
-        {previewHtml && <PgPreviewPanel html={previewHtml} onClose={() => setPreviewHtml(undefined)} />}
+        {preview && <PgPreviewPanel artifact={preview} onClose={() => setPreview(undefined)} />}
         <div className="pg-composer">
           <div className="pg-chips">
             <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => { if (!searchReady && !webSearch) { onNotice("未配置搜索 API，将用免 key 抓取 Bing/搜狗（稳定性一般）；可在「连接设置 → 联网搜索」配置 API 获得更可靠结果。"); } setWebSearch(!webSearch); if (!webSearch) setBrowserSearch(false); }}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
@@ -846,7 +846,7 @@ function clampDuration(duration: number, options: number[]): number {
 }
 
 // 游乐场会话回收站：悬浮面板展示已删除会话（保留 7 天），支持恢复 / 彻底删除。
-/** 提取消息里第一个完整 HTML 代码块（```html 或以 <!DOCTYPE/或 html> 开头的围栏块）用于预览。 */
+/** 提取消息里第一个完整 HTML 代码块（```html 或以 <!DOCTYPE/或 html> 开头的围栏块）用于产物落盘与预览。 */
 function extractHtmlArtifact(content: string): string | undefined {
   const fences = [...content.matchAll(/```(\w*)\n([\s\S]*?)```/g)];
   for (const [, lang, body] of fences) {
@@ -856,15 +856,38 @@ function extractHtmlArtifact(content: string): string | undefined {
   return undefined;
 }
 
-/** HTML 产物侧栏预览：iframe sandbox 渲染（无同源/无 cookie，脚本隔离在沙箱里），不落盘、关掉即散。 */
-function PgPreviewPanel({ html, onClose }: { html: string; onClose: () => void }) {
+interface ArtifactInfo { name: string; path: string; size: number; html: string }
+
+/** 产物文件卡片：图标 + 文件名 + 大小 + 预览/打开文件夹（WorkBuddy 形态）。产物懒落盘——首次点「预览」才写文件。 */
+function PgArtifactCard({ html, sessionId, onPreview, onError }: { html: string; sessionId: string; onPreview: (artifact: ArtifactInfo) => void; onError: (e: unknown) => void }) {
+  const [artifact, setArtifact] = useState<ArtifactInfo>();
+  const sizeLabel = (bytes: number) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  async function ensureSaved(): Promise<ArtifactInfo | undefined> {
+    if (artifact) return artifact;
+    const name = `artifact-${Date.now()}.html`;
+    const response = await window.h3.saveArtifact(sessionId, name, html);
+    if (!response.data) { onError(response.message); return undefined; }
+    const info = { ...response.data, html };
+    setArtifact(info);
+    return info;
+  }
+  return <div className="pg-artifact-card">
+    <span className="pg-artifact-icon">📄</span>
+    <span className="pg-artifact-name">{artifact?.name || "网页产物"}<small>{artifact ? sizeLabel(artifact.size) : "HTML 文件 · 预览时自动保存"}</small></span>
+    <button title="在侧栏预览" onClick={async () => { const info = await ensureSaved(); if (info) onPreview(info); }}>预览</button>
+    {artifact && <button title="在文件夹中显示" onClick={() => window.h3.showItem(artifact.path).then((r) => { if (!r.ok) onError(r.message); }).catch(onError)}>📁</button>}
+  </div>;
+}
+
+/** HTML 产物侧栏预览：顶栏显示文件名（WorkBuddy 标签页形态），iframe sandbox 渲染，不落盘之外零依赖。 */
+function PgPreviewPanel({ artifact, onClose }: { artifact: ArtifactInfo; onClose: () => void }) {
   return <aside className="pg-preview">
     <div className="pg-preview-bar">
-      <strong>预览</strong>
-      <span>沙箱渲染 · 外部资源与表单已禁用</span>
+      <strong>📄 {artifact.name}</strong>
+      <span>沙箱预览 · 文件已存至 {artifact.path}</span>
       <button className="pg-tool" title="关闭预览" onClick={onClose}>×</button>
     </div>
-    <iframe className="pg-preview-frame" sandbox="allow-scripts" srcDoc={html} title="HTML 预览" />
+    <iframe className="pg-preview-frame" sandbox="allow-scripts" srcDoc={artifact.html} title={artifact.name} />
   </aside>;
 }
 

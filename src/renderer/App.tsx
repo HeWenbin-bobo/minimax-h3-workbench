@@ -508,6 +508,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [activeId, setActiveId] = useState<string>(() => loadSessions().find((s) => !s.deletedAt)?.id || "");
   const active = sessions.find((s) => s.id === activeId);
   const [input, setInput] = useState("");
+  // HTML 产物侧栏预览（Artifacts 式）：气泡代码块上的「▶ 预览」按钮触发，iframe sandbox 渲染。
+  const [previewHtml, setPreviewHtml] = useState<string>();
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
   const [webSearch, setWebSearch] = useState(false);
   // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
@@ -780,11 +782,16 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
               {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
-              <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <div className="pg-tool-steps">{msg.toolSteps.map((step, i) => <div key={i} className="pg-tool-step">{step}</div>)}</div>}{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}</div>
+              <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <div className="pg-tool-steps">{msg.toolSteps.map((step, i) => <div key={i} className="pg-tool-step">{step}</div>)}</div>}{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
+                // 消息含完整 HTML 产物时给「预览」按钮（Artifacts 式侧栏）。流式未结束先不亮，避免半截 HTML。
+                const html = msg.role === "assistant" && !msg.streaming ? extractHtmlArtifact(msg.content) : undefined;
+                return html && <button className="pg-preview-btn" title="在侧栏预览该网页" onClick={() => setPreviewHtml(html)}>▶ 预览</button>;
+              })()}</div>
               {msg.taskGroups && msg.taskGroups.length > 0 && msg.taskGroups.map((group, gi) => group.length > 0 && <div key={`${msg.id}-${gi}`} className="result-grid pg-task-grid">{group.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} />)}</div>)}
             </div>)}
           <div ref={bottomRef} />
         </div>
+        {previewHtml && <PgPreviewPanel html={previewHtml} onClose={() => setPreviewHtml(undefined)} />}
         <div className="pg-composer">
           <div className="pg-chips">
             <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => { if (!searchReady && !webSearch) { onNotice("未配置搜索 API，将用免 key 抓取 Bing/搜狗（稳定性一般）；可在「连接设置 → 联网搜索」配置 API 获得更可靠结果。"); } setWebSearch(!webSearch); if (!webSearch) setBrowserSearch(false); }}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
@@ -839,6 +846,28 @@ function clampDuration(duration: number, options: number[]): number {
 }
 
 // 游乐场会话回收站：悬浮面板展示已删除会话（保留 7 天），支持恢复 / 彻底删除。
+/** 提取消息里第一个完整 HTML 代码块（```html 或以 <!DOCTYPE/或 html> 开头的围栏块）用于预览。 */
+function extractHtmlArtifact(content: string): string | undefined {
+  const fences = [...content.matchAll(/```(\w*)\n([\s\S]*?)```/g)];
+  for (const [, lang, body] of fences) {
+    const code = body.trim();
+    if (/^html$/i.test(lang) || /^<!doctype html/i.test(code) || /^<html[\s>]/i.test(code)) return code;
+  }
+  return undefined;
+}
+
+/** HTML 产物侧栏预览：iframe sandbox 渲染（无同源/无 cookie，脚本隔离在沙箱里），不落盘、关掉即散。 */
+function PgPreviewPanel({ html, onClose }: { html: string; onClose: () => void }) {
+  return <aside className="pg-preview">
+    <div className="pg-preview-bar">
+      <strong>预览</strong>
+      <span>沙箱渲染 · 外部资源与表单已禁用</span>
+      <button className="pg-tool" title="关闭预览" onClick={onClose}>×</button>
+    </div>
+    <iframe className="pg-preview-frame" sandbox="allow-scripts" srcDoc={html} title="HTML 预览" />
+  </aside>;
+}
+
 function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: {
   sessions: PlaygroundSession[];
   onRestore: (session: PlaygroundSession) => void;

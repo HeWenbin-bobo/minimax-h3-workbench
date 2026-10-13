@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, stat, writeFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   app,
   BrowserWindow,
@@ -374,6 +375,15 @@ function registerIpc(
           sendTasks(response.map((task) => task.id));
           // 返回文本带全量参数：模型据此在收尾时能准确复述任务细节（收尾质量），而不是含糊的"已创建"。
           return `已创建 ${response.length} 个视频生成任务：后端=${backendKindLabel(request.backend)}，时长=${request.duration} 秒，数量=${request.count} 路，画面描述="${params.prompt}"。任务卡片已实时显示在本会话气泡下方，完成后可直接预览与下载。请向用户简短确认这些任务参数（一两句话即可，不要重复长描述）。`;
+        },
+        // open_page（让模型能真正"打开浏览器"）：复用 browserFetch 的 Chromium 渲染。
+        // 安全边界：只允许 http/https，渲染走独立 session 分区（browserFetch 内部保证），
+        // 返回前截断到 8 万字符——超长 HTML 会撑爆模型上下文（百度首页渲染后 >1MB）。
+        openPage: async (url: string) => {
+          const parsed = new URL(url);
+          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("只允许打开 http/https 网页。");
+          const html = await renderHtml(parsed.toString(), 45_000);
+          return html.length > 80_000 ? `${html.slice(0, 80_000)}\n\n（页面过长已截断）` : html;
         }
       };
       let result: { textLength: number; toolCalls: number } | undefined;
@@ -381,10 +391,16 @@ function registerIpc(
       let attempts = 0;
       // 整轮重试：智能体是多步工具循环，而 SDK 的 maxRetries 只覆盖"首个请求"——
       // 后续步骤（或重试那一次本身）撞上中转偶发 ECONNRESET 时，整轮会被一个抖动打挂，
-      // 随即回落普通对话、视频生成意图就丢了。实测该中转的连接重置属低频偶发，
-      // 所以"整轮再来一次"是有效且低成本的兜底；仅当尚未产出任何内容/任务时才重试，
-      // 避免重复落消息、重复建任务。
-      while (attempts < 2) {
+      // 随即回落普通对话、视频生成意图就丢了。实测该中转的连接重置属低频偶发但会**连片出现**
+      // （抖动窗口可持续 10 秒以上），所以除了放开次数还必须**在尝试之间退避等待**——
+      // 背靠背的 3 次会在几秒内全部撞进同一个抖动窗口（实测复现过）。3 次 × 3 秒退避
+      // ≈ 多扛 6 秒窗口；真错误（500）最多多等 3 秒才回落，可接受。
+      while (attempts < 3) {
+        if (attempts > 0) {
+          // 重试前等待：让出抖动窗口。等待期间用户点停止要能立即退出（sleep 原生支持 signal）。
+          try { await sleep(3_000, undefined, { signal: controller.signal }); }
+          catch { done({ ok: true }); return; }
+        }
         attempts += 1;
         try {
           // 「浏览器搜索」也要暴露 web_search 工具：enableWebSearch 是"本轮允许联网"的总开关，
@@ -400,7 +416,7 @@ function registerIpc(
         } catch (error) {
           if (controller.signal.aborted) { done({ ok: true }); return; }
           agentError = error;
-          const retryable = attempts === 1 && agentSent === 0 && agentTaskCount === 0 && isNetworkError(error);
+          const retryable = attempts < 3 && agentSent === 0 && agentTaskCount === 0 && isNetworkError(error);
           if (!retryable) break;
         }
       }

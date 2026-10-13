@@ -186,6 +186,8 @@ export interface AgentToolCallbacks {
   webSearch: (query: string) => Promise<string>;
   /** 视频生成工具：提交生成任务并返回给用户的说明文本。 */
   generateVideo: (params: { prompt: string; duration: number; count: number }) => Promise<string>;
+  /** 打开网页工具（open_page）：用应用自带 Chromium 渲染指定 URL 并返回 HTML，让模型能真正"打开浏览器"。 */
+  openPage: (url: string) => Promise<string>;
 }
 
 /** 从打包产物读取智能体框架版本（agentVersion.ts 由构建脚本从 node_modules/ai 同步）。 */
@@ -299,6 +301,21 @@ export async function chatAgent(
           count: z.number().int().min(1).max(4).describe("生成数量，1–4")
         }),
         execute: async (params) => callbacks.generateVideo(params)
+      }),
+      // open_page：用户说"打开某网站/抓取这个页面"时用。用应用自带 Chromium 渲染 URL 并返回页面 HTML
+      //（模型自行从 HTML 中提取所需信息）。智能体此前没有"打开浏览器"的能力，模型只能答"我无法打开网页"。
+      open_page: tool({
+        description: "打开指定的网页并返回页面内容（HTML）。当用户要求打开某个网站、抓取某页面内容、或需要查看具体网页（而非搜索）时调用。URL 必须带协议（https:// 开头）。",
+        inputSchema: z.object({
+          url: z.string().url().describe("要打开的完整 URL，以 https:// 开头")
+        }),
+        execute: async ({ url }) => {
+          try {
+            return await callbacks.openPage(url);
+          } catch (error) {
+            return `打开网页失败：${describeError(error, "渲染失败")}（可改用 web_search 搜索相关信息）`;
+          }
+        }
       })
     },
     stopWhen: stepCountIs(10),
@@ -365,7 +382,8 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
   try {
     const result = await chatAgent(options, probeMessages, {
       webSearch: async () => "（探测）",
-      generateVideo: async () => "（探测）"
+      generateVideo: async () => "（探测）",
+      openPage: async () => "（探测）"
     }, () => { sent += 1; }, AbortSignal.timeout(60_000));
     const supported = result.toolCalls > 0 || result.textLength > 0;
     if (!supported) return { supported: false, message: "模型未返回任何内容，可能不支持工具调用（智能体模式不可用），将自动改用普通对话。" };

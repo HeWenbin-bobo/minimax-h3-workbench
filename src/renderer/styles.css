@@ -336,14 +336,19 @@ button { cursor: pointer; }
 @keyframes pg-blink { 50% { opacity: 0; } }
 .pg-task-grid { margin-top: 10px; }
 
-/* 智能体工具调用状态条：气泡内实时显示"正在搜索：xxx"/"正在创建视频生成任务…"。
-   多步工具期间（实测 15–25 秒）此前是完全黑屏，用户只能干等——透明化这个阶段。 */
-.pg-tool-status {
+/* 智能体多步工具调用日志：气泡内逐条显示"→ 正在搜索：…" / "✓ 搜索完成（找到 6 条结果）"。
+   多步循环此前完全黑屏（实测一轮 15–25 秒），用户只能看光标空闪——透明化整个过程。 */
+.pg-tool-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.pg-tool-step {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 8px;
-  padding: 4px 10px;
+  padding: 3px 10px;
   border: 1px solid var(--line);
   border-left: 3px solid var(--pink);
   border-radius: 8px;
@@ -352,15 +357,21 @@ button { cursor: pointer; }
   font-size: 10px;
   font-weight: 700;
 }
-.pg-tool-status::before {
+/* 末一条是"进行中"的步骤，带呼吸点；已完成的步骤显示对勾、颜色变淡。 */
+.pg-tool-step:last-child::before {
   content: "";
   width: 6px; height: 6px;
   border-radius: 50%;
   background: var(--pink);
   animation: pg-pulse 1.1s ease-in-out infinite;
 }
+.pg-tool-step:not(:last-child) {
+  color: var(--muted);
+  border-left-color: var(--line);
+  background: #fafafa;
+}
 @media (prefers-reduced-motion: reduce) {
-  .pg-tool-status::before { animation: none; }
+  .pg-tool-step:last-child::before { animation: none; }
 }
 
 /* 会话列表里"正在生成回复"的标识：左侧高亮条 + 呼吸圆点 + 高亮小字。

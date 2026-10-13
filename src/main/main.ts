@@ -15,7 +15,7 @@ import {
 import { AdapterRegistry } from "./backends/adapterRegistry";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import { describeError, isNetworkError } from "../shared/errors";
-import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmDoneEvent, LlmStreamEvent, LlmTasksEvent, SecretName } from "../shared/types";
+import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmDoneEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, SecretName } from "../shared/types";
 import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
@@ -209,6 +209,8 @@ function registerIpc(
   };
   const sendChunk = (event: LlmStreamEvent) => mainWindow?.webContents.send("llm:chunk", event);
   const sendDone = (event: LlmDoneEvent) => mainWindow?.webContents.send("llm:done", event);
+  // 智能体工具调用开始：渲染端在气泡上实时显示"正在搜索/正在生成视频"（多步工具期间可达 15–25 秒黑屏）。
+  const sendLlmTool = (event: LlmToolEvent) => mainWindow?.webContents.send("llm:tool", event);
   // 智能体工具建好任务后推送任务 id：游乐场把卡片挂到对应会话气泡上。
   const sendLlmTasks = (event: LlmTasksEvent) => mainWindow?.webContents.send("llm:tasks", event);
   // LLM 连接测试（cc-switch 模式）：拉模型列表验证连通性——不发对话（不花钱），
@@ -384,7 +386,10 @@ function registerIpc(
           // 「浏览器搜索」也要暴露 web_search 工具：enableWebSearch 是"本轮允许联网"的总开关，
           // browserOnly 只是改变搜索的执行方式（只用 Chromium 渲染）。漏传会导致工具不暴露，
           // 模型只能凭训练知识回答"该商品尚未发布"——UI 实测抓到的就是这个 bug。
-          result = await chatAgent(agentOptions, messages, agentCallbacks, agentSend, controller.signal, webSearch || browserOnly);
+          // 工具调用开始即推送 llm:tool：气泡实时显示"正在搜索/正在生成视频"。
+          result = await chatAgent(agentOptions, messages, agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
+            sendLlmTool({ tool, input, sessionId: session });
+          });
           break;
         } catch (error) {
           if (controller.signal.aborted) { done({ ok: true }); return; }

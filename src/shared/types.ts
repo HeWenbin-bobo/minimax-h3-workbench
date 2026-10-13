@@ -251,6 +251,8 @@ export interface WorkbenchApi {
   onLlmDone(listener: (event: LlmDoneEvent) => void): () => void;
   /** 智能体工具经 generate_video 建好任务后推送任务 id：渲染端把卡片挂到当前会话气泡上。 */
   onLlmTasks(listener: (event: LlmTasksEvent) => void): () => void;
+  /** 智能体工具调用开始事件：渲染端把"正在搜索/正在生成视频"实时显示在气泡上（透明度）。 */
+  onLlmTool(listener: (event: LlmToolEvent) => void): () => void;
   onTaskUpdate(listener: (task: GenerationTask) => void): () => void;
 }
 
@@ -291,5 +293,14 @@ export interface LlmDoneEvent {
 /** 智能体工具创建视频任务事件：渲染端据此把结果卡片挂到当前会话的助手气泡上（否则任务只在工作台可见）。 */
 export interface LlmTasksEvent {
   taskIds: string[];
+  sessionId?: string;
+}
+
+/** 智能体工具调用开始事件：渲染端把"正在搜索/正在生成视频"实时显示在气泡上（工具透明度）。 */
+export interface LlmToolEvent {
+  /** 工具名（web_search / generate_video）。 */
+  tool: string;
+  /** 人类可读的调用摘要（如搜索关键词、视频描述截断）。 */
+  input: string;
   sessionId?: string;
 }

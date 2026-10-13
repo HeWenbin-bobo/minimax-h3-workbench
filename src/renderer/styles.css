@@ -336,6 +336,33 @@ button { cursor: pointer; }
 @keyframes pg-blink { 50% { opacity: 0; } }
 .pg-task-grid { margin-top: 10px; }
 
+/* 智能体工具调用状态条：气泡内实时显示"正在搜索：xxx"/"正在创建视频生成任务…"。
+   多步工具期间（实测 15–25 秒）此前是完全黑屏，用户只能干等——透明化这个阶段。 */
+.pg-tool-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--pink);
+  border-radius: 8px;
+  background: #fff7f4;
+  color: var(--pink);
+  font-size: 10px;
+  font-weight: 700;
+}
+.pg-tool-status::before {
+  content: "";
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--pink);
+  animation: pg-pulse 1.1s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pg-tool-status::before { animation: none; }
+}
+
 /* 会话列表里"正在生成回复"的标识：左侧高亮条 + 呼吸圆点 + 高亮小字。
    多会话并发时用户要能一眼看出哪几个会话还在跑，以及自己刚用的是哪一个（列表已按最近使用倒序）。 */
 .pg-session.running { border-color: var(--pink); box-shadow: inset 3px 0 0 var(--pink); }

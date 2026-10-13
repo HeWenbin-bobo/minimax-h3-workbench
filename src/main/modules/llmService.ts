@@ -201,6 +201,24 @@ export async function bundledFrameworkVersion(): Promise<string> {
  * 返回 { textLength, toolCalls }：调用方据此判断"模型不支持工具"（0 文本 0 工具调用）
  * 并自动回落普通对话——这正是工具支持检测的运行时落地。
  */
+/** 工具调用入参的人类可读摘要：状态条展示用，别把原始 JSON 糊到用户脸上。 */
+function humanizeToolInput(toolName: string, input: unknown): string {
+  if (input == null) return "";
+  if (typeof input === "string") return input.slice(0, 120);
+  if (typeof input === "object") {
+    const record = input as Record<string, unknown>;
+    if (toolName === "web_search" && typeof record.query === "string") return record.query.slice(0, 120);
+    if (toolName === "generate_video") {
+      const prompt = typeof record.prompt === "string" ? record.prompt.slice(0, 80) : "";
+      const duration = typeof record.duration === "number" ? `${record.duration} 秒` : "";
+      const count = typeof record.count === "number" ? `${record.count} 路` : "";
+      return [prompt, duration, count].filter(Boolean).join(" · ");
+    }
+    return JSON.stringify(input).slice(0, 120);
+  }
+  return String(input).slice(0, 120);
+}
+
 export async function chatAgent(
   options: LlmServiceOptions,
   messages: ChatMessage[],
@@ -208,7 +226,9 @@ export async function chatAgent(
   send: ChunkSender,
   signal: AbortSignal,
   /** 「联网」开关：关闭时不把 web_search 工具下发给模型（否则开关形同虚设）。 */
-  enableWebSearch = false
+  enableWebSearch = false,
+  /** 工具调用开始回调：渲染端据此在气泡上实时显示"正在搜索/正在生成视频"（透明度）。 */
+  onToolStart?: (tool: string, input: string) => void
 ): Promise<{ textLength: number; toolCalls: number }> {
   const [{ streamText, tool, stepCountIs }, { createOpenAICompatible }, { z }] = await Promise.all([
     import("ai"),
@@ -274,7 +294,14 @@ export async function chatAgent(
     // 否则"没收到回复"会表现为永远转圈。
     timeout: { chunkMs: 120_000, totalMs: 600_000 },
     abortSignal: signal,
-    onError: ({ error }) => { underlyingError = error as Error; }
+    onError: ({ error }) => { underlyingError = error as Error; },
+    // 工具执行开始即回调（SDK 在 execute 运行前触发）：把"正在搜索/正在生成视频"实时透给渲染端，
+    // 否则多步工具调用期间（实测一轮可达 15–25 秒）气泡全黑，用户只能干等。
+    onToolExecutionStart: (event) => {
+      if (!onToolStart || !event) return;
+      const toolName = String(event.toolCall.toolName ?? "");
+      onToolStart(toolName, humanizeToolInput(toolName, event.toolCall.input));
+    }
   });
   let seq = 0;
   let textLength = 0;

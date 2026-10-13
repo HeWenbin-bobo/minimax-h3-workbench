@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { LlmDoneEvent, LlmStreamEvent, LlmTasksEvent, WorkbenchApi } from "../shared/types";
+import type { LlmDoneEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, WorkbenchApi } from "../shared/types";
 
 const invoke = <T>(channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args) as Promise<T>;
 
@@ -36,6 +36,7 @@ const api: WorkbenchApi = {
   onLlmChunk: (listener) => subscribe<LlmStreamEvent>("llm:chunk", listener),
   onLlmDone: (listener) => subscribe<LlmDoneEvent>("llm:done", listener),
   onLlmTasks: (listener) => subscribe<LlmTasksEvent>("llm:tasks", listener),
+  onLlmTool: (listener) => subscribe<LlmToolEvent>("llm:tool", listener),
   onTaskUpdate: (listener) => subscribe("task:update", listener)
 };
 

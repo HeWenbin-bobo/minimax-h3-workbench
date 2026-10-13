@@ -447,6 +447,8 @@ interface PlaygroundMessage {
   streaming?: boolean;
   taskIds?: string[];
   error?: boolean;
+  /** 瞬态：智能体工具调用状态（"正在搜索：xxx"），仅流式期间存在，落盘前与读取时都剥离。 */
+  toolStatus?: string;
 }
 
 const pgSessionsKey = "h3-playground-sessions";
@@ -481,7 +483,11 @@ function loadSessions(): PlaygroundSession[] {
     // 读取时就地清掉——这是唯一能把历史脏数据一次性修好的地方。
     return parsed.map((session) => ({
       ...session,
-      messages: (session.messages ?? []).map((msg) => (msg.streaming ? { ...msg, streaming: false } : msg))
+      // toolStatus 与 streaming 同理是瞬态：流式途中关闭应用会残留，读取时强制剥离。
+      messages: (session.messages ?? []).map((msg) => {
+        const { toolStatus: _dropped, ...rest } = msg;
+        return rest.streaming ? { ...rest, streaming: false } : rest;
+      })
     }));
   } catch { return []; }
 }
@@ -529,6 +535,13 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       const buffered = streamBuffers.current.get(targetId) ?? "";
       setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, content: buffered })));
     });
+    // 智能体工具调用开始：气泡显示"正在搜索/正在生成视频"（多步工具期间可达 15–25 秒，透明化黑屏期）。
+    const offTool = window.h3.onLlmTool((event) => {
+      const targetId = event.sessionId;
+      if (!targetId) return;
+      const label = event.tool === "web_search" ? `正在搜索：${event.input}` : event.tool === "generate_video" ? "正在创建视频生成任务…" : `正在调用 ${event.tool}…`;
+      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, toolStatus: label })));
+    });
     const offDone = window.h3.onLlmDone((event) => {
       const targetId = event.sessionId;
       const buffered = targetId ? streamBuffers.current.get(targetId) ?? "" : "";
@@ -545,6 +558,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           return {
             ...msg,
             streaming: false,
+            toolStatus: undefined,
             error: !event.ok && Boolean(event.message),
             taskIds: mergedTaskIds.length ? mergedTaskIds : undefined,
             // 失败必显文案：气泡为空写完整错误；已有内容（如回落提示）在末尾追加错误详情。
@@ -567,7 +581,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       taskIdBuffers.current.set(targetId, [...(taskIdBuffers.current.get(targetId) ?? []), ...event.taskIds]);
       setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, taskIds: Array.from(new Set([...(msg.taskIds ?? []), ...event.taskIds])) })));
     });
-    return () => { offChunk(); offDone(); offTasks(); };
+    return () => { offChunk(); offDone(); offTasks(); offTool(); };
   }, []);
   // 粘底自动滚动：仅在用户接近底部时跟随。
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
@@ -745,7 +759,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
               {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
-              <div className="pg-bubble">{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}</div>
+              <div className="pg-bubble">{msg.toolStatus && <span className="pg-tool-status">{msg.toolStatus}</span>}{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}</div>
               {msg.taskIds && msg.taskIds.length > 0 && <div className="result-grid pg-task-grid">{msg.taskIds.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} />)}</div>}
             </div>)}
           <div ref={bottomRef} />

@@ -509,7 +509,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const active = sessions.find((s) => s.id === activeId);
   const [input, setInput] = useState("");
   // HTML 产物侧栏预览（WorkBuddy 形态）：文件卡片「预览」触发，产物落盘 userData/artifacts/。
+  // 面板压缩聊天区（flex 布局挤压而非悬浮），宽度可拖拽调整并记住。
   const [preview, setPreview] = useState<ArtifactInfo>();
+  const [previewWidth, setPreviewWidth] = useState(() => Math.round(window.innerWidth * 0.55));
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
   const [webSearch, setWebSearch] = useState(true);
   // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
@@ -536,7 +538,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   useEffect(() => {
     const capped = sessions.length > 50 ? capSessions(sessions, generatingIds) : sessions;
     if (capped !== sessions) setSessions(capped);
-    localStorage.setItem(pgSessionsKey, JSON.stringify(capped));
+    // 空对话不落盘：关软件即"永久删除"（用户要求——空状态只是临时草稿）；正在生成回复的空壳除外（防截断）。
+    const persistable = capped.filter((s) => s.messages.length > 0 || generatingIds.includes(s.id));
+    localStorage.setItem(pgSessionsKey, JSON.stringify(persistable));
   }, [sessions, generatingIds]);
   useEffect(() => {
     // 流式事件按事件里带的 sessionId 路由：多会话并发时各写各的气泡，不会互相覆盖。
@@ -624,7 +628,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
 
   function newSession() {
     const session: PlaygroundSession = { id: crypto.randomUUID(), title: "新对话", messages: [], createdAt: new Date().toISOString() };
-    setSessions((all) => [session, ...all]);
+    // 空对话最多只保留一个：新建时顺手清掉已有的空会话（用户没打过字就点了"新对话"的情况）。
+    setSessions((all) => [session, ...all.filter((s) => s.messages.length > 0)]);
     setActiveId(session.id);
     setInput("");
     setAttachments([]);
@@ -778,6 +783,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       </aside>
       {showPgTrash && <PgTrashPanel sessions={trashSessions} onRestore={restoreSession} onPurge={purgeSession} onClose={() => setShowPgTrash(false)} retentionDays={7} />}
       <div className="pg-main">
+        <div className="pg-chat">
         <div className="pg-messages">
           {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
@@ -791,7 +797,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             </div>)}
           <div ref={bottomRef} />
         </div>
-        {preview && <PgPreviewPanel artifact={preview} onClose={() => setPreview(undefined)} />}
+        </div>
+        {preview && <PgPreviewPanel artifact={preview} onClose={() => setPreview(undefined)} width={previewWidth} onResize={setPreviewWidth} />}
         <div className="pg-composer">
           <div className="pg-chips">
             <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => setWebSearch(!webSearch)}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
@@ -879,10 +886,27 @@ function PgArtifactCard({ html, sessionId, onPreview, onError }: { html: string;
   </div>;
 }
 
-/** HTML 产物侧栏预览：顶栏文件名标签页 + 刷新/定位按钮（对标 WorkBuddy），iframe sandbox 渲染。 */
-function PgPreviewPanel({ artifact, onClose }: { artifact: ArtifactInfo; onClose: () => void }) {
+/** HTML 产物侧栏预览：占位压缩聊天区（非悬浮），左缘拖拽条可调宽度；iframe sandbox 渲染。 */
+function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: ArtifactInfo; onClose: () => void; width: number; onResize: (width: number) => void }) {
   const [nonce, setNonce] = useState(0);
-  return <aside className="pg-preview">
+  const dragRef = useRef<{ startX: number; startWidth: number } | undefined>(undefined);
+  function onDragStart(e: React.MouseEvent) {
+    e.preventDefault();
+    dragRef.current = { startX: e.clientX, startWidth: width };
+    const move = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      // 向左拖增宽：面板在右侧，宽度 = 起点 + (起点X - 当前X)。
+      onResize(Math.min(Math.max(dragRef.current.startWidth + (dragRef.current.startX - ev.clientX), 360), window.innerWidth - 480));
+    };
+    const up = () => {
+      dragRef.current = undefined;
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
+  return <aside className="pg-preview" style={{ width }}>    <div className="pg-preview-drag" onMouseDown={onDragStart} title="拖动调整宽度" />
     <div className="pg-preview-bar">
       <span className="pg-preview-tab">📄 {artifact.name}</span>
       <span className="pg-preview-actions">

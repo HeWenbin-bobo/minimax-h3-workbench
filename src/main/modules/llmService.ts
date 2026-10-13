@@ -1,4 +1,6 @@
+import { describeError } from "../../shared/errors";
 import type { ChatMessage, LlmStreamEvent } from "../../shared/types";
+import { searchWeb } from "./webSearch";
 
 export interface LlmServiceOptions {
   baseUrl: string;
@@ -7,6 +9,8 @@ export interface LlmServiceOptions {
   systemPrompt: string;
   searchBaseUrl?: string;
   searchApiKey?: string;
+  /** 搜索的浏览器渲染回退（由主进程注入；模块本身不 import electron，保持可单测）。 */
+  searchRenderHtml?: (url: string) => Promise<string>;
   /** 智能体模式（chatAgent）使用的框架版本——由 updateChecker 独立检查更新。 */
   frameworkVersion?: string;
 }
@@ -31,12 +35,13 @@ export class LlmService {
     this.controller = undefined;
   }
 
-  async chat(messages: ChatMessage[], webSearch: boolean, send: ChunkSender): Promise<void> {
+  /** browserOnly=true 走「浏览器搜索」：搜索只用应用自带 Chromium 渲染（游乐场的可选联网项）。 */
+  async chat(messages: ChatMessage[], webSearch: boolean, send: ChunkSender, browserOnly = false): Promise<void> {
     if (this.busy) throw new Error("上一轮对话还在进行中，请先停止或等待完成。");
     if (!this.options.apiKey && !/127\.0\.0\.1|localhost/.test(this.baseUrl)) {
       throw new Error("请先在连接设置中保存游乐场 LLM 的 API Key。");
     }
-    const payload = await this.buildPayload(messages, webSearch);
+    const payload = await this.buildPayload(messages, webSearch, browserOnly);
     this.controller = new AbortController();
     try {
       const response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
@@ -118,35 +123,23 @@ export class LlmService {
       if (models.length === 0) return { ok: false, models: [], message: "服务商返回了空模型列表，请手动填写模型名。" };
       return { ok: true, models, message: `获取到 ${models.length} 个模型。` };
     } catch (error) {
-      return { ok: false, models: [], message: error instanceof Error ? error.message : "无法连接服务商" };
+      return { ok: false, models: [], message: describeError(error, "无法连接服务商") };
     }
   }
 
-  // 联网搜索：OpenAI 兼容搜索 API（博查/Tavily 转接形态：POST /search 返回结果数组）。
-  // 可选功能——未配置时抛错由 UI 隐藏入口；结果拼接为参考段落注入本轮 system 消息。
-  private async search(query: string): Promise<string> {
-    if (!this.options.searchBaseUrl) throw new Error("尚未配置搜索 API。");
-    const base = this.options.searchBaseUrl.replace(/\/+$/, "");
-    const response = await fetch(`${base}/search`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(this.options.searchApiKey ? { Authorization: `Bearer ${this.options.searchApiKey}` } : {})
-      },
-      body: JSON.stringify({ query, count: 6 }),
-      signal: AbortSignal.timeout(20_000)
+  // 联网搜索：优先用户配置的搜索 API；未配置时由 searchWeb 回落免 key 直抓 Bing/搜狗。
+  // browserOnly=true 走「浏览器搜索」：只用应用自带 Chromium 渲染，跳过 API 与 HTTP 直抓。
+  // 结果拼接为参考段落注入本轮 system 消息。
+  private async search(query: string, browserOnly = false): Promise<string> {
+    return searchWeb(query, {
+      apiBaseUrl: this.options.searchBaseUrl,
+      apiKey: this.options.searchApiKey,
+      renderHtml: this.options.searchRenderHtml,
+      browserOnly
     });
-    if (!response.ok) throw new Error(`搜索请求失败：${response.status}`);
-    const payload = (await response.json().catch(() => ({}))) as {
-      results?: Array<{ name?: string; title?: string; url?: string; snippet?: string; content?: string }>;
-    };
-    const items = payload.results ?? [];
-    return items
-      .map((item, index) => `[${index + 1}] ${item.title || item.name || ""}\n${item.url || ""}\n${item.snippet || item.content || ""}`)
-      .join("\n\n");
   }
 
-  private async buildPayload(messages: ChatMessage[], webSearch: boolean): Promise<Array<Record<string, unknown>>> {
+  private async buildPayload(messages: ChatMessage[], webSearch: boolean, browserOnly = false): Promise<Array<Record<string, unknown>>> {
     const system: Record<string, unknown> = {
       role: "system",
       content: this.options.systemPrompt || "你是 MiniMax H3 视频工作台内置的智能助手。"
@@ -155,10 +148,10 @@ export class LlmService {
       const lastUser = [...messages].reverse().find((m) => m.role === "user");
       if (lastUser?.content) {
         try {
-          const results = await this.search(lastUser.content.slice(0, 200));
+          const results = await this.search(lastUser.content.slice(0, 200), browserOnly);
           if (results) system.content = `${system.content}\n\n以下是网络搜索结果，回答时可引用：\n${results}`;
         } catch (error) {
-          system.content = `${system.content}\n\n（联网搜索失败：${error instanceof Error ? error.message : "未知错误"}，请基于自身知识回答。）`;
+          system.content = `${system.content}\n\n（联网搜索失败：${describeError(error, "未知错误")}，请基于自身知识回答。）`;
         }
       }
     }
@@ -239,6 +232,9 @@ export async function chatAgent(
         : message.content
     };
   });
+  // AI SDK 的 RetryError 会被包成 "No output generated. Check the stream for errors."（cause 为 null），
+  // 直接透传等于没信息——用 onError 捕获底层真实错误（HTTP 500 / 连接重置等），收尾时拼进抛出的异常。
+  let underlyingError: Error | undefined;
   const stream = streamText({
     model,
     system: options.systemPrompt || "你是 MiniMax H3 视频工作台内置的智能助手，可以联网搜索资料，也可以直接调用 generate_video 工具为用户生成视频。",
@@ -254,7 +250,7 @@ export async function chatAgent(
               const results = await callbacks.webSearch(query);
               return results || "未搜索到相关内容。";
             } catch (error) {
-              return `搜索失败：${error instanceof Error ? error.message : "未知错误"}（请基于自身知识回答）`;
+              return `搜索失败：${describeError(error, "未知错误")}（请基于自身知识回答）`;
             }
           }
         })
@@ -270,11 +266,15 @@ export async function chatAgent(
       })
     },
     stopWhen: stepCountIs(10),
-    maxRetries: 0, // 快速失败：不支持工具/服务异常时由调用方立即回落普通对话，不做指数退避重试
+    // 中转/上游偶发连接重置（实测 api.jihuarst.top 会间歇性 ECONNRESET）会把智能体整轮打挂，
+    // 触发主进程"回落普通对话"并丢失视频生成意图。实测瞬时失败后第一次重试即可恢复，故只放 1 次
+    // （SDK 的退避是指数的，放 2 次会把 500 这类真错误拖到 6 秒以上才回落，用户感知是"卡住"）。
+    maxRetries: 1,
     // 超时兜底：分块间隔超 2 分钟视为服务商卡死（抛错触发回落），整轮上限 10 分钟——
     // 否则"没收到回复"会表现为永远转圈。
     timeout: { chunkMs: 120_000, totalMs: 600_000 },
-    abortSignal: signal
+    abortSignal: signal,
+    onError: ({ error }) => { underlyingError = error as Error; }
   });
   let seq = 0;
   let textLength = 0;
@@ -293,14 +293,22 @@ export async function chatAgent(
   } catch {
     // steps 不可用时按 0 计（部分 provider 组合不产 steps）。
   }
-  // 工具调用全程在 streamText 内部完成；这里只等最终收尾（错误抛给调用方）。
-  await stream.finishReason;
+  // 工具调用全程在 streamText 内部完成；这里只等最终收尾。
+  try {
+    await stream.finishReason;
+  } catch (error) {
+    // 有底层错误就抛它（调用方才能按"网络失败"还是"模型不支持工具"分流并给出可行动的中文提示）；
+    // 没有则原样抛 AI SDK 的占位错误。
+    throw underlyingError ?? error;
+  }
   return { textLength, toolCalls };
 }
 
 /**
  * 工具支持探测：发一条带工具定义的最小对话，看模型是否回工具调用（或至少正常回话）。
  * 返回 supported=false 时 UI 应提示该模型/中转不支持智能体模式。
+ * 注意区分两种"不支持"：模型正常回话但没调工具（真不支持）与请求本身失败（网络/服务异常）——
+ * 后者不能混为一谈，否则会给出误导性的"该模型不支持工具"结论。
  */
 export async function probeToolSupport(options: LlmServiceOptions): Promise<{ supported: boolean; message: string }> {
   const probeMessages: ChatMessage[] = [{ role: "user", content: "回复：好" }];
@@ -309,16 +317,16 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
     const result = await chatAgent(options, probeMessages, {
       webSearch: async () => "（探测）",
       generateVideo: async () => "（探测）"
-    }, () => { sent += 1; }, AbortSignal.timeout(30_000));
+    }, () => { sent += 1; }, AbortSignal.timeout(60_000));
     const supported = result.toolCalls > 0 || result.textLength > 0;
+    if (!supported) return { supported: false, message: "模型未返回任何内容，可能不支持工具调用（智能体模式不可用），将自动改用普通对话。" };
     return {
       supported,
-      message: supported
-        ? (result.toolCalls > 0 ? "模型支持工具调用，智能体模式完全可用。" : "模型可正常对话（未主动触发工具，但智能体模式可用）。")
-        : "模型未返回任何内容，可能不支持工具调用（智能体模式不可用），将自动改用普通对话。"
+      message: result.toolCalls > 0 ? "模型支持工具调用，智能体模式完全可用。" : "模型可正常对话（未主动触发工具，但智能体模式可用）。"
     };
   } catch (error) {
-    return { supported: false, message: `工具支持探测失败：${error instanceof Error ? error.message : "未知错误"}（将自动改用普通对话）` };
+    // 请求失败 ≠ 模型不支持工具：如实报告为服务异常，别据此给出误导性的能力结论。
+    return { supported: false, message: `工具支持探测失败：${describeError(error, "未知错误")}（非模型能力问题，稍后重试即可）` };
   }
 }
 

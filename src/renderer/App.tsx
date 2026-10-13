@@ -511,7 +511,15 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // HTML 产物侧栏预览（WorkBuddy 形态）：文件卡片「预览」触发，产物落盘 userData/artifacts/。
   // 面板压缩聊天区（flex 布局挤压而非悬浮），宽度可拖拽调整并记住。
   const [preview, setPreview] = useState<ArtifactInfo>();
-  const [previewWidth, setPreviewWidth] = useState(() => Math.round(window.innerWidth * 0.55));
+  // 初始宽度按窗口估个值，首次打开时按聊天容器实测校准（playground 限宽 1150，按窗口算会偏大占满）。
+  const [previewWidth, setPreviewWidth] = useState(() => Math.round(window.innerWidth * 0.35));
+  const previewCalibrated = useRef(false);
+  useEffect(() => {
+    if (!preview || previewCalibrated.current) return;
+    previewCalibrated.current = true;
+    const mainWidth = document.querySelector(".pg-main")?.getBoundingClientRect().width ?? 0;
+    if (mainWidth > 700) setPreviewWidth(Math.round(mainWidth * 0.55));
+  }, [preview]);
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
   const [webSearch, setWebSearch] = useState(true);
   // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
@@ -797,8 +805,6 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             </div>)}
           <div ref={bottomRef} />
         </div>
-        </div>
-        {preview && <PgPreviewPanel artifact={preview} onClose={() => setPreview(undefined)} width={previewWidth} onResize={setPreviewWidth} />}
         <div className="pg-composer">
           <div className="pg-chips">
             <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => setWebSearch(!webSearch)}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
@@ -824,6 +830,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             <button className="primary" disabled={generating || (!input.trim() && attachments.length === 0)} onClick={send}>{generating ? "回复中…" : "发送"}</button>
           </div>
         </div>
+        </div>
+        {preview && <PgPreviewPanel artifact={preview} onClose={() => setPreview(undefined)} width={previewWidth} onResize={setPreviewWidth} />}
       </div>
     </div>
   </section>;

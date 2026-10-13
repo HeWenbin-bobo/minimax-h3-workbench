@@ -879,15 +879,19 @@ function PgArtifactCard({ html, sessionId, onPreview, onError }: { html: string;
   </div>;
 }
 
-/** HTML 产物侧栏预览：顶栏显示文件名（WorkBuddy 标签页形态），iframe sandbox 渲染，不落盘之外零依赖。 */
+/** HTML 产物侧栏预览：顶栏文件名标签页 + 刷新/定位按钮（对标 WorkBuddy），iframe sandbox 渲染。 */
 function PgPreviewPanel({ artifact, onClose }: { artifact: ArtifactInfo; onClose: () => void }) {
+  const [nonce, setNonce] = useState(0);
   return <aside className="pg-preview">
     <div className="pg-preview-bar">
-      <strong>📄 {artifact.name}</strong>
-      <span>沙箱预览 · 文件已存至 {artifact.path}</span>
-      <button className="pg-tool" title="关闭预览" onClick={onClose}>×</button>
+      <span className="pg-preview-tab">📄 {artifact.name}</span>
+      <span className="pg-preview-actions">
+        <button className="pg-tool" title="重新加载" onClick={() => setNonce((n) => n + 1)}>↻</button>
+        <button className="pg-tool" title="在文件夹中显示" onClick={() => window.h3.showItem(artifact.path).catch(() => undefined)}>📁</button>
+        <button className="pg-tool" title="关闭预览" onClick={onClose}>×</button>
+      </span>
     </div>
-    <iframe className="pg-preview-frame" sandbox="allow-scripts" srcDoc={artifact.html} title={artifact.name} />
+    <iframe key={nonce} className="pg-preview-frame" sandbox="allow-scripts" srcDoc={artifact.html} title={artifact.name} />
   </aside>;
 }
 

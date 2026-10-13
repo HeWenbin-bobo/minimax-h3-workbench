@@ -1,11 +1,15 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LocalModelStatus, ResourceLink, UpdateInfo } from "../shared/types";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMessage, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LlmStreamEvent, LocalModelStatus, ResourceLink, UpdateInfo } from "../shared/types";
+import { LLM_PROVIDERS, MAX_PROMPT_LENGTH } from "../shared/types";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
+import { describeError } from "../shared/errors";
+import { renderMarkdown } from "./markdown";
 
-type Page = "ready" | "studio" | "downloads" | "guide" | "connections";
+type Page = "ready" | "studio" | "playground" | "downloads" | "guide" | "connections";
 const pages: Array<{ id: Page; label: string; eyebrow: string }> = [
   { id: "ready", label: "就绪检测", eyebrow: "CHECK" }, { id: "studio", label: "生成工作台", eyebrow: "CREATE" },
-  { id: "downloads", label: "模型下载", eyebrow: "MODELS" }, { id: "guide", label: "配置指南", eyebrow: "GUIDE" },
+  { id: "playground", label: "游乐场", eyebrow: "PLAY" }, { id: "downloads", label: "模型下载", eyebrow: "MODELS" },
+  { id: "guide", label: "配置指南", eyebrow: "GUIDE" },
   { id: "connections", label: "连接设置", eyebrow: "CONNECT" }
 ];
 const demoPrompt = "Create a cinematic 4-second product-style video of a translucent glass sphere floating above a reflective black surface, glowing with a magenta-to-orange gradient and violet-blue rim light. The sphere slowly rotates while fine particles orbit it, then emits one soft pulse of light. Minimal futuristic studio, premium AI technology aesthetic, smooth dolly-in, crisp details, no text, no logos, no people, native ambient stereo sound.";
@@ -22,7 +26,7 @@ export function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo>();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installing, setInstalling] = useState(false);
-  const showError = (error: unknown) => setNotice({ text: error instanceof Error ? error.message : String(error || "操作失败"), error: true });
+  const showError = (error: unknown) => setNotice({ text: describeError(error, "操作失败"), error: true });
 
   useEffect(() => {
     Promise.all([window.h3.getSettings(), window.h3.getResourceLinks(), window.h3.listTasks()])
@@ -35,6 +39,34 @@ export function App() {
     }).catch(() => undefined);
     return () => { offTask(); };
   }, []);
+
+  // 删除/恢复后同步渲染端任务列表：删掉的从本地 state 移除，恢复的重新并入。
+  useEffect(() => {
+    const onChanged = () => window.h3.listTasks().then((r) => { if (r.data) setTasks(r.data); }).catch(() => undefined);
+    window.addEventListener("h3-tasks-changed", onChanged);
+    return () => window.removeEventListener("h3-tasks-changed", onChanged);
+  }, []);
+
+  // 生成完成/失败系统通知：应用最小化或在后台时用户也能第一时间知道结果。
+  // 只在"本会话内首次观察到该状态"时通知：历史上从没见过的任务（应用启动加载史时的记录）
+  // before 为 undefined，若按"状态变成终态"判断会导致每次启动把全部历史任务重播一遍通知。
+  const tasksRef = useRef<GenerationTask[]>([]);
+  useEffect(() => {
+    const prev = tasksRef.current;
+    for (const task of tasks) {
+      const before = prev.find((t) => t.id === task.id);
+      if (!before) continue; // 首次见到的任务不算"刚刚完成"（历史加载 / 已在别的路径通知过）
+      const entered = (status: GenerationTask["status"]) => before.status !== status && task.status === status;
+      if (entered("succeeded")) {
+        const notification = new Notification("MiniMax H3", { body: `视频生成完成：${task.prompt.slice(0, 40)}` });
+        notification.onclick = () => window.focus();
+      } else if (entered("failed")) {
+        const notification = new Notification("MiniMax H3", { body: `生成失败：${task.prompt.slice(0, 40)}（${task.message?.slice(0, 60) || "未知错误"}）` });
+        notification.onclick = () => window.focus();
+      }
+    }
+    tasksRef.current = tasks;
+  }, [tasks]);
 
   useEffect(() => {
     if (!report) return;
@@ -78,6 +110,7 @@ export function App() {
     <main className="main-area">
       {page === "ready" && <ReadyPage report={report} busy={detecting} onDetect={detect} onNavigate={setPage} />}
       {page === "studio" && <StudioPage settings={settings} tasks={tasks} onError={showError} onNotice={(text) => setNotice({ text })} />}
+      {page === "playground" && <PlaygroundPage settings={settings} tasks={tasks} onError={showError} onNotice={(text) => setNotice({ text })} onNavigate={setPage} />}
       {page === "downloads" && <ResourcesPage resources={resources} settings={settings} onSettingsChange={setSettings} />}
       {page === "guide" && <GuidePage />}
       {page === "connections" && <ConnectionsPage settings={settings} setSettings={setSettings} onError={showError} onNotice={(text) => setNotice({ text })} />}
@@ -106,18 +139,166 @@ function ReadyPage({ report, busy, onDetect, onNavigate }: { report?: Environmen
 function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void }) {
   const [request, setRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
   const [submitting, setSubmitting] = useState(false);
-  const currentTasks = useMemo(() => { const parent = tasks[0]?.parentId; const group = parent ? tasks.filter((task) => task.parentId === parent) : []; return Array.from({ length: 4 }, (_, i) => group.find((task) => task.index === i)); }, [tasks]);
+  // 项目化：按 parentId 分组展示历次提交（最新在前），提交后自动切到新项目；支持多项目并行生成。
+  const projects = useMemo(() => {
+    const groups = new Map<string, GenerationTask[]>();
+    for (const task of tasks) {
+      const key = task.parentId || task.id;
+      const group = groups.get(key);
+      if (group) group.push(task); else groups.set(key, [task]);
+    }
+    return Array.from(groups.values()).sort((a, b) => b[0].createdAt.localeCompare(a[0].createdAt));
+  }, [tasks]);
+  // 视图分两种，互不混淆（此前两者混在一起，导致"新建 4 路"里塞进已有项目的单路结果）：
+  // - 新建任务：activeProjectId 为空。结果区严格按表单的 request.count 显示占位框（待生成）。
+  // - 已有任务：点某个项目 tab 进入，只显示该项目自己的结果（格子数 = 该项目任务数）。
+  const [activeProjectId, setActiveProjectId] = useState<string>();
+  const activeProject = activeProjectId ? projects.find((group) => (group[0].parentId || group[0].id) === activeProjectId) : undefined;
+  const isRb = request.backend === "rb";
+  const rbPreset = request.preset || (request.firstFramePath && request.lastFramePath ? "tail_frame" : "reference");
+  const setRbPreset = (preset: string) => setRequest({ ...request, preset, duration: clampDuration(request.duration, durationOptionsFor("rb", preset)) });
+  const clampedCount = Math.max(1, Math.min(4, request.count));
+  // 新建视图：request.count 个占位；项目视图：仅该项目任务，按 index 排序。
+  const currentTasks: Array<GenerationTask | undefined> = useMemo(
+    () => activeProject ? [...activeProject].sort((a, b) => a.index - b.index) : Array.from({ length: clampedCount }, () => undefined),
+    [activeProject, clampedCount]
+  );
+  const shownCount = currentTasks.length;
   async function choose(kind: "image" | "video", field: keyof GenerationRequest) { const response = await window.h3.selectFile(kind); if (response.data) setRequest((r) => ({ ...r, [field]: response.data })); }
-  async function submit() { setSubmitting(true); const response = await window.h3.submitGeneration(request); setSubmitting(false); if (!response.ok) onError(response.message); else onNotice("已创建 4 个生成任务"); }
-  return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div>
-    <div className="studio-layout"><div className="control-panel"><div className="mode-tabs">{(["text", "image", "video"] as GenerationMode[]).map((mode) => <button key={mode} className={request.mode === mode ? "active" : ""} onClick={() => setRequest({ ...request, mode })}>{mode === "text" ? "文生视频" : mode === "image" ? "图生视频" : "视频生视频"}</button>)}</div>
-      <label>视频描述<textarea rows={7} value={request.prompt} onChange={(e) => setRequest({ ...request, prompt: e.target.value })} placeholder="描述主体、动作、镜头、光线与风格…"/><small>{request.prompt.length} / 2000</small></label>
-      {request.mode === "text" && <div className="frame-row"><FilePicker label="首帧（可选）" path={request.firstFramePath} onClick={() => choose("image", "firstFramePath")} /><FilePicker label="尾帧（可选）" path={request.lastFramePath} onClick={() => choose("image", "lastFramePath")} /></div>}
-      {request.mode === "image" && <FilePicker label="参考图片" path={request.sourceImagePath} onClick={() => choose("image", "sourceImagePath")} />}{request.mode === "video" && <FilePicker label="参考视频" path={request.sourceVideoPath} onClick={() => choose("video", "sourceVideoPath")} />}
-      <div className="form-grid"><label>生成后端<select value={request.backend} onChange={(e) => setRequest({ ...request, backend: e.target.value as BackendKind })}><option value="local">本机 ComfyUI</option><option value="ssh">SSH 远程显卡</option><option value="minimax">MiniMax H3 云 API</option><option value="rb">瞬映 RB 云生成</option></select></label><label>时长<select value={request.duration} onChange={(e) => setRequest({ ...request, duration: Number(e.target.value) })}>{[4,6,8,10,12,15].map((x) => <option key={x} value={x}>{x} 秒</option>)}</select></label><label>画幅<select value={request.ratio} onChange={(e) => setRequest({ ...request, ratio: e.target.value as GenerationRequest["ratio"] })}>{["16:9","9:16","1:1","4:3","3:4","21:9","adaptive"].map((x) => <option key={x}>{x}</option>)}</select></label><label>分辨率<select value={request.resolution} onChange={(e) => setRequest({ ...request, resolution: e.target.value as "768P" | "2K" })}><option>768P</option><option>2K</option></select></label></div>
+  async function submit() {
+    setSubmitting(true);
+    const response = await window.h3.submitGeneration(request);
+    setSubmitting(false);
+    if (!response.ok) { onError(response.message); return; }
+    // 提交成功：切到新项目（submitGeneration 创建的任务组排在最前）。
+    if (response.data?.[0]) setActiveProjectId(response.data[0].parentId);
+    onNotice(`已创建 ${request.count} 个生成任务，可继续提交新任务并行生成`);
+  }
+  const rbDurationOptions = durationOptionsFor("rb", rbPreset);
+  const [showTrash, setShowTrash] = useState(false);
+  // 内联分类输入：window.prompt 在 Electron 中不可用（抛 "prompt() is not supported."），改用与重命名一致的输入框。
+  const [catEdit, setCatEdit] = useState<{ project: boolean; value: string }>({ project: false, value: "" });
+  async function commitProjectCategory() {
+    if (!catEdit.project) return; // Escape 时已置 project=false：视为取消
+    setCatEdit({ project: false, value: "" });
+    await setProjectCategory(catEdit.value);
+  }
+  // 项目分类：所有项目出现过的分类 + "全部"/"未分类" 过滤；新分类在当前项目上直接输入。
+  const projectCategories = useMemo(() => Array.from(new Set(tasks.map((t) => t.category).filter((c): c is string => Boolean(c)))), [tasks]);
+  const [categoryFilter, setCategoryFilter] = useState<string>("全部");
+  const filteredProjects = useMemo(() => {
+    if (categoryFilter === "全部") return projects;
+    if (categoryFilter === "未分类") return projects.filter((group) => !group[0].category);
+    return projects.filter((group) => group[0].category === categoryFilter);
+  }, [projects, categoryFilter]);
+  async function setProjectCategory(category: string) {
+    if (!activeProject) return;
+    const response = await window.h3.setTaskCategory(activeProject[0].id, category);
+    if (!response.ok) { onError(response.message); return; }
+    onNotice(category ? `已归类到「${category}」` : "已清除分类");
+  }
+  async function deleteProject() {
+    if (!activeProject) return;
+    // 传任一真实任务 id，orchestrator 按 parentId 整组软删除。
+    const response = await window.h3.deleteTasks([activeProject[0].id]);
+    if (!response.ok) { onError(response.message); return; }
+    setActiveProjectId(undefined);
+    onNotice("已移入回收站，7 天内可恢复");
+    window.dispatchEvent(new Event("h3-tasks-changed"));
+  }
+  return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="page-title-actions"><button className="text-button" onClick={() => setShowTrash((v) => !v)}>🗑 回收站</button><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div></div>
+    {projects.length > 0 && <div className="category-filter">
+      {["全部", ...projectCategories, "未分类"].map((c) => <button key={c} className={categoryFilter === c ? "on" : ""} onClick={() => setCategoryFilter(c)}>{c}</button>)}
+      {catEdit.project ? <input className="cat-input" autoFocus value={catEdit.value} placeholder="分类名（留空清除）"
+        onChange={(e) => setCatEdit({ project: true, value: e.target.value })}
+        onBlur={() => commitProjectCategory()}
+        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") setCatEdit({ project: false, value: "" }); }} />
+        : <button className="text-button" title="给当前项目设置分类" disabled={!activeProject} onClick={() => { if (activeProject) setCatEdit({ project: true, value: activeProject[0].category || "" }); }}>＋ 分类</button>}
+    </div>}
+    <div className="project-tabs">
+      <button className={`project-tab new-task${activeProjectId ? "" : " active"}`} onClick={() => setActiveProjectId(undefined)}>
+        <strong>＋ 新建任务</strong><small>按下方参数生成 {clampedCount} 路</small>
+      </button>
+      {filteredProjects.map((group) => {
+        const key = group[0].parentId || group[0].id;
+        const running = group.some((t) => !["succeeded", "failed", "cancelled", "interrupted"].includes(t.status));
+        const done = group.filter((t) => t.status === "succeeded").length;
+        const active = activeProjectId === key;
+        return <button key={key} className={`project-tab${active ? " active" : ""}`} onClick={() => setActiveProjectId(key)}>
+          <strong>{group[0].prompt.slice(0, 18) || "未命名项目"}</strong>
+          <small>{running ? "生成中…" : `${done}/${group.length} 完成`}{group[0].category ? ` · ${group[0].category}` : ""}</small>
+          {running && <i className="dot" />}
+        </button>;
+      })}
+    </div>
+    {showTrash && <TrashPanel onError={onError} onNotice={onNotice} />}
+    <div className="studio-layout"><div className="control-panel">
+      {!isRb && <div className="mode-tabs">{(["text", "image", "video"] as GenerationMode[]).map((mode) => <button key={mode} className={request.mode === mode ? "active" : ""} onClick={() => setRequest({ ...request, mode })}>{mode === "text" ? "文生视频" : mode === "image" ? "图生视频" : "视频生视频"}</button>)}</div>}
+      {isRb && <div className="mode-tabs">{[["reference", "贴合参考图"], ["tail_frame", "首尾过渡"], ["easy_15", "15 秒"], ["easy_30", "30 秒"], ["flashvsr_upscale", "视频变清晰"]].map(([value, label]) => <button key={value} className={rbPreset === value ? "active" : ""} onClick={() => setRbPreset(value)}>{label}</button>)}</div>}
+      {isRb && rbPreset === "flashvsr_upscale"
+        ? <FilePicker label="源视频（要变清晰的视频）" path={request.sourceVideoPath} onClick={() => choose("video", "sourceVideoPath")} />
+        : <>
+          <label>视频描述<textarea rows={7} maxLength={MAX_PROMPT_LENGTH} value={request.prompt} onChange={(e) => setRequest({ ...request, prompt: e.target.value })} placeholder="描述主体、动作、镜头、光线与风格…"/><small>{request.prompt.length} / {MAX_PROMPT_LENGTH}</small></label>
+          {!isRb && request.mode === "text" && <div className="frame-row"><FilePicker label="首帧（可选）" path={request.firstFramePath} onClick={() => choose("image", "firstFramePath")} /><FilePicker label="尾帧（可选）" path={request.lastFramePath} onClick={() => choose("image", "lastFramePath")} /></div>}
+          {!isRb && request.mode === "image" && <FilePicker label="参考图片" path={request.sourceImagePath} onClick={() => choose("image", "sourceImagePath")} />}
+          {!isRb && request.mode === "video" && <FilePicker label="参考视频" path={request.sourceVideoPath} onClick={() => choose("video", "sourceVideoPath")} />}
+          {isRb && rbPreset === "reference" && <FilePicker label="参考图片（可选，最多 8 张）" path={request.sourceImagePath} onClick={() => choose("image", "sourceImagePath")} />}
+          {isRb && rbPreset === "reference" && <FilePicker label="参考视频（可选）" path={request.sourceVideoPath} onClick={() => choose("video", "sourceVideoPath")} />}
+          {isRb && rbPreset === "tail_frame" && <div className="frame-row"><FilePicker label="首帧" path={request.firstFramePath} onClick={() => choose("image", "firstFramePath")} /><FilePicker label="尾帧" path={request.lastFramePath} onClick={() => choose("image", "lastFramePath")} /></div>}
+        </>}
+      <div className="form-grid"><label>生成后端<select value={request.backend} onChange={(e) => { const backend = e.target.value as BackendKind; const preset = undefined; setRequest({ ...request, backend, preset, duration: clampDuration(request.duration, durationOptionsFor(backend, preset)) }); }}><option value="local">本机 ComfyUI</option><option value="ssh">SSH 远程显卡</option><option value="minimax">MiniMax H3 云 API</option><option value="rb">瞬映 RB 云生成</option></select></label>
+        {(!isRb || rbDurationOptions.length > 0) && <label>时长<select value={request.duration} onChange={(e) => setRequest({ ...request, duration: Number(e.target.value) })}>{(!isRb ? [4,6,8,10,12,15] : rbDurationOptions).map((x) => <option key={x} value={x}>{x} 秒</option>)}</select></label>}
+        {!isRb && <label>画幅<select value={request.ratio} onChange={(e) => setRequest({ ...request, ratio: e.target.value as GenerationRequest["ratio"] })}>{["16:9","9:16","1:1","4:3","3:4","21:9","adaptive"].map((x) => <option key={x}>{x}</option>)}</select></label>}
+        {!isRb && <label>分辨率<select value={request.resolution} onChange={(e) => setRequest({ ...request, resolution: e.target.value as "768P" | "2K" })}><option>768P</option><option>2K</option></select></label>}
+        {isRb && (rbPreset === "reference" || rbPreset === "tail_frame") && <label>采样步数<select value={request.samplerSteps || 20} onChange={(e) => setRequest({ ...request, samplerSteps: Number(e.target.value) })}><option value={8}>8（更快）</option><option value={20}>20（更精细）</option></select></label>}
+        {isRb && (rbPreset === "reference" || rbPreset === "tail_frame") && <label>补帧<select value={request.interpolate ? "on" : "off"} onChange={(e) => setRequest({ ...request, interpolate: e.target.value === "on" })}><option value="off">关闭</option><option value="on">开启（更流畅）</option></select></label>}
+        <label>结果数量<select value={request.count} onChange={(e) => setRequest({ ...request, count: Number(e.target.value) })}>{[1,2,3,4].map((x) => <option key={x} value={x}>{x} 路</option>)}</select></label>
+      </div>
       <label>基础随机种子<input type="number" value={request.baseSeed} onChange={(e) => setRequest({ ...request, baseSeed: Number(e.target.value) })}/></label>
-      <div className="submit-area"><div>{request.backend === "minimax" ? <><span>云端估算</span><strong>约 ${estimateCloudCost(request.resolution, request.duration, 4).toFixed(2)} / 4 条</strong></> : request.backend === "rb" ? <><span>云端估算</span><strong>卡密计费 · 每条消耗 1 次</strong></> : <><span>本地生成</span><strong>不产生 API 费用</strong></>}</div><button className="primary" disabled={submitting} onClick={submit}>{submitting ? "提交中…" : "生成 4 个结果"}</button></div>
-    </div><div className="result-grid">{currentTasks.map((task, index) => <TaskCard key={task?.id || index} task={task} index={index} onError={onError} />)}</div></div>
+      <div className="submit-area"><div>{request.backend === "minimax" ? <><span>云端估算</span><strong>约 ${estimateCloudCost(request.resolution, request.duration, request.count).toFixed(2)} / {request.count} 条</strong></> : request.backend === "rb" ? <><span>云端估算</span><strong>卡密计费 · {request.count} 条消耗 {request.count} 次</strong></> : <><span>本地生成</span><strong>不产生 API 费用</strong></>}</div><button className="primary" disabled={submitting} onClick={submit}>{submitting ? "提交中…" : `生成 ${request.count} 个结果`}</button></div>
+    </div><div className="result-pane"><div className="result-pane-head">{activeProject
+      ? <button className="text-button danger" onClick={deleteProject}>🗑 删除此项目</button>
+      : <span className="result-pane-hint">新建任务预览 · 将生成 {clampedCount} 路结果</span>}</div><div className={`result-grid${shownCount === 1 ? " single" : ""}`}>{currentTasks.map((task, index) => <TaskCard key={task?.id || `slot-${index}`} task={task} index={index} onError={onError} />)}</div></div></div>
+  </section>;
+}
+
+// 回收站面板：按项目分组展示已删除任务，支持恢复 / 彻底删除（含视频文件）。
+// 删除/恢复动作广播 h3-tasks-changed 事件，本面板监听该事件实时刷新（无需关闭重开）。
+function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNotice: (s: string) => void }) {
+  const [items, setItems] = useState<GenerationTask[]>([]);
+  const [loading, setLoading] = useState(true);
+  const retentionMs = 7 * 24 * 60 * 60 * 1_000;
+  const refresh = useCallback(() => window.h3.listDeletedTasks().then((r) => { if (r.data) setItems(r.data); setLoading(false); }).catch(() => setLoading(false)), []);
+  useEffect(() => {
+    void refresh();
+    window.addEventListener("h3-tasks-changed", refresh);
+    return () => window.removeEventListener("h3-tasks-changed", refresh);
+  }, [refresh]);
+  const groups = new Map<string, GenerationTask[]>();
+  for (const task of items) {
+    const group = groups.get(task.parentId);
+    if (group) group.push(task); else groups.set(task.parentId, [task]);
+  }
+  const daysLeft = (iso: string) => Math.max(0, Math.ceil((retentionMs - (Date.now() - new Date(iso).getTime())) / 86_400_000));
+  const notifyChanged = () => window.dispatchEvent(new Event("h3-tasks-changed"));
+  async function restore(ids: string[]) { const r = await window.h3.restoreTasks(ids); if (!r.ok) { onError(r.message); return; } onNotice("已恢复"); notifyChanged(); void refresh(); }
+  async function purge(ids: string[]) { const r = await window.h3.purgeTasks(ids); if (!r.ok) { onError(r.message); return; } onNotice("已彻底删除（含视频文件）"); notifyChanged(); void refresh(); }
+  return <section className="trash-panel">
+    <header><strong>回收站</strong><small>项目删除后保留 7 天，到期自动清除（含视频文件）</small></header>
+    {loading && <p className="footnote">加载中…</p>}
+    {!loading && groups.size === 0 && <p className="footnote">回收站是空的。</p>}
+    {Array.from(groups.values()).map((group) => {
+      const ids = group.map((t) => t.id);
+      const deletedAt = group[0].deletedAt || group[0].updatedAt;
+      return <article key={group[0].parentId} className="trash-item">
+        <div><strong>{group[0].prompt.slice(0, 40) || "未命名项目"}</strong>
+          <small>{group.length} 条 · {daysLeft(deletedAt)} 天后自动清除</small></div>
+        <div className="trash-actions">
+          <button className="text-button" onClick={() => restore(ids)}>恢复</button>
+          <button className="text-button danger" onClick={() => purge(ids)}>彻底删除</button>
+        </div>
+      </article>;
+    })}
   </section>;
 }
 
@@ -200,19 +381,453 @@ function GuidePage() { const guides = [
   ]; return <section className="page guide"><div className="page-title"><div><span className="eyebrow">HANDBOOK</span><h1>配置指南</h1></div></div><div className="guide-grid">{guides.map(([title, body], i) => <article key={String(title)}><span>0{i+1}</span><h2>{title}</h2><p>{body}</p></article>)}</div><div className="callout"><strong>遇到 OOM？</strong><span>降低分辨率或时长，关闭其他占显存程序；单卡不足时优先使用 SSH 多卡主机或 MiniMax 云 API。</span></div></section>; }
 
 function ConnectionsPage({ settings, setSettings, onError, onNotice }: { settings: AppSettings; setSettings: (s: AppSettings) => void; onError: (e: unknown) => void; onNotice: (s: string) => void }) {
-  const [draft, setDraft] = useState(settings); const [apiKey, setApiKey] = useState(""); const [sshPassword, setSshPassword] = useState(""); const [rbCardCode, setRbCardCode] = useState(""); const [testing, setTesting] = useState<BackendKind>(); const [results, setResults] = useState<Partial<Record<BackendKind, BackendTestResult>>>({});
+  const [draft, setDraft] = useState(settings); const [apiKey, setApiKey] = useState(""); const [sshPassword, setSshPassword] = useState(""); const [rbCardCode, setRbCardCode] = useState(""); const [llmKey, setLlmKey] = useState(""); const [searchKey, setSearchKey] = useState(""); const [testing, setTesting] = useState<BackendKind>(); const [results, setResults] = useState<Partial<Record<BackendKind, BackendTestResult>>>({}); const [llmResult, setLlmResult] = useState<BackendTestResult>(); const [llmTesting, setLlmTesting] = useState(false); const [llmModels, setLlmModels] = useState<string[]>(); const [fetchingModels, setFetchingModels] = useState(false);
   const setSsh = (patch: Partial<AppSettings["ssh"]>) => setDraft({ ...draft, ssh: { ...draft.ssh, ...patch } });
-  async function save() { try { const saved = await must(window.h3.updateSettings(draft)); if (apiKey) await must(window.h3.setSecret("minimaxApiKey", apiKey)); if (sshPassword) await must(window.h3.setSecret("sshPassword", sshPassword)); if (rbCardCode) await must(window.h3.setSecret("rbCardCode", rbCardCode)); setSettings(saved); setApiKey(""); setSshPassword(""); setRbCardCode(""); onNotice("连接设置已安全保存"); } catch (e) { onError(e); } }
+  const setLlm = (patch: Partial<AppSettings["llm"]>) => setDraft({ ...draft, llm: { ...draft.llm, ...patch } });
+  const setLlmProvider = (provider: string) => {
+    const preset = LLM_PROVIDERS.find((p) => p.id === provider);
+    // 对话端点由主进程按域名运行时推导（api.minimax.io → 官方私有端点，其余标准 /chat/completions），设置里不存储。
+    setDraft({ ...draft, llm: { ...draft.llm, provider, ...(preset && provider !== "custom" ? { baseUrl: preset.baseUrl, model: preset.model } : { baseUrl: preset ? "" : draft.llm.baseUrl }) } });
+    setLlmModels(undefined);
+  };
+  async function save() { try { const saved = await must(window.h3.updateSettings(draft)); if (apiKey) await must(window.h3.setSecret("minimaxApiKey", apiKey)); if (sshPassword) await must(window.h3.setSecret("sshPassword", sshPassword)); if (rbCardCode) await must(window.h3.setSecret("rbCardCode", rbCardCode)); if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey)); if (searchKey) await must(window.h3.setSecret("searchApiKey", searchKey)); setSettings(saved); setApiKey(""); setSshPassword(""); setRbCardCode(""); setLlmKey(""); setSearchKey(""); onNotice("连接设置已安全保存"); } catch (e) { onError(e); } }
   async function test(kind: BackendKind) { setTesting(kind); const result = await window.h3.testBackend(kind); setTesting(undefined); if (result.data) setResults((r) => ({...r,[kind]:result.data})); else onError(result.message); }
+  // LLM 测试：先保存当前草稿（含可能刚输入的 Key），再发最小对话验证全链路。
+  async function testLlm() {
+    setLlmTesting(true); setLlmResult(undefined);
+    try {
+      await must(window.h3.updateSettings(draft));
+      if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey));
+      const result = await window.h3.testLlm();
+      if (result.data) setLlmResult(result.data); else onError(result.message);
+    } catch (e) { onError(e); } finally { setLlmTesting(false); }
+  }
+  // 从上游拉取模型列表：同样先保存草稿与 Key（列表接口需要鉴权）。
+  async function fetchModels() {
+    setFetchingModels(true);
+    try {
+      await must(window.h3.updateSettings(draft));
+      if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey));
+      const response = await window.h3.listLlmModels();
+      if (response.data?.ok) { setLlmModels(response.data.models); onNotice(response.data.message); }
+      else onError(new Error(response.data?.message || response.message || "获取模型列表失败"));
+    } catch (e) { onError(e); } finally { setFetchingModels(false); }
+  }
   return <section className="page connections"><div className="page-title"><div><span className="eyebrow">CONNECT</span><h1>连接设置</h1></div><button className="primary" onClick={save}>保存全部设置</button></div>
     <ConnectionCard title="本机 ComfyUI" badge="LOCAL" result={results.local} onTest={() => test("local")} testing={testing === "local"}><label>服务地址<input value={draft.localComfyUrl} onChange={(e) => setDraft({...draft,localComfyUrl:e.target.value})}/></label><label>输出目录<div className="input-button"><input value={draft.outputDirectory} onChange={(e) => setDraft({...draft,outputDirectory:e.target.value})}/><button onClick={async () => { const x=await window.h3.selectDirectory(); if(x.data)setDraft({...draft,outputDirectory:x.data}); }}>选择</button></div></label></ConnectionCard>
     <ConnectionCard title="MiniMax 云 API" badge="CLOUD" result={results.minimax} onTest={() => test("minimax")} testing={testing === "minimax"}><label>API 地址<input value={draft.minimaxBaseUrl} onChange={(e) => setDraft({...draft,minimaxBaseUrl:e.target.value})}/></label><label>API Key<input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="已保存的密钥不会回显；留空不修改"/></label></ConnectionCard>
     <ConnectionCard title="瞬映 RB 云生成" badge="RB-CLOUD" result={results.rb} onTest={() => test("rb")} testing={testing === "rb"}><label>API 地址<input value={draft.rbBaseUrl} onChange={(e) => setDraft({...draft,rbBaseUrl:e.target.value})}/></label><label>瞬映卡密<input type="password" value={rbCardCode} onChange={(e) => setRbCardCode(e.target.value)} placeholder="已保存的卡密不会回显；留空不修改"/></label></ConnectionCard>
     <ConnectionCard title="SSH 远程显卡" badge="REMOTE" result={results.ssh} onTest={() => test("ssh")} testing={testing === "ssh"}><div className="form-grid"><label>主机<input value={draft.ssh.host} onChange={(e)=>setSsh({host:e.target.value})} placeholder="gpu.example.com"/></label><label>端口<input type="number" value={draft.ssh.port} onChange={(e)=>setSsh({port:Number(e.target.value)})}/></label><label>用户名<input value={draft.ssh.username} onChange={(e)=>setSsh({username:e.target.value})}/></label><label>远端 ComfyUI 端口<input type="number" value={draft.ssh.remoteComfyPort} onChange={(e)=>setSsh({remoteComfyPort:Number(e.target.value)})}/></label></div><label>私钥路径<div className="input-button"><input value={draft.ssh.privateKeyPath} onChange={(e)=>setSsh({privateKeyPath:e.target.value})}/><button onClick={async()=>{const x=await window.h3.selectFile("key");if(x.data)setSsh({privateKeyPath:x.data});}}>选择</button></div></label><label>SSH 密码（仅无私钥时）<input type="password" value={sshPassword} onChange={(e)=>setSshPassword(e.target.value)} placeholder="使用系统安全存储"/></label><label>主机 SHA-256 指纹<input value={draft.ssh.hostFingerprint} onChange={(e)=>setSsh({hostFingerprint:e.target.value})} placeholder="首次测试确认后填入"/></label></ConnectionCard>
+    <ConnectionCard title="游乐场 LLM（OpenAI 兼容）" badge="PLAY" result={llmResult} onTest={testLlm} testing={llmTesting}><div className="form-grid"><label>提供商<select value={draft.llm.provider} onChange={(e) => setLlmProvider(e.target.value)}>{LLM_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}</select></label><label>API 地址<input value={draft.llm.baseUrl} onChange={(e) => setLlm({baseUrl: e.target.value})} placeholder="https://api.example.com/v1"/></label><label>模型名称<div className="input-button"><input value={draft.llm.model} onChange={(e) => setLlm({model: e.target.value})} placeholder="deepseek-chat"/>{llmModels && llmModels.length > 0 && <select className="pg-model-select" value="" onChange={(e) => { if (e.target.value) setLlm({model: e.target.value}); }}><option value="">从列表选择…</option>{llmModels.map((m) => <option key={m} value={m}>{m}</option>)}</select>}<button onClick={fetchModels} disabled={fetchingModels}>{fetchingModels ? "获取中…" : "获取列表"}</button></div></label></div><label>API Key<input type="password" value={llmKey} onChange={(e) => setLlmKey(e.target.value)} placeholder="已保存的密钥不会回显；留空不修改（Ollama 本机可留空）"/></label><label>系统提示词（可选）<input value={draft.llm.systemPrompt} onChange={(e) => setLlm({systemPrompt: e.target.value})} placeholder="例如：你是视频创作助手，帮我润色视频描述。"/></label><p className="footnote">测试连接优先拉取上游模型列表验证连通性（不发对话、不消耗额度），不支持列表接口的服务商回退发一条最小对话。改 API 地址为第三方中转时自动使用标准 /chat/completions 端点。</p></ConnectionCard>
+    <ConnectionCard title="联网搜索（可选）" badge="SEARCH"><label>搜索 API 地址<input value={draft.searchApi.baseUrl} onChange={(e) => setDraft({...draft, searchApi: {baseUrl: e.target.value}})} placeholder="博查/Tavily 转接等，POST /search 返回 results 数组；留空则用免 key 抓取 Bing/搜狗"/></label><label>搜索 API Key<input type="password" value={searchKey} onChange={(e) => setSearchKey(e.target.value)} placeholder="已保存的密钥不会回显；留空不修改"/></label></ConnectionCard>
   </section>;
 }
 
-function ConnectionCard({ title, badge, result, onTest, testing, children }: { title: string; badge: string; result?: BackendTestResult; onTest: () => void; testing: boolean; children: ReactNode }) { return <article className="connection-card"><header><div><span>{badge}</span><h2>{title}</h2></div><button className="secondary" onClick={onTest} disabled={testing}>{testing ? "测试中…" : "测试连接"}</button></header><div className="connection-fields">{children}</div>{result && <div className={`test-result ${result.ok ? "ok" : "bad"}`}><strong>{result.ok ? "连接成功" : "连接失败"}</strong><span>{result.message} · {result.latencyMs}ms</span></div>}</article>; }
+function ConnectionCard({ title, badge, result, onTest, testing, children }: { title: string; badge: string; result?: BackendTestResult; onTest?: () => void; testing?: boolean; children: ReactNode }) { return <article className="connection-card"><header><div><span>{badge}</span><h2>{title}</h2></div>{onTest && <button className="secondary" onClick={onTest} disabled={testing}>{testing ? "测试中…" : "测试连接"}</button>}</header><div className="connection-fields">{children}</div>{result && <div className={`test-result ${result.ok ? "ok" : "bad"}`}><strong>{result.ok ? "连接成功" : "连接失败"}</strong><span>{result.message} · {result.latencyMs}ms</span></div>}</article>; }
+
+interface PlaygroundSession {
+  id: string;
+  title: string;
+  messages: PlaygroundMessage[];
+  createdAt: string;
+  /** 最近使用时间：会话列表按它倒序，刚用过的排最前（多会话并发时能一眼看出哪几个在跑）。 */
+  updatedAt?: string;
+  /** 会话回收站：非空表示已删除，7 天后启动时自动清除。 */
+  deletedAt?: string;
+  /** 用户自定义会话分类（空 = 未分类）。 */
+  category?: string;
+}
+
+// 消息可携带内嵌的视频生成任务（任务卡片随 task:update 实时刷新）。
+interface PlaygroundMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  images?: string[];
+  streaming?: boolean;
+  taskIds?: string[];
+  error?: boolean;
+}
+
+const pgSessionsKey = "h3-playground-sessions";
+
+/** 会话落盘上限。 */
+const PG_SESSION_CAP = 50;
+
+/** 会话"最近使用"时间戳：新建会话还没用过时退回创建时间。 */
+function sessionRecency(session: PlaygroundSession): string {
+  return session.updatedAt || session.createdAt;
+}
+
+/**
+ * 裁到上限：按最近使用保留最新的，但正在生成回复的会话一律保留——
+ * 否则并发场景下一段还在跑的对话会被静默砍掉，回复流到一半目标就没了。
+ */
+function capSessions(sessions: PlaygroundSession[], generatingIds: string[]): PlaygroundSession[] {
+  if (sessions.length <= PG_SESSION_CAP) return sessions;
+  const running = sessions.filter((s) => generatingIds.includes(s.id));
+  const rest = sessions.filter((s) => !generatingIds.includes(s.id)).sort((a, b) => sessionRecency(b).localeCompare(sessionRecency(a)));
+  const kept = new Set([...running.map((s) => s.id), ...rest.slice(0, Math.max(0, PG_SESSION_CAP - running.length)).map((s) => s.id)]);
+  return sessions.filter((s) => kept.has(s.id));
+}
+
+function loadSessions(): PlaygroundSession[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(pgSessionsKey) || "[]") as PlaygroundSession[];
+    // 归一化残留的 streaming 标记：应用在流式回复途中被关闭时，消息上的 streaming:true 会被原样存下来，
+    // 而重启后并没有任何流在跑。残留标记会让两个功能失灵：
+    //   1) 删除按钮被 deleteSession 的"正在生成不能删"守卫静默拦掉，点了毫无反应；
+    //   2) 气泡永久显示闪烁光标，像卡在回复中。
+    // 读取时就地清掉——这是唯一能把历史脏数据一次性修好的地方。
+    return parsed.map((session) => ({
+      ...session,
+      messages: (session.messages ?? []).map((msg) => (msg.streaming ? { ...msg, streaming: false } : msg))
+    }));
+  } catch { return []; }
+}
+
+function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
+  const [sessions, setSessions] = useState<PlaygroundSession[]>(loadSessions);
+  const [activeId, setActiveId] = useState<string>(() => loadSessions().find((s) => !s.deletedAt)?.id || "");
+  const active = sessions.find((s) => s.id === activeId);
+  const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
+  const [webSearch, setWebSearch] = useState(false);
+  // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
+  const [browserSearch, setBrowserSearch] = useState(false);
+  // 智能体默认开启（用户指令）；模型不支持工具时主进程自动回落普通对话，前端无感。
+  const [agentMode, setAgentMode] = useState(true);
+  // generating 从"全局"改为"按会话"：多会话可并发生成，每个会话各有自己的发送守卫与流缓冲。
+  const [generatingIds, setGeneratingIds] = useState<string[]>([]);
+  const [showVideoForm, setShowVideoForm] = useState(false);
+  const [videoRequest, setVideoRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
+  // 与工作台共用同一份合法时长定义：RB 的 reference/tail_frame 只收 4/6/8 秒，
+  // 若这里仍放开 10/12/15，非法 seconds+preset 组合会真的发到云端——失败也照样扣卡密次数。
+  const videoDurationOptions = durationOptionsFor(videoRequest.backend, videoRequest.preset);
+  // 每个会话一条流：sessionId → 累积文本 / 已收到的任务 id / 同步发送守卫。
+  const streamBuffers = useRef(new Map<string, string>());
+  const taskIdBuffers = useRef(new Map<string, string[]>());
+  const sendingRef = useRef(new Set<string>());
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const searchReady = Boolean(settings.searchApi.baseUrl);
+  const generating = generatingIds.includes(activeId);
+
+  // 落盘上限 50：内存态一并裁剪，否则 UI 显示得出来、重启后却凭空少几个（用户可感知的静默丢失）。
+  // 按"最近使用"裁剪，且绝不丢弃正在生成回复的会话——否则一段正在跑的对话会被静默砍掉。
+  useEffect(() => {
+    const capped = sessions.length > 50 ? capSessions(sessions, generatingIds) : sessions;
+    if (capped !== sessions) setSessions(capped);
+    localStorage.setItem(pgSessionsKey, JSON.stringify(capped));
+  }, [sessions, generatingIds]);
+  useEffect(() => {
+    // 流式事件按事件里带的 sessionId 路由：多会话并发时各写各的气泡，不会互相覆盖。
+    // 极端时序下事件可能早于 React 提交新会话+消息到达，此时把分块暂存进缓冲区，收尾时统一写回。
+    const offChunk = window.h3.onLlmChunk((event: LlmStreamEvent) => {
+      const targetId = event.sessionId;
+      if (!targetId) return;
+      streamBuffers.current.set(targetId, (streamBuffers.current.get(targetId) ?? "") + event.delta);
+      const buffered = streamBuffers.current.get(targetId) ?? "";
+      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, content: buffered })));
+    });
+    const offDone = window.h3.onLlmDone((event) => {
+      const targetId = event.sessionId;
+      const buffered = targetId ? streamBuffers.current.get(targetId) ?? "" : "";
+      const pendingTaskIds = targetId ? taskIdBuffers.current.get(targetId) ?? [] : [];
+      if (targetId) {
+        streamBuffers.current.delete(targetId);
+        taskIdBuffers.current.delete(targetId);
+      }
+      if (targetId) {
+        setSessions((all) => patchLast(all, targetId, (msg) => {
+          // 收尾取缓冲区与消息内容的较长者：避免真实回复被空 content 覆盖（"发消息没回复"）。
+          const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
+          const mergedTaskIds = Array.from(new Set([...(msg.taskIds ?? []), ...pendingTaskIds]));
+          return {
+            ...msg,
+            streaming: false,
+            error: !event.ok && Boolean(event.message),
+            taskIds: mergedTaskIds.length ? mergedTaskIds : undefined,
+            // 失败必显文案：气泡为空写完整错误；已有内容（如回落提示）在末尾追加错误详情。
+            content: !event.ok && event.message
+              ? (base ? `${base}\n\n请求失败：${event.message}` : `请求失败：${event.message}`)
+              : base
+          };
+        }));
+      }
+      if (targetId) {
+        setGeneratingIds((all) => all.filter((id) => id !== targetId));
+        sendingRef.current.delete(targetId);
+      }
+      if (!event.ok && event.message) onError(new Error(event.message));
+    });
+    // 智能体经 generate_video 建好任务：把卡片挂到对应会话正在流式的助手气泡上（否则任务只在工作台可见）。
+    const offTasks = window.h3.onLlmTasks((event) => {
+      const targetId = event.sessionId;
+      if (!targetId) return;
+      taskIdBuffers.current.set(targetId, [...(taskIdBuffers.current.get(targetId) ?? []), ...event.taskIds]);
+      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, taskIds: Array.from(new Set([...(msg.taskIds ?? []), ...event.taskIds])) })));
+    });
+    return () => { offChunk(); offDone(); offTasks(); };
+  }, []);
+  // 粘底自动滚动：仅在用户接近底部时跟随。
+  useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
+
+  // 会话回收站过期清理：启动时清除超过 7 天的已删除会话。
+  useEffect(() => {
+    const now = Date.now();
+    setSessions((all) => {
+      const kept = all.filter((s) => !s.deletedAt || now - new Date(s.deletedAt).getTime() <= 7 * 86_400_000);
+      return kept.length === all.length ? all : kept;
+    });
+  }, []);
+
+  function patchLast(all: PlaygroundSession[], id: string, patch: (msg: PlaygroundMessage) => PlaygroundMessage): PlaygroundSession[] {
+    return all.map((session) => session.id !== id ? session : { ...session, messages: session.messages.map((msg, i) => i === session.messages.length - 1 ? patch(msg) : msg) });
+  }
+
+  function newSession() {
+    const session: PlaygroundSession = { id: crypto.randomUUID(), title: "新对话", messages: [], createdAt: new Date().toISOString() };
+    setSessions((all) => [session, ...all]);
+    setActiveId(session.id);
+    setInput("");
+    setAttachments([]);
+  }
+
+  async function pickAttachment() {
+    const response = await window.h3.selectFile("image");
+    if (!response.data) return;
+    const payload = await window.h3.readAttachment(response.data);
+    if (!payload.data) { onError(new Error(payload.message || "读取附件失败")); return; }
+    if (payload.data.kind === "other") { onNotice(`已添加附件 ${payload.data.name}（此类型仅作为文件名提示发送）`); }
+    setAttachments((all) => [...all, { name: payload.data!.name, dataUrl: payload.data!.dataUrl, text: payload.data!.text }]);
+  }
+
+  async function send() {
+    const text = input.trim();
+    // generating 是异步 React state：同一 tick 内连发两次（快速连按 Enter）会双双读到 false，
+    // 于是重复落用户消息与空气泡、两条流抢同一个缓冲区。用 Set 做同步守卫（按会话粒度，不影响其它会话并发）。
+    const targetSessionId = active?.id;
+    if ((!text && attachments.length === 0) || (targetSessionId ? generatingIds.includes(targetSessionId) : false) || (targetSessionId ? sendingRef.current.has(targetSessionId) : false)) return;
+    if (!settings.llm.baseUrl) { onError(new Error("请先在连接设置中配置游乐场 LLM。")); return; }
+    // 无会话时先本地创建会话对象再继续（不 return），避免首条消息被丢弃。
+    let session = active;
+    if (!session) {
+      session = { id: crypto.randomUUID(), title: text.slice(0, 20) || "新对话", messages: [], createdAt: new Date().toISOString() };
+      setSessions((all) => [session as PlaygroundSession, ...all]);
+      setActiveId(session.id);
+    }
+    const sessionId = session.id;
+    sendingRef.current.add(sessionId);
+    const userImages = attachments.map((a) => a.dataUrl).filter((url): url is string => Boolean(url));
+    const extraText = attachments.map((a) => a.text ? `\n\n--- 附件 ${a.name} ---\n${a.text}` : `\n\n（附件：${a.name}）`).join("");
+    const userMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "user", content: text + extraText, images: userImages.length ? userImages : undefined };
+    const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: "", streaming: true };
+    const history: ChatMessage[] = [...(session.messages).filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })), { role: "user", content: userMsg.content, images: userMsg.images }];
+    setSessions((all) => all.map((s) => s.id === sessionId ? { ...s, title: s.messages.length === 0 && text ? text.slice(0, 20) : s.title, updatedAt: new Date().toISOString(), messages: [...s.messages, userMsg, assistantMsg] } : s));
+    setInput(""); setAttachments([]);
+    setGeneratingIds((all) => all.includes(sessionId) ? all : [...all, sessionId]);
+    streamBuffers.current.set(sessionId, "");
+    taskIdBuffers.current.delete(sessionId);
+    const result = await window.h3.chatLlm(history, webSearch, agentMode, sessionId, browserSearch);
+    if (!result.ok) {
+      setGeneratingIds((all) => all.filter((id) => id !== sessionId));
+      sendingRef.current.delete(sessionId);
+      setSessions((all) => patchLast(all, sessionId, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
+    }
+  }
+
+  async function stop() {
+    // 只中止当前会话；其它会话的生成不受影响（并发场景下不能连坐）。
+    await window.h3.abortLlm(activeId);
+    setGeneratingIds((all) => all.filter((id) => id !== activeId));
+    sendingRef.current.delete(activeId);
+    setSessions((all) => patchLast(all, activeId, (msg) => ({ ...msg, streaming: false })));
+  }
+
+  async function submitVideo() {
+    let session = active;
+    if (!session) {
+      session = { id: crypto.randomUUID(), title: "视频生成", messages: [], createdAt: new Date().toISOString() };
+      setSessions((all) => [session as PlaygroundSession, ...all]);
+      setActiveId(session.id);
+    }
+    const result = await window.h3.submitGeneration({ ...videoRequest, prompt: videoRequest.prompt || input.trim() });
+    if (!result.ok) { onError(result.message); return; }
+    const taskIds = result.data?.map((task) => task.id) ?? [];
+    const summary = `已提交视频生成（${backendLabel(videoRequest.backend)}${videoRequest.preset ? ` · ${rbPresetLabel(videoRequest.preset)}` : ""}）：${videoRequest.prompt.slice(0, 60)}${videoRequest.prompt.length > 60 ? "…" : ""}`;
+    const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: summary, taskIds };
+    const stamp = new Date().toISOString();
+    setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, updatedAt: stamp, messages: [...s.messages, { id: crypto.randomUUID(), role: "user" as const, content: `🎬 生成视频：${videoRequest.prompt.slice(0, 80)}` }, assistantMsg] } : s));
+    setShowVideoForm(false);
+    onNotice(`已创建 ${videoRequest.count} 个生成任务`);
+  }
+
+  const activeTasks = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+
+  // 会话回收站 + 分类：visibleSessions 只显示未删除会话；trashSessions 供回收站面板展示。
+  // 排序按最近使用倒序（刚发过消息的排最前），并发时正在生成的会话自然浮到顶部。
+  const visibleSessions = useMemo(() => {
+    const recency = (s: PlaygroundSession) => s.updatedAt || s.createdAt;
+    return sessions.filter((s) => !s.deletedAt).slice().sort((a, b) => recency(b).localeCompare(recency(a)));
+  }, [sessions]);
+  const trashSessions = useMemo(() => sessions.filter((s) => s.deletedAt), [sessions]);
+  const categories = useMemo(() => Array.from(new Set(visibleSessions.map((s) => s.category).filter((c): c is string => Boolean(c)))), [visibleSessions]);
+  const [sessionFilter, setSessionFilter] = useState<string>("全部");
+  const [showPgTrash, setShowPgTrash] = useState(false);
+  const [renamingId, setRenamingId] = useState<string>();
+  const [renameDraft, setRenameDraft] = useState("");
+  const filteredSessions = sessionFilter === "全部" ? visibleSessions : visibleSessions.filter((s) => s.category === sessionFilter);
+  const current = visibleSessions.find((s) => s.id === activeId);
+  // 当前会话被删除/过滤时自动落到列表第一个。
+  useEffect(() => {
+    if (activeId && !visibleSessions.some((s) => s.id === activeId)) setActiveId(visibleSessions[0]?.id || "");
+  }, [visibleSessions, activeId]);
+  function deleteSession(session: PlaygroundSession) {
+    // 正在生成时不允许删除（否则流事件会写进已被删掉的会话）。但必须给反馈——
+    // 早先这里是静默 return，用户点删除"毫无反应"，无从判断是坏了还是被拦了。
+    if (generatingIds.includes(session.id)) {
+      onNotice("该会话正在生成回复，请先点「停止」再删除。");
+      return;
+    }
+    setSessions((all) => all.map((s) => s.id === session.id ? { ...s, deletedAt: new Date().toISOString() } : s));
+    onNotice("会话已移入回收站，7 天内可恢复");
+  }
+  function restoreSession(session: PlaygroundSession) {
+    setSessions((all) => all.map((s) => s.id === session.id ? { ...s, deletedAt: undefined } : s));
+    setActiveId(session.id);
+  }
+  function purgeSession(session: PlaygroundSession) {
+    setSessions((all) => all.filter((s) => s.id !== session.id));
+  }
+  function commitRename() {
+    if (!renamingId) return;
+    const title = renameDraft.trim().slice(0, 40);
+    if (title) setSessions((all) => all.map((s) => s.id === renamingId ? { ...s, title } : s));
+    setRenamingId(undefined);
+  }
+  // 会话分类：同样改为内联输入（window.prompt 在 Electron 中不可用）。
+  const [catSessionId, setCatSessionId] = useState<string>();
+  const [catSessionDraft, setCatSessionDraft] = useState("");
+  function commitSessionCategory() {
+    if (!catSessionId) return;
+    const normalized = catSessionDraft.trim().slice(0, 20);
+    setSessions((all) => all.map((s) => s.id === catSessionId ? { ...s, category: normalized || undefined } : s));
+    setCatSessionId(undefined);
+  }
+
+  return <section className="page playground"><div className="page-title"><div><span className="eyebrow">PLAY</span><h1>游乐场</h1></div><button className="primary" onClick={newSession}>新对话</button></div>
+    <div className="playground-layout">
+      <aside className="pg-sessions">
+        <div className="pg-session-filter">
+          <button className={sessionFilter === "全部" ? "on" : ""} onClick={() => setSessionFilter("全部")}>全部</button>
+          {categories.map((c) => <button key={c} className={sessionFilter === c ? "on" : ""} onClick={() => setSessionFilter(c)}>{c}</button>)}
+          <button className={sessionFilter === "__trash" ? "on" : ""} onClick={() => setShowPgTrash(true)}>🗑 回收站{trashSessions.length > 0 ? ` (${trashSessions.length})` : ""}</button>
+        </div>
+        {filteredSessions.length === 0 && trashSessions.length === 0 && <p className="footnote">还没有对话。点击右上角"新对话"开始。</p>}
+        {filteredSessions.map((session) => <div key={session.id} className={`pg-session${session.id === activeId ? " active" : ""}${generatingIds.includes(session.id) ? " running" : ""}`}>
+          {renamingId === session.id
+            ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(undefined); }} onFocus={(e) => e.target.select()} />
+            : catSessionId === session.id
+            ? <input className="pg-rename" autoFocus value={catSessionDraft} placeholder="分类名（留空清除）" onChange={(e) => setCatSessionDraft(e.target.value)} onBlur={commitSessionCategory} onKeyDown={(e) => { if (e.key === "Enter") commitSessionCategory(); if (e.key === "Escape") setCatSessionId(undefined); }} onFocus={(e) => e.target.select()} />
+            : <button className="pg-session-body" onClick={() => setActiveId(session.id)} onDoubleClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }} title="双击重命名">
+              <strong>{session.title || "新对话"}</strong><small>{generatingIds.includes(session.id) ? "正在回复…" : `${session.messages.length} 条消息`}{session.category ? ` · ${session.category}` : ""}</small>
+            </button>}
+          <div className="pg-session-tools">
+            <button className="pg-tool" title="重命名" onClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }}>✎</button>
+            <button className="pg-tool" title="设置分类" onClick={() => { setCatSessionId(session.id); setCatSessionDraft(session.category || ""); }}>🏷</button>
+            <button className="pg-tool" title="删除会话（可在回收站恢复 7 天）" onClick={() => deleteSession(session)}>×</button>
+          </div>
+        </div>)}
+      </aside>
+      {showPgTrash && <PgTrashPanel sessions={trashSessions} onRestore={restoreSession} onPurge={purgeSession} onClose={() => setShowPgTrash(false)} retentionDays={7} />}
+      <div className="pg-main">
+        <div className="pg-messages">
+          {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
+            : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
+              {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
+              <div className="pg-bubble">{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}</div>
+              {msg.taskIds && msg.taskIds.length > 0 && <div className="result-grid pg-task-grid">{msg.taskIds.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} />)}</div>}
+            </div>)}
+          <div ref={bottomRef} />
+        </div>
+        <div className="pg-composer">
+          <div className="pg-chips">
+            <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => { if (!searchReady && !webSearch) { onNotice("未配置搜索 API，将用免 key 抓取 Bing/搜狗（稳定性一般）；可在「连接设置 → 联网搜索」配置 API 获得更可靠结果。"); } setWebSearch(!webSearch); if (!webSearch) setBrowserSearch(false); }}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
+            <button className={browserSearch ? "pg-chip on" : "pg-chip"} title="浏览器搜索：用应用自带的浏览器真实打开搜索页再读取结果（最接近人工浏览，结果质量最稳，速度稍慢）" onClick={() => { setBrowserSearch(!browserSearch); if (!browserSearch) setWebSearch(false); }}>🖥 浏览器搜索</button>
+            <button className={agentMode ? "pg-chip on" : "pg-chip"} title="智能体模式：AI 可自主联网搜索、直接帮你提交视频生成任务（Codex/Claude Code 形态的多步工具循环）" onClick={() => setAgentMode(!agentMode)}>🤖 智能体</button>
+            <button className={showVideoForm ? "pg-chip on" : "pg-chip"} onClick={() => setShowVideoForm(!showVideoForm)}>🎬 生成视频</button>
+            <button className="pg-chip" onClick={pickAttachment}>📎 附件</button>
+            <span className="pg-model">{settings.llm.model || "未配置模型"}{generating ? " · 生成中…" : ""}</span>
+            {generating && <button className="pg-chip stop" onClick={stop}>■ 停止</button>}
+          </div>
+          {showVideoForm && <div className="pg-video-form">
+            <div className="form-grid">
+              <label>生成后端<select value={videoRequest.backend} onChange={(e) => { const backend = e.target.value as BackendKind; const preset = undefined; setVideoRequest({ ...videoRequest, backend, preset, duration: clampDuration(videoRequest.duration, durationOptionsFor(backend, preset)) }); }}>{(["local", "ssh", "minimax", "rb"] as BackendKind[]).map((kind) => <option key={kind} value={kind}>{backendLabel(kind)}</option>)}</select></label>
+              {videoDurationOptions.length > 0 && <label>时长<select value={videoRequest.duration} onChange={(e) => setVideoRequest({ ...videoRequest, duration: Number(e.target.value) })}>{videoDurationOptions.map((x) => <option key={x} value={x}>{x} 秒</option>)}</select></label>}
+              <label>结果数量<select value={videoRequest.count} onChange={(e) => setVideoRequest({ ...videoRequest, count: Number(e.target.value) })}>{[1, 2, 3, 4].map((x) => <option key={x} value={x}>{x} 路</option>)}</select></label>
+            </div>
+            <label>视频描述（留空则使用下方聊天输入内容）<textarea rows={2} maxLength={MAX_PROMPT_LENGTH} value={videoRequest.prompt} onChange={(e) => setVideoRequest({ ...videoRequest, prompt: e.target.value })} /></label>
+            <button className="primary" onClick={submitVideo}>提交生成任务</button>
+          </div>}
+          {attachments.length > 0 && <div className="pg-attachments">{attachments.map((a, i) => <span key={i} className="pg-attachment">{a.dataUrl ? <img src={a.dataUrl} alt={a.name} /> : `📄 ${a.name}`}<button onClick={() => setAttachments((all) => all.filter((_, j) => j !== i))}>×</button></span>)}</div>}
+          <div className="pg-input-row">
+            <textarea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder={generating ? "AI 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
+            <button className="primary" disabled={generating || (!input.trim() && attachments.length === 0)} onClick={send}>{generating ? "回复中…" : "发送"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>;
+}
+
+function rbPresetLabel(preset: string): string {
+  return ({ reference: "贴合参考图", tail_frame: "首尾过渡", easy_15: "15 秒", easy_30: "30 秒", flashvsr_upscale: "视频变清晰" } as Record<string, string>)[preset] || preset;
+}
+
+// 各后端的合法时长档位。RB 预设自带约束：easy_15/30 固定时长，flashvsr 只收源视频（无时长），
+// reference/tail_frame 仅 4/6/8 秒。工作台与游乐场共用同一份定义——只改一处不会两边跑偏。
+function durationOptionsFor(backend: BackendKind, preset?: string): number[] {
+  if (backend !== "rb") return [4, 6, 8, 10, 12, 15];
+  if (preset === "easy_15") return [15];
+  if (preset === "easy_30") return [30];
+  if (preset === "flashvsr_upscale") return [];
+  return [4, 6, 8]; // reference / tail_frame
+}
+
+// 切换后端/预设后把时长夹回该后端的合法值域。不做这一步的话，UI 下拉会被浏览器归一化到
+// 第一个选项（看着像 4 秒），而 request.duration 仍是旧值，提交时才被 validateRequest 拒绝
+// （"视频时长必须在 4–15 秒之间"）——用户看到的下拉值与实际提交值不一致。
+// 对云后端更糟：非法的 seconds+preset 组合会真的发到服务端，失败也照样扣费。
+function clampDuration(duration: number, options: number[]): number {
+  if (options.length === 0 || options.includes(duration)) return duration;
+  return options.reduce((best, x) => (Math.abs(x - duration) < Math.abs(best - duration) ? x : best), options[0]);
+}
+
+// 游乐场会话回收站：悬浮面板展示已删除会话（保留 7 天），支持恢复 / 彻底删除。
+function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: {
+  sessions: PlaygroundSession[];
+  onRestore: (session: PlaygroundSession) => void;
+  onPurge: (session: PlaygroundSession) => void;
+  onClose: () => void;
+  retentionDays: number;
+}) {
+  const daysLeft = (iso: string) => Math.max(0, Math.ceil((retentionDays * 86_400_000 - (Date.now() - new Date(iso).getTime())) / 86_400_000));
+  return <div className="pg-trash-overlay" onClick={onClose}>
+    <section className="pg-trash" onClick={(e) => e.stopPropagation()}>
+      <header><strong>会话回收站</strong><small>删除的会话保留 {retentionDays} 天，到期自动清除</small><button className="text-button" onClick={onClose}>关闭</button></header>
+      {sessions.length === 0 && <p className="footnote">回收站是空的。</p>}
+      {sessions.map((session) => <article key={session.id} className="trash-item">
+        <div><strong>{session.title || "新对话"}</strong>
+          <small>{session.messages.length} 条消息 · {session.deletedAt ? `${daysLeft(session.deletedAt)} 天后自动清除` : ""}</small></div>
+        <div className="trash-actions">
+          <button className="text-button" onClick={() => onRestore(session)}>恢复</button>
+          <button className="text-button danger" onClick={() => onPurge(session)}>彻底删除</button>
+        </div>
+      </article>)}
+    </section>
+  </div>;
+}
+
 function FilePicker({ label, path, onClick }: { label: string; path?: string; onClick: () => void }) { return <button className={`file-picker ${path ? "picked" : ""}`} onClick={onClick}><span>{path ? "✓" : "+"}</span><strong>{label}</strong><small>{path ? path.split(/[\\/]/).pop() : "点击选择文件"}</small></button>; }
 function upsert<T extends { id: string }>(items: T[], item: T): T[] { const index=items.findIndex((x)=>x.id===item.id); if(index<0)return[item,...items];const copy=[...items];copy[index]=item;return copy; }
 async function must<T>(promise: Promise<ApiResponse<T>>): Promise<T> { const result=await promise;if(!result.ok)throw new Error(result.message||"操作失败");return result.data as T; }

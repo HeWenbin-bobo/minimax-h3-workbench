@@ -1,6 +1,9 @@
 export type BackendKind = "local" | "ssh" | "minimax" | "rb";
-export type SecretName = "minimaxApiKey" | "sshPassword" | "rbCardCode";
+export type SecretName = "minimaxApiKey" | "sshPassword" | "rbCardCode" | "llmApiKey" | "searchApiKey";
 export type GenerationMode = "text" | "image" | "video";
+
+/** 视频描述长度上限。工作台计数器、文本域 maxlength 与主进程校验共用同一来源，避免标称值与实际约束不一致。 */
+export const MAX_PROMPT_LENGTH = 2000;
 export type TaskStatus =
   | "draft"
   | "validating"
@@ -23,6 +26,18 @@ export interface AppSettings {
   rbBaseUrl: string;
   defaultBackend: BackendKind;
   minimaxBaseUrl: string;
+  /** 游乐场 LLM 配置：OpenAI 兼容接入（预设提供商或自定义）。对话端点不存储，运行时按域名推导。 */
+  llm: {
+    /** 预设提供商 id 或 "custom"。 */
+    provider: string;
+    baseUrl: string;
+    model: string;
+    systemPrompt: string;
+  };
+  /** 游乐场可选联网搜索（OpenAI 兼容搜索 API，如博查/Tavily 转接）。 */
+  searchApi: {
+    baseUrl: string;
+  };
   ssh: {
     name: string;
     host: string;
@@ -35,6 +50,16 @@ export interface AppSettings {
     remoteComfyPath: string;
   };
 }
+
+/** LLM 提供商预设（OpenAI 兼容）。对话端点由主进程按域名推导，预设只提供地址与默认模型。 */
+export const LLM_PROVIDERS = [
+  { id: "minimax", label: "MiniMax", baseUrl: "https://api.minimax.io/v1", model: "MiniMax-Text-01" },
+  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  { id: "zhipu", label: "智谱 GLM", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
+  { id: "moonshot", label: "月之暗面 Kimi", baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
+  { id: "ollama", label: "Ollama（本机）", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5" },
+  { id: "custom", label: "自定义（OpenAI 兼容）", baseUrl: "", model: "" }
+] as const;
 
 export interface GpuInfo {
   vendor: string;
@@ -89,6 +114,12 @@ export interface GenerationRequest {
   lastFramePath?: string;
   sourceImagePath?: string;
   sourceVideoPath?: string;
+  /** RB 后端专用：官网预设（reference/tail_frame/easy_15/easy_30/flashvsr_upscale）。 */
+  preset?: string;
+  /** RB 后端专用：是否补帧（仅 reference/tail_frame 支持）。 */
+  interpolate?: boolean;
+  /** RB 后端专用：采样步数（reference/tail_frame 可选 8/20）。 */
+  samplerSteps?: number;
 }
 
 export interface GenerationTask {
@@ -109,6 +140,10 @@ export interface GenerationTask {
   errorCode?: string;
   message?: string;
   request?: GenerationRequest; // 原始提交参数，失败/取消后用于一键重试
+  /** 回收站：非空表示已删除（软删除），7 天后被自动清除（含输出视频）。 */
+  deletedAt?: string;
+  /** 用户自定义项目分类（空 = 未分类；整组任务同值）。 */
+  category?: string;
   usage?: {
     inputSeconds?: number;
     outputSeconds?: number;
@@ -130,7 +165,9 @@ export interface GenerationAdapter {
     request: GenerationRequest,
     task: GenerationTask,
     onProgress: (status: TaskStatus, progress: number, message?: string) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /** 可选：云后端提交成功后立即回传 providerTaskId，让 orchestrator 在任务运行中也能通知云端取消（按次计费）。 */
+    onProviderId?: (providerTaskId: string) => void
   ): Promise<Pick<GenerationTask, "providerTaskId" | "outputPath" | "outputUrl" | "usage">>;
   cancel?(providerTaskId: string): Promise<void>;
 }
@@ -181,7 +218,78 @@ export interface WorkbenchApi {
   submitGeneration(request: GenerationRequest): Promise<ApiResponse<GenerationTask[]>>;
   cancelTask(taskId: string): Promise<ApiResponse<GenerationTask>>;
   retryTask(taskId: string): Promise<ApiResponse<GenerationTask>>;
+  /** 更新任务的分类标签（整组同值；空串 = 未分类）。 */
+  setTaskCategory(taskId: string, category: string): Promise<ApiResponse<GenerationTask[]>>;
+  /** 回收站：软删除任务（运行中的先取消），7 天内可恢复；传 parentId 可整组删除。 */
+  deleteTasks(taskIds: string[]): Promise<ApiResponse<GenerationTask[]>>;
+  /** 回收站：恢复软删除的任务（按 parentId 组恢复）。 */
+  restoreTasks(taskIds: string[]): Promise<ApiResponse<GenerationTask[]>>;
+  /** 回收站：彻底删除（含输出视频文件，仅限输出目录内）。 */
+  purgeTasks(taskIds: string[]): Promise<ApiResponse<GenerationTask[]>>;
+  /** 回收站：列出已删除任务（含剩余毫秒数由渲染端按 deletedAt 自算）。 */
+  listDeletedTasks(): Promise<ApiResponse<GenerationTask[]>>;
   showItem(filePath: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
+  /**
+   * 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。agent=true 走 AI SDK 工具循环。
+   * sessionId 由渲染端生成：不同会话可并发对话，事件按该 id 路由回各自的会话，互不串流。
+   * browserSearch=true 走「浏览器搜索」：只用应用自带 Chromium 渲染抓取（跳过搜索 API 与 HTTP 直抓），
+   * 与 webSearch 互斥。
+   */
+  chatLlm(messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch?: boolean): Promise<ApiResponse<boolean>>;
+  /** 智能体框架独立更新检查（npm registry 最新版 vs 打包版本）。 */
+  checkAgentFrameworkUpdate(): Promise<ApiResponse<{ bundledVersion: string; latestVersion?: string; updateAvailable: boolean; message: string }>>;
+  /** 中止指定会话的对话（省略则中止全部会话）。 */
+  abortLlm(sessionId?: string): Promise<ApiResponse<boolean>>;
+  /** 游乐场：从上游拉取模型列表（OpenAI 兼容 GET /models）；不支持的服务商返回 ok=false + 提示。 */
+  listLlmModels(): Promise<ApiResponse<{ ok: boolean; models: string[]; message: string }>>;
+  /** 游乐场：LLM 连接测试（发一条最小对话验证 Key/模型/端点全链路）。 */
+  testLlm(): Promise<ApiResponse<BackendTestResult>>;
+  /** 游乐场：读取本地附件为 data URL（图片）或文本内容。 */
+  readAttachment(path: string): Promise<ApiResponse<AttachmentPayload>>;
+  onLlmChunk(listener: (chunk: LlmStreamEvent) => void): () => void;
+  onLlmDone(listener: (event: LlmDoneEvent) => void): () => void;
+  /** 智能体工具经 generate_video 建好任务后推送任务 id：渲染端把卡片挂到当前会话气泡上。 */
+  onLlmTasks(listener: (event: LlmTasksEvent) => void): () => void;
   onTaskUpdate(listener: (task: GenerationTask) => void): () => void;
+}
+
+export type ChatRole = "user" | "assistant" | "system";
+
+/** 游乐场消息：文本内容 + 可选图片附件（data URL）。 */
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+  images?: string[];
+}
+
+/** 附件读取结果：图片转 data URL，文本类直接读内容，其他仅返回名称。 */
+export interface AttachmentPayload {
+  kind: "image" | "text" | "other";
+  name: string;
+  dataUrl?: string;
+  text?: string;
+}
+
+/** LLM 流式分块事件。 */
+export interface LlmStreamEvent {
+  /** 递增序号，渲染端用于去重与排序。 */
+  seq: number;
+  delta: string;
+  /** 发起该轮的会话 id：多会话并发时用于把分块路由回正确的会话。 */
+  sessionId?: string;
+}
+
+/** LLM 单轮流结束事件。 */
+export interface LlmDoneEvent {
+  ok: boolean;
+  message?: string;
+  /** 发起该轮的会话 id（老调用方可能不带，渲染端按"当前流式会话"兜底）。 */
+  sessionId?: string;
+}
+
+/** 智能体工具创建视频任务事件：渲染端据此把结果卡片挂到当前会话的助手气泡上（否则任务只在工作台可见）。 */
+export interface LlmTasksEvent {
+  taskIds: string[];
+  sessionId?: string;
 }

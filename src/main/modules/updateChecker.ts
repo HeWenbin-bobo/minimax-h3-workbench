@@ -5,11 +5,20 @@ export const UPDATE_REPO = "HeWenbin-bobo/minimax-h3-workbench";
 const LATEST_RELEASE_API = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
 const RELEASE_PREFIX = `https://github.com/${UPDATE_REPO}/releases/`;
 
+// 游乐场智能体框架（Vercel AI SDK）：随安装包分发（npm dependencies），
+// 但版本独立于应用本体的更新检查——应用不更新时框架也能独立提示新版本。
+export const AGENT_FRAMEWORK = "ai";
+
 interface GithubRelease {
   tag_name?: string;
   name?: string;
   html_url?: string;
   published_at?: string;
+}
+
+interface NpmPackageInfo {
+  version?: string;
+  "dist-tags"?: { latest?: string };
 }
 
 export async function checkForUpdates(
@@ -38,6 +47,35 @@ export async function checkForUpdates(
     releaseUrl: release.html_url,
     publishedAt: release.published_at
   };
+}
+
+/** 智能体框架独立更新检查：npm registry 最新版 vs 打包版本（应用本体不更新也可提示）。 */
+export async function checkFrameworkUpdate(
+  bundledVersion: string,
+  fetcher: typeof fetch = fetch
+): Promise<{ bundledVersion: string; latestVersion?: string; updateAvailable: boolean; message: string }> {
+  try {
+    // Accept 不能用 application/vnd.npm.install-v1+json：应用主进程环境实测稳定 406（裸 Node/裸 Electron 均 200，成因未明），通配即可。
+    const response = await fetcher(`https://registry.npmjs.org/${AGENT_FRAMEWORK}/latest`, {
+      headers: { Accept: "*/*", "User-Agent": `MiniMax-H3-Workbench/${bundledVersion}` },
+      signal: AbortSignal.timeout(10_000)
+    });
+    if (!response.ok) return { bundledVersion, updateAvailable: false, message: `框架更新检查失败（HTTP ${response.status}）。` };
+    const payload = (await response.json()) as NpmPackageInfo;
+    const latestVersion = normalizeVersion(payload.version || payload["dist-tags"]?.latest);
+    if (!latestVersion) return { bundledVersion, updateAvailable: false, message: "框架更新源未返回有效版本号。" };
+    const updateAvailable = compareVersions(latestVersion, bundledVersion) > 0;
+    return {
+      bundledVersion,
+      latestVersion,
+      updateAvailable,
+      message: updateAvailable
+        ? `智能体框架有新版本 v${latestVersion}（当前 v${bundledVersion}），更新应用时将一并升级。`
+        : `智能体框架已是最新（v${bundledVersion}）。`
+    };
+  } catch (error) {
+    return { bundledVersion, updateAvailable: false, message: error instanceof Error ? `框架更新检查失败：${error.message}` : "框架更新检查失败。" };
+  }
 }
 
 function normalizeVersion(value?: string): string | undefined {

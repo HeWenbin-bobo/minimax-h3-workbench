@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { WorkbenchApi } from "../shared/types";
+import type { LlmDoneEvent, LlmStreamEvent, LlmTasksEvent, WorkbenchApi } from "../shared/types";
 
 const invoke = <T>(channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args) as Promise<T>;
 
@@ -20,8 +20,22 @@ const api: WorkbenchApi = {
   submitGeneration: (request) => invoke("tasks:submit", request),
   cancelTask: (taskId) => invoke("tasks:cancel", taskId),
   retryTask: (taskId) => invoke("tasks:retry", taskId),
+  setTaskCategory: (taskId, category) => invoke("tasks:setCategory", { taskId, category }),
+  deleteTasks: (taskIds) => invoke("tasks:delete", taskIds),
+  restoreTasks: (taskIds) => invoke("tasks:restore", taskIds),
+  purgeTasks: (taskIds) => invoke("tasks:purge", taskIds),
+  listDeletedTasks: () => invoke("tasks:listDeleted"),
   showItem: (filePath) => invoke("shell:showItem", filePath),
   openExternal: (url) => invoke("shell:openExternal", url),
+  chatLlm: (messages, webSearch, agent, sessionId, browserSearch) => invoke("llm:chat", messages, webSearch, Boolean(agent), String(sessionId || ""), Boolean(browserSearch)),
+  checkAgentFrameworkUpdate: () => invoke("update:checkFramework"),
+  abortLlm: (sessionId) => invoke("llm:abort", sessionId),
+  readAttachment: (path) => invoke("attachment:read", path),
+  listLlmModels: () => invoke("llm:models"),
+  testLlm: () => invoke("llm:test"),
+  onLlmChunk: (listener) => subscribe<LlmStreamEvent>("llm:chunk", listener),
+  onLlmDone: (listener) => subscribe<LlmDoneEvent>("llm:done", listener),
+  onLlmTasks: (listener) => subscribe<LlmTasksEvent>("llm:tasks", listener),
   onTaskUpdate: (listener) => subscribe("task:update", listener)
 };
 

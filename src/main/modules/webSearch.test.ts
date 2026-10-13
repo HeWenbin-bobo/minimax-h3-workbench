@@ -1,0 +1,139 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseBing, parseSogou, searchWeb } from "./webSearch";
+
+afterEach(() => vi.unstubAllGlobals());
+
+// 真实结果页片段的精简版（保留解析依赖的结构与类名）。
+const bingHtml = `
+<html><body><ol id="b_results">
+<li class="b_algo"><h2><a href="https://news.cctv.com/tech/">科技新闻_央视网&ensp;(cctv.com)</a></h2><div><p>央视网科技频道以全球视角呈现最新科技资讯。</p></div></li>
+<li class="b_algo"><h2><a href="https://example.com/a">今日十大科技新闻</a></h2><p>6月27日，某公司正式推出预览版。</p></li>
+</ol></body></html>`;
+
+const sogouHtml = `
+<html><body>
+<h3 class="vr-title"><a href="/link?url=abc123">科技时事要闻</a></h3>
+<h3 class="vr-title"><a href="https://www.kj.cn/x">快科技</a></h3>
+</body></html>`;
+
+describe("parseBing", () => {
+  it("抽出标题/链接/摘要，并解掉 &ensp; 与内嵌标签", () => {
+    const items = parseBing(bingHtml);
+    expect(items).toHaveLength(2);
+    expect(items[0]).toEqual({
+      url: "https://news.cctv.com/tech/",
+      title: "科技新闻_央视网 (cctv.com)",
+      snippet: "央视网科技频道以全球视角呈现最新科技资讯。"
+    });
+    expect(items[1].url).toBe("https://example.com/a");
+  });
+
+  it("结构不符时返回空数组（不抛错，交给上层换源）", () => {
+    expect(parseBing("<html><body>没有结果</body></html>")).toEqual([]);
+  });
+});
+
+describe("parseSogou", () => {
+  it("抽出标题并补全相对链接；摘要缺失时留空", () => {
+    const items = parseSogou(sogouHtml);
+    expect(items).toHaveLength(2);
+    expect(items[0]).toEqual({ url: "https://www.sogou.com/link?url=abc123", title: "科技时事要闻", snippet: "" });
+    expect(items[1].url).toBe("https://www.kj.cn/x");
+  });
+});
+
+describe("searchWeb", () => {
+  it("配置了搜索 API 时优先用它，不碰免 key 抓取", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      expect(url).toBe("https://search.test/search");
+      return new Response(JSON.stringify({ results: [{ title: "T", url: "https://x", snippet: "S" }] }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const text = await searchWeb("查询", { apiBaseUrl: "https://search.test", apiKey: "k" });
+    expect(text).toContain("[1] T");
+    expect(text).toContain("https://x");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // 未配置搜索 API 时回落到免 key 直抓：这是本次新增链路。
+  it("未配置搜索 API 时回落抓取 Bing 并返回可读结果", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("bing.com")) return new Response(bingHtml, { status: 200 });
+      throw new Error(`不该请求：${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const text = await searchWeb("今日科技新闻", {});
+    expect(text).toContain("[1] 科技新闻_央视网 (cctv.com)");
+    expect(text).toContain("https://news.cctv.com/tech/");
+    expect(fetchMock).toHaveBeenCalledTimes(1); // Bing 有结果就不再打搜狗
+  });
+
+  it("Bing 无结果时自动换搜狗", async () => {
+    const seen: string[] = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      seen.push(url.includes("sogou.com") ? "sogou" : "bing");
+      return new Response(url.includes("sogou.com") ? sogouHtml : "<html>空</html>", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const text = await searchWeb("查询", {});
+    expect(seen).toEqual(["bing", "sogou"]);
+    expect(text).toContain("科技时事要闻");
+  });
+
+  // 根因回归：实测纯 fetch 拿到的 Bing 页面常是"降级 SERP"——查 iPhone 价格却返回 Apple 官网/百科
+  // 这类泛化结果（0/6 相关），而浏览器渲染稳定拿到正确结果（京东商品页，6/6 相关）。
+  // 旧顺序把 HTTP 放前面且"非空即成功"，导致准确的渲染结果永远轮不到执行 → 智能体"查不到价格"。
+  it("注入 renderHtml 时，浏览器渲染优先于 HTTP 抓取", async () => {
+    const fetchMock = vi.fn(async () => new Response(bingHtml, { status: 200 })); // HTTP 也能返回结果
+    vi.stubGlobal("fetch", fetchMock);
+    const renderCalls: string[] = [];
+    const text = await searchWeb("京东 iPhone 价格", {
+      renderHtml: async (url: string) => { renderCalls.push(url); return bingHtml; }
+    });
+    expect(renderCalls).toHaveLength(1);
+    expect(renderCalls[0]).toContain("bing.com");
+    expect(fetchMock).not.toHaveBeenCalled(); // 渲染成功就不该再退回 HTTP
+    expect(text).toContain("科技新闻_央视网 (cctv.com)");
+  });
+
+  it("浏览器渲染全部失败时才退回 HTTP 抓取", async () => {
+    const fetchMock = vi.fn(async () => new Response(sogouHtml, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const text = await searchWeb("查询", {
+      renderHtml: async () => { throw new Error("渲染不可用"); }
+    });
+    expect(fetchMock).toHaveBeenCalled();
+    expect(text).toContain("科技时事要闻");
+  });
+
+  // 「浏览器搜索」可选联网项：只允许 Chromium 渲染，明确跳过 API 与 HTTP 直抓。
+  it("browserOnly 时跳过已配置的搜索 API，只用浏览器渲染", async () => {
+    const fetchMock = vi.fn(async () => { throw new Error("browserOnly 不该走 HTTP/API"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const renderUrls: string[] = [];
+    const text = await searchWeb("查询", {
+      apiBaseUrl: "https://search.test",
+      apiKey: "k",
+      renderHtml: async (url: string) => { renderUrls.push(url); return bingHtml; },
+      browserOnly: true
+    });
+    expect(renderUrls).toHaveLength(1);
+    expect(renderUrls[0]).toContain("bing.com");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(text).toContain("科技新闻_央视网 (cctv.com)");
+  });
+
+  it("browserOnly 且渲染失败时报错，不给降级 HTTP 结果", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(bingHtml, { status: 200 })));
+    await expect(searchWeb("查询", { renderHtml: async () => { throw new Error("渲染挂了"); }, browserOnly: true }))
+      .rejects.toThrow(/浏览器搜索未取到结果/);
+  });
+
+  it("全部来源失败时抛中文错误并指引配置搜索 API", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("blocked", { status: 403 })));
+    await expect(searchWeb("查询", {})).rejects.toThrow(/免 key 搜索未取到结果[\s\S]*配置搜索 API/);
+  });
+});

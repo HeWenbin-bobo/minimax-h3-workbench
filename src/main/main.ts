@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -14,14 +14,18 @@ import {
 } from "electron";
 import { AdapterRegistry } from "./backends/adapterRegistry";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
-import type { ApiResponse, AppSettings, BackendKind, GenerationRequest, SecretName } from "../shared/types";
+import { describeError, isNetworkError } from "../shared/errors";
+import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmDoneEvent, LlmStreamEvent, LlmTasksEvent, SecretName } from "../shared/types";
 import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
+import { LlmService, chatAgent } from "./modules/llmService";
 import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
-import { checkForUpdates } from "./modules/updateChecker";
+import { checkForUpdates, checkFrameworkUpdate } from "./modules/updateChecker";
+import { renderHtml, clearBrowserFetchCache } from "./modules/browserFetch";
+import { searchWeb } from "./modules/webSearch";
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "h3media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
@@ -32,8 +36,18 @@ let adapters: AdapterRegistry | undefined;
 let settingsCache: AppSettings | undefined; // 模块级：h3media/showItem 白名单与 registerIpc 共享
 
 app.whenReady().then(async () => {
+  // E2E/多实例隔离：H3_USER_DATA 指定独立 userData 目录（settings/secrets/tasks 全随隔离）。
+  if (process.env.H3_USER_DATA) app.setPath("userData", path.resolve(process.env.H3_USER_DATA));
   const settingsStore = new SettingsStore();
   void settingsStore.get().then((s) => { settingsCache = s; });
+
+  adapters = new AdapterRegistry(settingsStore);
+  const orchestrator = new GenerationOrchestrator(
+    new TaskStore(),
+    adapters,
+    (task) => mainWindow?.webContents.send("task:update", task)
+  );
+  await orchestrator.initialize();
   // h3media 只允许读取输出目录内的生成结果，防止渲染进程借协议读任意本地文件。
   const allowedMediaRoot = async () => path.resolve((settingsCache ?? await settingsStore.get()).outputDirectory);
 
@@ -44,19 +58,23 @@ app.whenReady().then(async () => {
     const mediaRoot = await allowedMediaRoot();
     // path.relative 为空或以 .. 开头 = 目标不在根内；用分隔符判断避免 "C:\out2" 误匹配 "C:\out" 前缀。
     const relative = path.relative(mediaRoot, resolved);
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    const outside = !relative || relative.startsWith("..") || path.isAbsolute(relative);
+    // 用户改过输出目录后，历史结果仍留在原目录——按任务记录放行，否则整个历史都变成打不开的死链。
+    if (outside && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) {
       return new Response("Path outside output directory", { status: 403 });
     }
     return net.fetch(pathToFileURL(resolved).toString());
   });
 
-  adapters = new AdapterRegistry(settingsStore);
-  const orchestrator = new GenerationOrchestrator(
-    new TaskStore(),
-    adapters,
-    (task) => mainWindow?.webContents.send("task:update", task)
-  );
-  await orchestrator.initialize();
+  // 回收站过期清理：删除超过 7 天的任务，连同输出目录内的视频文件一并清除（安全删除白名单内）。
+  void orchestrator.purgeExpired(async (filePath) => {
+    const settings = await settingsStore.get();
+    const resolved = path.resolve(filePath);
+    const root = path.resolve(settings.outputDirectory);
+    const relative = path.relative(root, resolved);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return; // 仅限输出目录内
+    await unlink(resolved).catch(() => undefined);
+  });
   registerIpc(settingsStore, adapters, orchestrator);
   mainWindow = createWindow();
   await loadApp(mainWindow);
@@ -100,7 +118,7 @@ app.on("activate", () => {
   }
 });
 
-app.on("before-quit", () => adapters?.close());
+app.on("before-quit", () => { adapters?.close(); void clearBrowserFetchCache(); });
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -136,16 +154,101 @@ function registerIpc(
   registry: AdapterRegistry,
   orchestrator: GenerationOrchestrator
 ): void {
+  // 智能体视频工具的兜底参数（具体 prompt/时长/数量由模型经工具入参给定）。
+  // backend 在回调里按用户当前设置的 defaultBackend 填——不能写死（写死 rb 会让没买瞬映卡密的用户必然失败）。
+  const initialAgentVideoRequest: Omit<GenerationRequest, "backend"> = {
+    mode: "text",
+    prompt: "",
+    duration: 4,
+    ratio: "16:9",
+    resolution: "768P",
+    width: 1280,
+    height: 720,
+    count: 1,
+    baseSeed: 1
+  };
+  const backendKindLabel = (kind: BackendKind) => kind === "local" ? "本机 ComfyUI" : kind === "ssh" ? "SSH 远程显卡" : kind === "rb" ? "瞬映 RB" : "MiniMax H3";
+  // 游乐场 LLM：按会话各建一个服务实例，互不干扰；流式分块经 llm:chunk 推送（带 sessionId），结束经 llm:done 推送。
+  // 早期是单例 + 全局并发守卫，导致"一个会话在回复时其它会话完全不能发消息"；改为按会话隔离后天然支持并发。
+  let llm: LlmService | undefined; // 共享实例：仅用于 llm:test / llm:models 这类无状态探测
+  const sessionServices = new Map<string, LlmService>();
+  const sessionAborters = new Map<string, AbortController>();
+  const rebuildLlm = async (): Promise<LlmService> => {
+    const settings = await settingsStore.get();
+    llm = new LlmService({
+      baseUrl: settings.llm.baseUrl,
+      apiKey: await settingsStore.getSecret("llmApiKey"),
+      model: settings.llm.model,
+      systemPrompt: settings.llm.systemPrompt,
+      searchBaseUrl: settings.searchApi.baseUrl || undefined,
+      searchApiKey: await settingsStore.getSecret("searchApiKey"),
+      searchRenderHtml: renderHtml
+    });
+    return llm;
+  };
+  // 会话级服务实例：同一会话内复用（LlmService.busy 只挡"同一会话"的并发），Key/地址变更后由 invalidate 清理重建。
+  const serviceForSession = async (sessionId: string): Promise<LlmService> => {
+    const existing = sessionServices.get(sessionId);
+    if (existing) return existing;
+    const settings = await settingsStore.get();
+    const service = new LlmService({
+      baseUrl: settings.llm.baseUrl,
+      apiKey: await settingsStore.getSecret("llmApiKey"),
+      model: settings.llm.model,
+      systemPrompt: settings.llm.systemPrompt,
+      searchBaseUrl: settings.searchApi.baseUrl || undefined,
+      searchApiKey: await settingsStore.getSecret("searchApiKey"),
+      searchRenderHtml: renderHtml
+    });
+    sessionServices.set(sessionId, service);
+    return service;
+  };
+  const invalidateLlmSessions = () => {
+    llm = undefined;
+    sessionServices.clear();
+  };
+  const sendChunk = (event: LlmStreamEvent) => mainWindow?.webContents.send("llm:chunk", event);
+  const sendDone = (event: LlmDoneEvent) => mainWindow?.webContents.send("llm:done", event);
+  // 智能体工具建好任务后推送任务 id：游乐场把卡片挂到对应会话气泡上。
+  const sendLlmTasks = (event: LlmTasksEvent) => mainWindow?.webContents.send("llm:tasks", event);
+  // LLM 连接测试（cc-switch 模式）：拉模型列表验证连通性——不发对话（不花钱），
+  // 不受对话端点路径差异影响；/models 不通的服务商回退发一条最小对话。
+  handle("llm:test", async () => {
+    const service = await rebuildLlm();
+    const start = Date.now();
+    const settings = await settingsStore.get();
+    try {
+      const models = await service.listModels();
+      if (models.ok) {
+        return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: settings.llm.model }, message: `连接成功（${Date.now() - start}ms），上游返回 ${models.models.length} 个模型。` };
+      }
+      // /models 不支持：回退发一条最小对话验证全链路（Key+模型名+端点）。
+      let streamed = "";
+      await service.chat([{ role: "user", content: "回复一个字：好" }], false, (event) => { streamed += event.delta; });
+      if (!streamed.trim()) throw new Error("服务商未返回内容，请检查模型名称。");
+      return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: settings.llm.model }, message: `连接成功，模型已回复（${Date.now() - start}ms；该服务商不支持模型列表，走的对话验证）。` };
+    } catch (error) {
+      return { ok: false, label: "游乐场 LLM", latencyMs: Date.now() - start, details: {}, message: describeError(error, "连接失败") };
+    }
+  });
+  // 从上游拉取模型列表（OpenAI 兼容 GET /models）；需先保存 Key。
+  handle("llm:models", async () => {
+    const service = await rebuildLlm();
+    return service.listModels();
+  });
+
   handle("settings:get", () => settingsStore.get());
   handle("settings:update", async (_event, patch: Partial<AppSettings>) => {
     const next = await settingsStore.update(patch);
     settingsCache = next; // 同步刷新 h3media/showItem 白名单缓存，改输出目录后新结果立即可预览
     registry.invalidate(next);
+    invalidateLlmSessions(); // LLM 配置可能已变，下一次对话按新配置重建
     return next;
   });
   handle("secret:set", async (_event, name: SecretName, value: string) => {
     await settingsStore.setSecret(name, value);
     registry.invalidate();
+    invalidateLlmSessions(); // Key 可能已变，下一次对话按新 Key 重建
     return true;
   });
   handle("secret:has", (_event, name: SecretName) => settingsStore.hasSecret(name));
@@ -167,6 +270,11 @@ function registerIpc(
     return inspectEnvironment(settings.localComfyUrl, settings.outputDirectory);
   });
   handle("update:check", () => checkForUpdates(app.getVersion()));
+  // 智能体框架独立更新检查：应用本体不更新时也报告框架新版本。
+  handle("update:checkFramework", async () => {
+    const { frameworkVersion } = await import("../shared/agentVersion.js");
+    return checkFrameworkUpdate(frameworkVersion);
+  });
   handle("update:download-install", async () => {
     await downloadAndInstall();
     return true;
@@ -178,19 +286,190 @@ function registerIpc(
   handle("tasks:submit", (_event, request: GenerationRequest) => orchestrator.submit(request));
   handle("tasks:cancel", (_event, id: string) => orchestrator.cancel(id));
   handle("tasks:retry", (_event, id: string) => orchestrator.retry(id));
+  handle("tasks:setCategory", (_event, payload: { taskId: string; category: string }) =>
+    orchestrator.setCategory(payload?.taskId || "", String(payload?.category || "")));
+  // 回收站：删除（软）→ 恢复 → 彻底清除。彻底删除的文件同样只允许输出目录内。
+  handle("tasks:delete", (_event, ids: string[]) => orchestrator.deleteTasks(Array.isArray(ids) ? ids : []));
+  handle("tasks:restore", (_event, ids: string[]) => orchestrator.restoreTasks(Array.isArray(ids) ? ids : []));
+  handle("tasks:listDeleted", () => orchestrator.listDeleted());
+  handle("tasks:purge", async (_event, ids: string[]) => {
+    const settings = await settingsStore.get();
+    const safeDelete = async (filePath: string) => {
+      const resolved = path.resolve(filePath);
+      const root = path.resolve(settings.outputDirectory);
+      const relative = path.relative(root, resolved);
+      if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return; // 仅限输出目录内
+      await unlink(resolved).catch(() => undefined);
+    };
+    return orchestrator.purgeTasks(Array.isArray(ids) ? ids : [], safeDelete);
+  });
+  // 游乐场：流式对话（异步跑完，期间 llm:chunk/llm:done 推送）、中断、附件读取。
+  // agent 模式走 AI SDK 工具循环（web_search / generate_video），普通聊天走原路径零回归。
+  handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch: boolean) => {
+    // sessionId 由渲染端生成；缺失时退化成一次性的匿名会话（老调用方兼容），不再共用全局单例。
+    // browserSearch=true 是「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取，与 webSearch 互斥。
+    const browserOnly = Boolean(browserSearch) && !webSearch;
+    const session = typeof sessionId === "string" && sessionId ? sessionId : `anon-${Math.random().toString(36).slice(2)}`;
+    const service = await serviceForSession(session);
+    // 同一会话不允许并发（会往同一个气泡里写两股流）；不同会话各自独立，可同时生成。
+    if (sessionAborters.has(session) || service.busy) throw new Error("该会话的上一轮回复还在进行中，请先停止或等待完成。");
+    const chunk = (event: LlmStreamEvent) => sendChunk({ ...event, sessionId: session });
+    const done = (event: LlmDoneEvent) => sendDone({ ...event, sessionId: session });
+    if (!agent) {
+      void service.chat(messages, webSearch || browserOnly, chunk, browserOnly)
+        .then(() => done({ ok: true }))
+        .catch((error: unknown) => {
+          // 用户主动停止（abort）不算错误：正常收尾，不显示红色报错。
+          const aborted = error instanceof DOMException && error.name === "AbortError";
+          done({ ok: aborted, message: aborted ? undefined : describeError(error, "对话失败") });
+        });
+      return true;
+    }
+    // 智能体模式：AI SDK 多步工具循环。视频工具直接接 orchestrator（提交即返回任务 ID，卡片实时刷新）。
+    // 工具支持自动检测：模型不支持工具调用（0 文本 + 0 工具调用）或 agent 路径异常但尚未输出任何内容时，
+    // 自动用相同消息回落普通对话（runtime fallback）——避免出现"又是空回复"且对用户透明。
+    // agent 不走 LlmService，绕过了它的 busy 检查，故这里按会话登记取消器并挡住同会话并发。
+    const controller = new AbortController();
+    sessionAborters.set(session, controller);
+    void (async () => {
+      const settings = await settingsStore.get();
+      let agentSent = 0;
+      let agentTaskCount = 0; // 本轮已建任务数：非 0 时不得整轮重试（否则会重复建任务）
+      const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
+      const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
+      const agentOptions = {
+        baseUrl: settings.llm.baseUrl,
+        apiKey: await settingsStore.getSecret("llmApiKey"),
+        model: settings.llm.model,
+        systemPrompt: settings.llm.systemPrompt,
+        searchBaseUrl: settings.searchApi.baseUrl || undefined,
+        searchApiKey: await settingsStore.getSecret("searchApiKey")
+      };
+      const agentCallbacks = {
+        // 与普通对话共用同一条搜索链路：配了搜索 API 就优先用它，未配置则回落免 key 抓取 Bing/搜狗。
+        // browserOnly（「浏览器搜索」联网项）时只用 Chromium 渲染，跳过 API 与 HTTP 直抓。
+        webSearch: async (query: string) => searchWeb(query, {
+          apiBaseUrl: settings.searchApi.baseUrl || undefined,
+          apiKey: await settingsStore.getSecret("searchApiKey"),
+          renderHtml,
+          browserOnly
+        }, controller.signal),
+        generateVideo: async (params: { prompt: string; duration: number; count: number }) => {
+          const request: GenerationRequest = {
+            ...initialAgentVideoRequest,
+            // 跟随用户当前默认后端；不写死（写死 rb 会让没配瞬映卡密的用户必然失败）。
+            backend: settings.defaultBackend,
+            prompt: params.prompt,
+            duration: Math.max(4, Math.min(15, Math.round(params.duration || 4))),
+            count: Math.max(1, Math.min(4, Math.round(params.count || 1))),
+            baseSeed: Math.floor(Math.random() * 1_000_000)
+          };
+          const response = await orchestrator.submit(request);
+          // 把新任务 id 推给渲染端：对应会话气泡下直接挂结果卡片（工具文案承诺了"卡片将在下方实时显示"）。
+          sendTasks(response.map((task) => task.id));
+          return `已创建 ${response.length} 个视频生成任务（${backendKindLabel(request.backend)}·${request.duration} 秒），卡片将在下方实时显示进度，也可到「生成工作台」查看。`;
+        }
+      };
+      let result: { textLength: number; toolCalls: number } | undefined;
+      let agentError: unknown;
+      let attempts = 0;
+      // 整轮重试：智能体是多步工具循环，而 SDK 的 maxRetries 只覆盖"首个请求"——
+      // 后续步骤（或重试那一次本身）撞上中转偶发 ECONNRESET 时，整轮会被一个抖动打挂，
+      // 随即回落普通对话、视频生成意图就丢了。实测该中转的连接重置属低频偶发，
+      // 所以"整轮再来一次"是有效且低成本的兜底；仅当尚未产出任何内容/任务时才重试，
+      // 避免重复落消息、重复建任务。
+      while (attempts < 2) {
+        attempts += 1;
+        try {
+          // 「浏览器搜索」也要暴露 web_search 工具：enableWebSearch 是"本轮允许联网"的总开关，
+          // browserOnly 只是改变搜索的执行方式（只用 Chromium 渲染）。漏传会导致工具不暴露，
+          // 模型只能凭训练知识回答"该商品尚未发布"——UI 实测抓到的就是这个 bug。
+          result = await chatAgent(agentOptions, messages, agentCallbacks, agentSend, controller.signal, webSearch || browserOnly);
+          break;
+        } catch (error) {
+          if (controller.signal.aborted) { done({ ok: true }); return; }
+          agentError = error;
+          const retryable = attempts === 1 && agentSent === 0 && agentTaskCount === 0 && isNetworkError(error);
+          if (!retryable) break;
+        }
+      }
+      if (!result) {
+        // 已经出过内容就不能再补发普通对话（会与已流出的文本拼接成两份回答）。
+        if (agentSent > 0) throw agentError;
+        // 到此说明整轮重试后仍未成功（或本就不该重试）：如实报出原因再回落——
+        // 原因可能是上游 5xx、连接重置、也可能服务商拒绝带 tools 的请求；统一说成
+        // "模型不支持工具"会误导用户去换模型。（真"不支持工具"走下面全 0 分支，不抛错。）
+        const reason = describeError(agentError, "智能体请求失败");
+        chunk({ seq: 1, delta: `（智能体模式请求失败：${reason}，已自动改用普通对话模式）\n\n` });
+        await service.chat(messages, webSearch || browserOnly, chunk, browserOnly);
+        done({ ok: true });
+        return;
+      }
+      if (agentSent === 0 && result.textLength === 0 && result.toolCalls === 0) {
+        // 模型走了 agent 路径但没出文本也没出工具调用——基本就是不支持函数调用。自动回落普通对话。
+        chunk({ seq: 1, delta: "（当前模型不支持工具调用，已自动改用普通对话模式）\n\n" });
+        await service.chat(messages, webSearch || browserOnly, chunk, browserOnly);
+        done({ ok: true });
+        return;
+      }
+      if (agentSent === 0 && result.toolCalls > 0) {
+        // 工具调成功了（任务卡片已经推给渲染端）但模型没再输出收尾文本：不能留空气泡让用户看到"（空回复）"。
+        chunk({ seq: 1, delta: "已按你的要求创建视频生成任务，结果卡片在下方实时显示，也可到「生成工作台」查看。" });
+      }
+      done({ ok: true });
+    })().catch((error: unknown) => {
+      const aborted = controller.signal.aborted;
+      done({ ok: aborted, message: aborted ? undefined : describeError(error, "智能体对话失败") });
+    }).finally(() => {
+      // 收尾必摘：不摘的话该会话的取消器一直占着，同会话的并发守卫从此永久拒绝新对话。
+      sessionAborters.delete(session);
+    });
+    return true;
+  });
+  // 取消：给了 sessionId 就只中止该会话（多会话并发时不能连坐），否则中止全部。
+  handle("llm:abort", async (_event, sessionId?: string) => {
+    if (sessionId) {
+      sessionAborters.get(sessionId)?.abort();
+      sessionServices.get(sessionId)?.abort();
+      return true;
+    }
+    for (const controller of sessionAborters.values()) controller.abort();
+    for (const service of sessionServices.values()) service.abort();
+    return true;
+  });  handle("attachment:read", async (_event, filePath: string) => {
+    if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
+    const extension = path.extname(filePath).toLowerCase();
+    const name = path.basename(filePath);
+    // 附件大小上限：图片 15MB、文本 2MB——base64 进内存且随 IPC 传输，超大文件会卡死渲染端。
+    const info = await stat(filePath).catch(() => undefined);
+    if (!info?.isFile()) throw new Error("附件不存在或不是文件。");
+    if ([".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(extension)) {
+      if (info.size > 15 * 1024 * 1024) throw new Error("图片附件超过 15MB 上限，请压缩后再上传。");
+      const mime = extension === ".png" ? "image/png" : extension === ".webp" ? "image/webp" : extension === ".gif" ? "image/gif" : "image/jpeg";
+      return { kind: "image", name, dataUrl: `data:${mime};base64,${(await readFile(filePath)).toString("base64")}` };
+    }
+    if ([".txt", ".md", ".json", ".csv", ".srt", ".vtt", ".log"].includes(extension)) {
+      if (info.size > 2 * 1024 * 1024) throw new Error("文本附件超过 2MB 上限，请只粘贴相关片段。");
+      return { kind: "text", name, text: (await readFile(filePath, "utf8")).slice(0, 100_000) };
+    }
+    return { kind: "other", name };
+  });
   handle("shell:showItem", async (_event, filePath: string) => {
     if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
-    // 与 h3media 同类防护：只允许在输出目录或 ComfyUI 模型目录内定位文件/文件夹。
+    // 与 h3media 同类防护：只允许在输出目录、ComfyUI 模型目录或本应用产出过的结果路径内定位。
     const settings = await settingsStore.get();
     const roots = [settings.outputDirectory, settings.comfyuiRoot]
       .filter((value): value is string => Boolean(value))
       .map((value) => path.resolve(value));
     const resolved = path.resolve(filePath);
-    const allowed = roots.some((rootDir) => {
+    const insideRoot = roots.some((rootDir) => {
       const rel = path.relative(rootDir, resolved);
       return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
     });
-    if (!allowed) throw new Error("只能打开输出目录或 ComfyUI 模型目录中的位置。");
+    // 同 h3media：改过输出目录后，历史结果仍应能"在文件夹中显示"。
+    if (!insideRoot && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) {
+      throw new Error("只能打开输出目录或 ComfyUI 模型目录中的位置。");
+    }
     shell.showItemInFolder(resolved);
     return true;
   });
@@ -200,6 +479,23 @@ function registerIpc(
     await shell.openExternal(url);
     return true;
   });
+}
+
+// h3media / showItem 白名单的补充放行集合：本应用自己产出过的结果路径。
+// 用户改过输出目录后，历史结果仍留在旧目录；只认当前目录会让历史视频全部变成打不开的死链。
+// 安全性不降：放行的只是任务记录里记着的、由本应用写出的文件，渲染端仍无法随意读本地文件。
+function knownOutputPaths(orchestrator: GenerationOrchestrator): Set<string> {
+  const paths = new Set<string>();
+  for (const task of [...orchestrator.list(), ...orchestrator.listDeleted()]) {
+    if (task.outputPath) paths.add(normalizeForCompare(task.outputPath));
+  }
+  return paths;
+}
+
+// Windows 路径大小写不敏感：统一小写再比对，避免同一文件因盘符/目录大小写不同被判越界。
+function normalizeForCompare(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function handle<TArgs extends unknown[], TResult>(
@@ -215,7 +511,7 @@ function handle<TArgs extends unknown[], TResult>(
         ok: false,
         requestId,
         errorCode: "OPERATION_FAILED",
-        message: error instanceof Error ? error.message : "操作失败",
+        message: describeError(error, "操作失败"),
         retryable: true
       };
     }

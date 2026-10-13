@@ -10,6 +10,15 @@ const defaultSettings = (): AppSettings => ({
   rbBaseUrl: "https://rb.coolhs.com",
   defaultBackend: "local",
   minimaxBaseUrl: "https://api.minimax.io",
+  llm: {
+    provider: "minimax",
+    baseUrl: "https://api.minimax.io/v1",
+    model: "MiniMax-Text-01",
+    systemPrompt: ""
+  },
+  searchApi: {
+    baseUrl: ""
+  },
   ssh: {
     name: "远程显卡",
     host: "",
@@ -41,6 +50,8 @@ export class SettingsStore {
         rbBaseUrl: typeof raw.rbBaseUrl === "string" && raw.rbBaseUrl ? raw.rbBaseUrl : defaults.rbBaseUrl,
         defaultBackend,
         minimaxBaseUrl: raw.minimaxBaseUrl || defaults.minimaxBaseUrl,
+        llm: { ...defaults.llm, ...(raw.llm ?? {}) },
+        searchApi: { ...defaults.searchApi, ...(raw.searchApi ?? {}) },
         ssh: { ...defaults.ssh, ...(raw.ssh ?? {}) }
       };
     } catch {
@@ -56,7 +67,9 @@ export class SettingsStore {
       ssh: patch.ssh ? { ...current.ssh, ...patch.ssh } : current.ssh
     };
     await this.atomicWrite(this.filePath, next);
-    return next;
+    // 回读而非直接返回 next：get() 会做归一化（非法 defaultBackend 落到 local、未知字段被丢弃），
+    // 直接返回 next 会让"保存后立刻读回"拿到与磁盘不同的值，渲染端据此渲染就会用到脏状态。
+    return this.get();
   }
 
   async setSecret(name: SecretName, value: string): Promise<void> {

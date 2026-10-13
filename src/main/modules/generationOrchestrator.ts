@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { describeError } from "../../shared/errors";
 import type { GenerationRequest, GenerationTask, TaskStatus } from "../../shared/types";
+import { MAX_PROMPT_LENGTH } from "../../shared/types";
 import { AdapterRegistry } from "../backends/adapterRegistry";
 import { TaskStore } from "./taskStore";
 
@@ -8,6 +10,9 @@ type TaskListener = (task: GenerationTask) => void;
 export class GenerationOrchestrator {
   private tasks: GenerationTask[] = [];
   private readonly controllers = new Map<string, AbortController>();
+  // 任务历史上限。TaskStore 落盘时的截断只是防御；真正的淘汰在这里按「项目整组」做——
+  // 按条数硬截会切断项目组（4 路只剩 2 路），且内存态不裁剪会让 UI 显示得出来、重启后凭空少一批。
+  static readonly MAX_TASKS = 200;
 
   constructor(
     private readonly store: TaskStore,
@@ -20,7 +25,115 @@ export class GenerationOrchestrator {
   }
 
   list(): GenerationTask[] {
-    return [...this.tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    // 回收站中的任务不进常规列表（渲染端经 tasks:listDeleted 单独获取）。
+    return [...this.tasks].filter((task) => !task.deletedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  // 历史淘汰：超过上限时按项目整组丢掉最旧的组（不切断组内 4 路），并同步内存态。
+  // 回收站中的任务不参与淘汰——它们归 purgeExpired 的 7 天保留策略管，
+  // 否则"删除后 7 天内可恢复"的承诺会被容量淘汰悄悄打破。
+  private trimHistory(): void {
+    const active = this.tasks.filter((task) => !task.deletedAt);
+    if (active.length <= GenerationOrchestrator.MAX_TASKS) return;
+    const byGroup = new Map<string, GenerationTask[]>();
+    for (const task of active) {
+      const group = byGroup.get(task.parentId);
+      if (group) group.push(task); else byGroup.set(task.parentId, [task]);
+    }
+    // 组按最新任务时间倒序（新组在前），从头累积到放不下为止，其余整组丢弃。
+    const newestOf = (group: GenerationTask[]) => group.reduce((max, task) => (task.createdAt > max ? task.createdAt : max), "");
+    const groups = Array.from(byGroup.values()).sort((a, b) => newestOf(b).localeCompare(newestOf(a)));
+    const keep = new Set<string>();
+    let total = 0;
+    for (const group of groups) {
+      // 第一组无论多大都保留，避免上限被设得过小时把项目全清空。
+      if (keep.size > 0 && total + group.length > GenerationOrchestrator.MAX_TASKS) break;
+      for (const task of group) keep.add(task.id);
+      total += group.length;
+    }
+    this.tasks = this.tasks.filter((task) => task.deletedAt || keep.has(task.id));
+  }
+
+  // 回收站：软删除（运行中的先取消）→ 7 天内可恢复 → 到期彻底清除（含输出视频）。
+  static readonly RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+
+  async deleteTasks(taskIds: string[]): Promise<GenerationTask[]> {
+    const ids = new Set(taskIds);
+    const affected: GenerationTask[] = [];
+    for (const task of this.tasks) {
+      if (!ids.has(task.id) || task.deletedAt) continue;
+      // 整组语义：删任一路即删整组（UI 以项目为单位）。
+      const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
+      for (const sibling of siblings) {
+        if (sibling.deletedAt) continue;
+        sibling.deletedAt = new Date().toISOString();
+        if (!["succeeded", "failed", "cancelled", "interrupted"].includes(sibling.status)) {
+          sibling.message = "已删除（生成中止）";
+          await this.cancel(sibling.id).catch(() => undefined);
+        }
+        affected.push(sibling);
+      }
+    }
+    await this.store.save(this.tasks);
+    affected.forEach(this.listener);
+    return affected;
+  }
+
+  async restoreTasks(taskIds: string[]): Promise<GenerationTask[]> {
+    const ids = new Set(taskIds);
+    const affected: GenerationTask[] = [];
+    for (const task of this.tasks) {
+      if (!ids.has(task.id) || !task.deletedAt) continue;
+      const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
+      for (const sibling of siblings) {
+        if (!sibling.deletedAt) continue;
+        delete sibling.deletedAt;
+        affected.push(sibling);
+      }
+    }
+    await this.store.save(this.tasks);
+    affected.forEach(this.listener);
+    return affected;
+  }
+
+  async purgeTasks(taskIds: string[], deleteFile?: (path: string) => Promise<void>): Promise<GenerationTask[]> {
+    const ids = new Set(taskIds);
+    const affected: GenerationTask[] = [];
+    const groupIds = new Set(this.tasks.filter((t) => ids.has(t.id) && t.deletedAt).map((t) => t.parentId));
+    for (const task of this.tasks.filter((t) => groupIds.has(t.parentId) && t.deletedAt)) {
+      if (task.outputPath && deleteFile) await deleteFile(task.outputPath).catch(() => undefined);
+      this.tasks = this.tasks.filter((t) => t.id !== task.id);
+      affected.push(task);
+    }
+    await this.store.save(this.tasks);
+    return affected;
+  }
+
+  listDeleted(): GenerationTask[] {
+    return [...this.tasks].filter((task) => task.deletedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** 设置项目分类：整组同值（空串 = 未分类）。 */
+  async setCategory(taskId: string, category: string): Promise<GenerationTask[]> {
+    const task = this.tasks.find((entry) => entry.id === taskId);
+    if (!task) throw new Error("任务不存在。");
+    const normalized = category.trim().slice(0, 20);
+    const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
+    for (const sibling of siblings) sibling.category = normalized || undefined;
+    await this.store.save(this.tasks);
+    siblings.forEach(this.listener);
+    return siblings;
+  }
+
+  /** 启动时清理：回收站中超过 7 天的任务连同输出视频一并清除；返回被清除的输出路径。 */
+  async purgeExpired(deleteFile?: (path: string) => Promise<void>): Promise<string[]> {
+    const now = Date.now();
+    const expired = this.tasks.filter((t) => t.deletedAt && now - new Date(t.deletedAt).getTime() > GenerationOrchestrator.RETENTION_MS);
+    const files = expired.map((t) => t.outputPath).filter((p): p is string => Boolean(p));
+    if (expired.length > 0) {
+      await this.purgeTasks(expired.map((t) => t.id), deleteFile);
+    }
+    return files;
   }
 
   async submit(request: GenerationRequest): Promise<GenerationTask[]> {
@@ -44,6 +157,7 @@ export class GenerationOrchestrator {
       request
     }));
     this.tasks.unshift(...created);
+    this.trimHistory();
     await this.store.save(this.tasks);
     created.forEach(this.listener);
 
@@ -77,6 +191,7 @@ export class GenerationOrchestrator {
       request: task.request
     };
     this.tasks.unshift(created);
+    this.trimHistory();
     await this.store.save(this.tasks);
     this.listener({ ...created });
     void runPool([created], request.backend === "minimax" ? 2 : 1, (item) => this.runTask(request, item));
@@ -86,6 +201,10 @@ export class GenerationOrchestrator {
   async cancel(taskId: string): Promise<GenerationTask> {
     const task = this.tasks.find((entry) => entry.id === taskId);
     if (!task) throw new Error("任务不存在。");
+    // 已到终态就原样返回：再走一遍会抹掉失败原因（"请先保存 API Key" → "已取消"），
+    // 对已成功的任务更糟——状态被翻成"已取消"，成片在界面上消失、只留一条假的中止记录。
+    // UI 不给终态任务取消入口，但 tasks:cancel 是一条可达 IPC。
+    if (["succeeded", "failed", "cancelled", "interrupted"].includes(task.status)) return { ...task };
     // 先打终态标记：排队任务据此跳过执行，运行中任务据此把 AbortError 归为取消而非失败。
     task.status = "cancelled";
     task.message = "已取消";
@@ -117,7 +236,12 @@ export class GenerationOrchestrator {
         request,
         task,
         (status, progress, message) => this.update(task, status, progress, message),
-        controller.signal
+        controller.signal,
+        (providerTaskId) => {
+          // 云后端提交成功即回传 ID：中途取消时 cancel()/abort 监听才能通知云端终止（云任务按次计费）。
+          task.providerTaskId = providerTaskId;
+          void this.store.save(this.tasks);
+        }
       );
       Object.assign(task, result);
       // cancel() 会在另一个调用栈把 status 改写为 cancelled；generate 若仍返回则不覆盖终态。
@@ -149,6 +273,16 @@ export class GenerationOrchestrator {
 }
 
 function validateRequest(request: GenerationRequest): void {
+  // 长度上限在工作台/游乐场 UI 已由 maxlength 挡住，但 IPC 与智能体工具是可达入口：
+  // 不在这里兜住的话，超长提示词会被真的塞进云端请求体。
+  if ((request.prompt?.length ?? 0) > MAX_PROMPT_LENGTH) {
+    throw new Error(`视频描述不能超过 ${MAX_PROMPT_LENGTH} 字。`);
+  }
+  if (request.backend === "rb") {
+    // RB 预设自带时长约束（easy_15/30 固定，flashvsr 只收视频）；prompt 仅 flashvsr 不需要。
+    if (request.preset !== "flashvsr_upscale" && !request.prompt?.trim()) throw new Error("请输入视频描述。");
+    return;
+  }
   if (!request.prompt?.trim()) throw new Error("请输入视频描述。");
   if (request.duration < 4 || request.duration > 15) throw new Error("视频时长必须在 4–15 秒之间。");
   if (request.mode === "image" && !request.sourceImagePath && !request.firstFramePath) {
@@ -171,5 +305,5 @@ async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => 
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : "生成失败，请检查连接与参数。";
+  return describeError(error, "生成失败，请检查连接与参数。");
 }

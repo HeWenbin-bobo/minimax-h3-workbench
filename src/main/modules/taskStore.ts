@@ -39,7 +39,11 @@ export class TaskStore {
   private async write(tasks: GenerationTask[]): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     const temporary = `${this.filePath}.tmp`;
-    await writeFile(temporary, JSON.stringify(tasks.slice(0, 200), null, 2), { mode: 0o600 });
+    // 这里不按条数截断：淘汰归 GenerationOrchestrator.trimHistory 管（按项目整组淘汰，
+    // 且刻意让回收站任务不参与计数以保住"7 天可恢复"承诺）。此处再硬截一次会与那套策略打架——
+    // 实测内存 300 条（200 在役 + 100 回收站）只落盘 200 条，重启后 100 条任务凭空消失。
+    // 体积上界由 trimHistory（在役 ≤200）与 purgeExpired（回收站 7 天）共同约束。
+    await writeFile(temporary, JSON.stringify(tasks, null, 2), { mode: 0o600 });
     await rename(temporary, this.filePath);
   }
 }

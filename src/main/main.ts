@@ -311,8 +311,9 @@ function registerIpc(
   // agent 模式走 AI SDK 工具循环（web_search / generate_video），普通聊天走原路径零回归。
   handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch: boolean) => {
     // sessionId 由渲染端生成；缺失时退化成一次性的匿名会话（老调用方兼容），不再共用全局单例。
-    // browserSearch=true 是「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取，与 webSearch 互斥。
-    const browserOnly = Boolean(browserSearch) && !webSearch;
+    // browserSearch=true 是「浏览器搜索」联网项：只用应用自带 Chromium 渲染抓取。
+    // 与 webSearch 同开时浏览器渲染优先（实测渲染结果质量最稳）；只关掉浏览器搜索时才用 API/HTTP 链路。
+    const browserOnly = Boolean(browserSearch);
     const session = typeof sessionId === "string" && sessionId ? sessionId : `anon-${Math.random().toString(36).slice(2)}`;
     const service = await serviceForSession(session);
     // 同一会话不允许并发（会往同一个气泡里写两股流）；不同会话各自独立，可同时生成。

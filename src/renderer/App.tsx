@@ -511,9 +511,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // HTML 产物侧栏预览（WorkBuddy 形态）：文件卡片「预览」触发，产物落盘 userData/artifacts/。
   const [preview, setPreview] = useState<ArtifactInfo>();
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
-  const [webSearch, setWebSearch] = useState(false);
+  const [webSearch, setWebSearch] = useState(true);
   // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
-  const [browserSearch, setBrowserSearch] = useState(false);
+  const [browserSearch, setBrowserSearch] = useState(true);
   // 智能体默认开启（用户指令）；模型不支持工具时主进程自动回落普通对话，前端无感。
   const [agentMode, setAgentMode] = useState(true);
   // generating 从"全局"改为"按会话"：多会话可并发生成，每个会话各有自己的发送守卫与流缓冲。
@@ -794,8 +794,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         {preview && <PgPreviewPanel artifact={preview} onClose={() => setPreview(undefined)} />}
         <div className="pg-composer">
           <div className="pg-chips">
-            <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => { if (!searchReady && !webSearch) { onNotice("未配置搜索 API，将用免 key 抓取 Bing/搜狗（稳定性一般）；可在「连接设置 → 联网搜索」配置 API 获得更可靠结果。"); } setWebSearch(!webSearch); if (!webSearch) setBrowserSearch(false); }}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
-            <button className={browserSearch ? "pg-chip on" : "pg-chip"} title="浏览器搜索：用应用自带的浏览器真实打开搜索页再读取结果（最接近人工浏览，结果质量最稳，速度稍慢）" onClick={() => { setBrowserSearch(!browserSearch); if (!browserSearch) setWebSearch(false); }}>🖥 浏览器搜索</button>
+            <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => setWebSearch(!webSearch)}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
+            <button className={browserSearch ? "pg-chip on" : "pg-chip"} title="浏览器搜索：用应用自带的浏览器真实打开搜索页再读取结果（最接近人工浏览，结果质量最稳，速度稍慢）；与「联网」同开时优先用浏览器渲染" onClick={() => setBrowserSearch(!browserSearch)}>🖥 浏览器搜索</button>
             <button className={agentMode ? "pg-chip on" : "pg-chip"} title="智能体模式：AI 可自主联网搜索、直接帮你提交视频生成任务（Codex/Claude Code 形态的多步工具循环）" onClick={() => setAgentMode(!agentMode)}>🤖 智能体</button>
             <button className={showVideoForm ? "pg-chip on" : "pg-chip"} onClick={() => setShowVideoForm(!showVideoForm)}>🎬 生成视频</button>
             <button className="pg-chip" onClick={pickAttachment}>📎 附件</button>

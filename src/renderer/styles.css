@@ -343,9 +343,10 @@ button { cursor: pointer; }
 .pg-artifact-name small { color: #8b93a5; font-size: 11px; }
 .pg-artifact-card button { background: transparent; border: 1px solid var(--line); color: var(--cyan); border-radius: 8px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
 .pg-artifact-card button:hover { border-color: var(--cyan); }
-/* 预览面板平时隐藏，点「预览」时从右侧滑出（mount 时播放一次滑入动画）。 */
+/* 预览面板覆盖整个软件右侧（fixed 定位到窗口右缘），而非嵌在聊天区里——聊天区有固定宽度，
+   嵌在里面预览会被挤成文字下方一条，达不到 WorkBuddy 的整屏分栏效果。 */
 @keyframes pg-preview-in { from { transform: translateX(40px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-.pg-preview { display: flex; flex-direction: column; width: 62%; min-width: 480px; border-left: 1px solid var(--line); background: #0e1117; animation: pg-preview-in 0.22s ease-out; }
+.pg-preview { position: fixed; top: 0; right: 0; bottom: 0; z-index: 60; display: flex; flex-direction: column; width: 62%; min-width: 480px; border-left: 1px solid var(--line); background: #0e1117; box-shadow: -12px 0 32px rgba(0, 0, 0, 0.45); animation: pg-preview-in 0.22s ease-out; }
 .pg-preview-bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
 .pg-preview-tab { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 12px; background: #141821; border: 1px solid var(--line); border-bottom: none; border-radius: 8px 8px 0 0; align-self: flex-end; margin-bottom: -1px; }
 .pg-preview-actions { display: flex; gap: 4px; }

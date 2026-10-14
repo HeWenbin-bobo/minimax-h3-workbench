@@ -924,6 +924,10 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   }
+  // 点「预览」即自动聚焦沙箱：不点一下 iframe 内部，方向键全被宿主聊天区吃掉——
+  // 贪吃蛇类键盘游戏就没法直接玩（用户实测）。mount 后把焦点送进 iframe。
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  useEffect(() => { frameRef.current?.focus(); }, []);
   return <aside className="pg-preview" style={{ width }}>
     <div className="pg-preview-drag" onMouseDown={onDragStart} title="拖动调整宽度" />
     <div className="pg-preview-bar">
@@ -934,7 +938,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
         <button className="pg-tool" title="关闭预览" onClick={onClose}>×</button>
       </span>
     </div>
-    <iframe key={nonce} className="pg-preview-frame" sandbox="allow-scripts" srcDoc={artifact.html} title={artifact.name} />
+    <iframe key={nonce} ref={frameRef} className="pg-preview-frame" sandbox="allow-scripts" srcDoc={artifact.html} title={artifact.name} />
   </aside>;
 }
 

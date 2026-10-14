@@ -550,9 +550,10 @@ function registerIpc(
 async function saveArtifactFile(sessionId: string, name: string, content: string, kind: string): Promise<{ name: string; path: string; size: number }> {
   const extByKind: Record<string, string> = { html: ".html", csv: ".csv", tsv: ".tsv", md: ".md", xlsx: ".xlsx" };
   const ext = extByKind[kind] || ".html";
-  const safeName = path.basename(String(name || `artifact${ext}`)).replace(/[\\/:*?"<>|]/g, "_") || `artifact${ext}`;
-  if (!Object.values(extByKind).some((allowed) => safeName.toLowerCase().endsWith(allowed))) {
-    throw new Error(`不支持的产物类型：${kind}`);
+  // 工具路径模型常传不带扩展名的名字（如"上海出行建议"）——按 kind 自动补齐，否则白名单校验误拒。
+  let safeName = path.basename(String(name || "")).replace(/[\\/:*?"<>|]/g, "_").trim();
+  if (!safeName || !Object.values(extByKind).some((allowed) => safeName.toLowerCase().endsWith(allowed))) {
+    safeName = `${safeName || "artifact"}${ext}`;
   }
   const dir = path.join(app.getPath("userData"), "artifacts", path.basename(String(sessionId || "unknown")));
   await mkdir(dir, { recursive: true });

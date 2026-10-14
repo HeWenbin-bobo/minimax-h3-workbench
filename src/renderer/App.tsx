@@ -888,9 +888,10 @@ function extractArtifact(content: string): { kind: ArtifactKind; content: string
   const fences = [...content.matchAll(/```(\w*)\n([\s\S]*?)```/g)];
   for (const [, lang, body] of fences) {
     const code = body.trim();
-    if (/^(csv|tsv)$/i.test(lang)) {
+    if (/^(csv|tsv|xlsx|excel)$/i.test(lang)) {
       // CSV/TSV 围栏要有结构化数据的样子（≥2 行且含分隔符），排除随手贴的单行文本。
-      const sep = lang.toLowerCase() === "tsv" ? "\t" : ",";
+      // xlsx/excel 别名：create_file 工具成功后回注的围栏用模型调用的 kind 命名，可能标成 xlsx。
+      const sep = /tsv/i.test(lang) ? "\t" : ",";
       if (code.split("\n").length >= 2 && code.includes(sep)) return { kind: "sheet", content: code };
     }
     if (/^(markdown|docx|doc)$/i.test(lang)) return { kind: "doc", content: code };

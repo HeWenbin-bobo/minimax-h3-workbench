@@ -803,7 +803,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
               {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
-              <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <div className="pg-tool-steps">{msg.toolSteps.map((step, i) => <div key={i} className="pg-tool-step">{step}</div>)}</div>}{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
+              <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <PgToolSteps steps={msg.toolSteps} running={Boolean(msg.streaming)} />}{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
                 // 消息含完整 HTML 产物时给「预览」按钮（Artifacts 式侧栏）。流式未结束先不亮，避免半截 HTML。
                 const html = msg.role === "assistant" && !msg.streaming ? extractHtmlArtifact(msg.content) : undefined;
                 return html && <PgArtifactCard html={html} sessionId={activeId} onPreview={setPreview} onError={onError} />;
@@ -936,6 +936,21 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
     </div>
     <iframe key={nonce} className="pg-preview-frame" sandbox="allow-scripts" srcDoc={artifact.html} title={artifact.name} />
   </aside>;
+}
+
+/** 工具调用步骤日志（可折叠）：生成中默认展开（实时透明），完成后默认折叠为一行摘要——对标 WorkBuddy，
+ * 执行细节收起来，气泡里只剩最终回答与产物文件；点摘要可随时展开回看全过程。 */
+function PgToolSteps({ steps, running }: { steps: string[]; running: boolean }) {
+  const [open, setOpen] = useState(false);
+  // streaming 期间强制展开（实时过程可见）；结束后用户自己控制折叠。
+  const expanded = running ? true : open;
+  const last = steps[steps.length - 1] || "";
+  return <div className="pg-tool-steps-wrap">
+    {!running && <button className="pg-tool-steps-toggle" onClick={() => setOpen((v) => !v)} title={expanded ? "收起执行过程" : "展开执行过程"}>
+      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {steps.length} 步工具调用<span className="pg-tool-steps-last">· {last.length > 40 ? `${last.slice(0, 40)}…` : last}</span>
+    </button>}
+    {expanded && <div className="pg-tool-steps">{steps.map((step, i) => <div key={i} className="pg-tool-step">{step}</div>)}</div>}
+  </div>;
 }
 
 function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: {

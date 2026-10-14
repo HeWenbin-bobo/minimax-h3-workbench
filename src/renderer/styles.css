@@ -364,6 +364,13 @@ button { cursor: pointer; }
 @keyframes pg-blink { 50% { opacity: 0; } }
 .pg-task-grid { margin-top: 10px; }
 
+/* 工具步骤折叠摘要条（WorkBuddy 形态）：完成后默认折叠为一行，点开回看全过程。 */
+.pg-tool-steps-wrap { margin-bottom: 6px; }
+.pg-tool-steps-toggle { display: flex; align-items: center; gap: 6px; width: 100%; background: rgba(122, 39, 255, 0.06); border: 0; border-radius: 8px; padding: 5px 10px; font-size: 11px; color: var(--muted); cursor: pointer; text-align: left; }
+.pg-tool-steps-toggle:hover { background: rgba(122, 39, 255, 0.12); }
+.pg-tool-steps-arrow { color: var(--cyan); font-size: 10px; }
+.pg-tool-steps-last { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle); }
+
 /* 智能体多步工具调用日志：气泡内逐条显示"→ 正在搜索：…" / "✓ 搜索完成（找到 6 条结果）"。
    多步循环此前完全黑屏（实测一轮 15–25 秒），用户只能看光标空闪——透明化整个过程。 */
 .pg-tool-steps {

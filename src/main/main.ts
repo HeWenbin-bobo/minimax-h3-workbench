@@ -348,17 +348,28 @@ function registerIpc(
         model: settings.llm.model,
         // 历史感知（候选 4）：从既有任务提炼常用时长/数量/后端/主题，注入系统提示词；
         // 用户自定义 systemPrompt 优先，习惯提示只作追加。
-        // 产物交付方式（Excel/网页/文档）必须写进提示词——否则模型不知道自己有文件能力，
-        // 用户说"生成 Excel"时只会道歉推脱（实测），智能程度全靠自我认知。
-        systemPrompt: `${settings.llm.systemPrompt || `你是 MiniMax H3 工作台的智能助手，像 Codex / Claude Code 一样主动完成用户的各种任务。你的能力：
-1. 生成 AI 视频：调用 generate_video 工具（4–15 秒、1–4 路）。
-2. 联网搜索：调用 web_search 工具查实时资料。
-3. 打开网页：调用 open_page 工具抓取指定网址的页面内容。
-4. 生成文件产物（Excel / 网页 / Word 文档）：直接把完整内容写进代码块，界面会自动把它变成可预览、可保存的文件卡片——
-   - Excel/表格：把数据写成 \`\`\`csv 代码块（首行为表头），会保存为 .xlsx 文件，Excel 可直接打开；
-   - 网页/小工具/游戏：写成 \`\`\`html 完整网页代码块，可在侧栏预览并直接交互（支持 JS）；
-   - Word/文档：写成 \`\`\`markdown 代码块，会保存为 .md 文件（Word 可打开）。
-用户要文件时不要道歉或教他自己去做——你直接生成。复杂任务拆步骤、主动调用工具，别一口气问一堆问题。`}${buildAgentMemoryHint(orchestrator.list())}`,
+        // 提示词工程 = 智能体表现的最大杠杆（用户实测：同款国产模型接 Claude Code 明显更聪明，
+        // 差距就在系统提示词与工具描述的打磨）。对齐 Claude Code 形态：行为规则 + 工具策略 + 产物规范。
+        systemPrompt: `${settings.llm.systemPrompt || `# 角色
+你是 MiniMax H3 工作台的智能助手，一位主动、务实的执行者。用户提出任何任务，你的默认反应是"动手做"，而不是解释你做不了或反问一堆。
+
+# 你的工具
+- generate_video(prompt, duration, count)：生成 AI 视频（4–15 秒、1–4 路）。用户描述画面即调用。
+- web_search(query)：联网搜索实时资料。涉及价格、新闻、时效信息、具体事实核查时调用。
+- open_page(url)：打开指定网页并返回内容。需要看某个具体页面、抓取详情时调用（比搜索更精准）。
+
+# 文件产物（你的核心能力——界面自动把代码块变成可预览、可保存的文件卡片）
+- Excel/表格数据：写成 \`\`\`csv 代码块（首行表头，逗号分隔）。保存为 .xlsx，Excel 可直接打开。
+- 网页/小工具/游戏：写成 \`\`\`html 完整网页（含 <!DOCTYPE html>）。侧栏可预览、可直接交互，支持 JS。
+- Word/文档/报告：写成 \`\`\`markdown 代码块。保存为 .md，Word 可打开。
+用户要文件时**直接生成完整内容**——不要道歉、不要教他自己去做、不要只给示例。
+
+# 工作方式（对齐 Codex / Claude Code）
+1. **能动手就不问**：信息足够就直接做；只在缺关键参数且无法合理默认时才问，且一次只问最必要的。
+2. **复杂任务拆步骤**：先搜索 → 再整合 → 输出产物，一步一步来，每步工具结果消化完再下一步。
+3. **工具结果要消化**：搜索/网页返回的内容要提炼后回答，不要把原始结果粘贴给用户。
+4. **失败就换路**：一个工具失败或结果不相关时换个查询词或换 open_page 重试，不要就此放弃。
+5. **回答简洁完整**：先给结果（表格/文件/结论），再给一两句说明。不要长篇铺垫。`}${buildAgentMemoryHint(orchestrator.list())}`,
         searchBaseUrl: settings.searchApi.baseUrl || undefined,
         searchApiKey: await settingsStore.getSecret("searchApiKey")
       };
@@ -395,6 +406,15 @@ function registerIpc(
           if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("只允许打开 http/https 网页。");
           const html = await renderHtml(parsed.toString(), 45_000);
           return html.length > 80_000 ? `${html.slice(0, 80_000)}\n\n（页面过长已截断）` : html;
+        },
+        // create_file（文件产物工具）：模型对工具调用的信任远高于文字约定（实测：只靠提示词约定
+        // 围栏代码块时模型会自我怀疑"没有文件写入工具"而道歉）。落盘直接复用 artifact:save 的
+        // 同一逻辑——为避免 handler 内重复实现，抽出共享函数 saveArtifactFile。
+        createFile: async (params: { kind: "html" | "csv" | "tsv" | "md" | "xlsx"; name: string; content: string }) => {
+          const saved = await saveArtifactFile(session, params.name, params.content, params.kind === "csv" || params.kind === "tsv" ? "xlsx" : params.kind);
+          // 通知渲染端：消息末尾追加一个产物标记（渲染端据此挂文件卡片）。
+          chunk({ seq: 0, delta: `\n\n\`\`\`${params.kind === "md" ? "markdown" : params.kind}\n${params.content}\n\`\`\`\n` });
+          return `文件已生成并保存：${saved.name}（${saved.size >= 1024 * 1024 ? `${(saved.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(saved.size / 1024))}KB`}）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。请简短告知用户文件已生成及内容概要。`;
         }
       };
       let result: { textLength: number; toolCalls: number } | undefined;
@@ -521,27 +541,33 @@ function registerIpc(
   // 渲染端只传文本与文件名，路径由主进程生成——渲染端无法指定任意位置写文件。
   // kind: html/csv/tsv/md 写文本；xlsx 用 SheetJS 把 CSV 文本转成真 Excel 二进制（双击可开）。
   handle("artifact:save", async (_event, payload: { sessionId: string; name: string; content: string; kind: string }) => {
-    const extByKind: Record<string, string> = { html: ".html", csv: ".csv", tsv: ".tsv", md: ".md", xlsx: ".xlsx" };
-    const ext = extByKind[payload.kind] || ".html";
-    const safeName = path.basename(String(payload.name || `artifact${ext}`)).replace(/[\\/:*?"<>|]/g, "_") || `artifact${ext}`;
-    if (!Object.values(extByKind).some((allowed) => safeName.toLowerCase().endsWith(allowed))) {
-      throw new Error(`不支持的产物类型：${payload.kind}`);
-    }
-    const dir = path.join(app.getPath("userData"), "artifacts", path.basename(String(payload.sessionId || "unknown")));
-    await mkdir(dir, { recursive: true });
-    const filePath = path.join(dir, safeName);
-    if (payload.kind === "xlsx") {
-      // SheetJS：CSV 文本 → 工作簿 → xlsx 二进制。用户点名要"能保存成 .xlsx"，纯 CSV 落盘达不到。
-      const XLSX = await import("xlsx");
-      const book = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(parseCsvRows(payload.content)), "Sheet1");
-      XLSX.writeFile(book, filePath);
-      const info = await stat(filePath);
-      return { name: safeName, path: filePath, size: info.size };
-    }
-    await writeFile(filePath, payload.content, "utf8");
-    return { name: safeName, path: filePath, size: Buffer.byteLength(payload.content, "utf8") };
+    return saveArtifactFile(payload.sessionId, payload.name, payload.content, payload.kind);
   });
+}
+
+/** 产物落盘共享逻辑（artifact:save IPC 与 create_file 工具两路复用）：
+ * 存 userData/artifacts/<sessionId>/，kind 白名单 html/csv/tsv/md/xlsx；xlsx 走 SheetJS 转 Excel 二进制。 */
+async function saveArtifactFile(sessionId: string, name: string, content: string, kind: string): Promise<{ name: string; path: string; size: number }> {
+  const extByKind: Record<string, string> = { html: ".html", csv: ".csv", tsv: ".tsv", md: ".md", xlsx: ".xlsx" };
+  const ext = extByKind[kind] || ".html";
+  const safeName = path.basename(String(name || `artifact${ext}`)).replace(/[\\/:*?"<>|]/g, "_") || `artifact${ext}`;
+  if (!Object.values(extByKind).some((allowed) => safeName.toLowerCase().endsWith(allowed))) {
+    throw new Error(`不支持的产物类型：${kind}`);
+  }
+  const dir = path.join(app.getPath("userData"), "artifacts", path.basename(String(sessionId || "unknown")));
+  await mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, safeName);
+  if (kind === "xlsx") {
+    // SheetJS：CSV 文本 → 工作簿 → xlsx 二进制。用户点名要"能保存成 .xlsx"，纯 CSV 落盘达不到。
+    const XLSX = await import("xlsx");
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(parseCsvRows(content)), "Sheet1");
+    XLSX.writeFile(book, filePath);
+    const info = await stat(filePath);
+    return { name: safeName, path: filePath, size: info.size };
+  }
+  await writeFile(filePath, content, "utf8");
+  return { name: safeName, path: filePath, size: Buffer.byteLength(content, "utf8") };
 }
 
 /** CSV 文本 → string[][]：按行切分再按逗号/制表符切格。模型输出极少含引号转义，简单切分够用。 */

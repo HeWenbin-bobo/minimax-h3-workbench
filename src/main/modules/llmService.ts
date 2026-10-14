@@ -188,6 +188,8 @@ export interface AgentToolCallbacks {
   generateVideo: (params: { prompt: string; duration: number; count: number }) => Promise<string>;
   /** 打开网页工具（open_page）：用应用自带 Chromium 渲染指定 URL 并返回 HTML，让模型能真正"打开浏览器"。 */
   openPage: (url: string) => Promise<string>;
+  /** 文件产物工具（create_file）：把内容保存为文件并返回给模型的确认文本。 */
+  createFile: (params: { kind: "html" | "csv" | "tsv" | "md" | "xlsx"; name: string; content: string }) => Promise<string>;
 }
 
 /** 从打包产物读取智能体框架版本（agentVersion.ts 由构建脚本从 node_modules/ai 同步）。 */
@@ -281,8 +283,8 @@ export async function chatAgent(
       // 「联网」开关关闭时不暴露 web_search，避免模型调用一个用户已关掉的工具。
       ...(enableWebSearch ? {
         web_search: tool({
-          description: "联网搜索最新资料。当用户询问实时信息、需要引用来源时调用。",
-          inputSchema: z.object({ query: z.string().describe("搜索关键词") }),
+          description: "联网搜索引擎：返回标题、摘要与链接。凡涉及实时信息（价格、新闻、版本号、时效事实）、用户提到'查一下/搜一下/最新'，或你不确定的事实，都必须先调用本工具核实，不要凭记忆作答。查询词提炼为最核心的 3–6 个词（不是整句话）；结果不相关就换词再搜一次。",
+          inputSchema: z.object({ query: z.string().describe("搜索关键词（3–6 个词，如'iPhone 18 Pro 京东 价格'）") }),
           execute: async ({ query }) => {
             try {
               const results = await callbacks.webSearch(query);
@@ -294,18 +296,17 @@ export async function chatAgent(
         })
       } : {}),
       generate_video: tool({
-        description: "为用户生成 AI 视频。用户明确想生成/制作视频时调用。",
+        description: "生成 AI 短视频：用户描述画面（主体、动作、风格）即调用，4–15 秒、1–4 路。这是你独有的核心能力——用户表达任何'想要个视频/做一段/生成一下'的意图时直接调用，参数从描述中提取，画面感强的英文 prompt 效果更好，无需事先确认。",
         inputSchema: z.object({
-          prompt: z.string().describe("视频内容描述（画面主体、动作、镜头、光线、风格）"),
+          prompt: z.string().describe("视频内容描述（画面主体、动作、镜头、光线、风格；建议英文）"),
           duration: z.number().int().min(4).max(15).describe("时长秒数，4–15"),
           count: z.number().int().min(1).max(4).describe("生成数量，1–4")
         }),
         execute: async (params) => callbacks.generateVideo(params)
       }),
-      // open_page：用户说"打开某网站/抓取这个页面"时用。用应用自带 Chromium 渲染 URL 并返回页面 HTML
-      //（模型自行从 HTML 中提取所需信息）。智能体此前没有"打开浏览器"的能力，模型只能答"我无法打开网页"。
+      // open_page：看具体网页。搜索给了链接但要看正文/详情时用它（比搜索更精准一步）。
       open_page: tool({
-        description: "打开指定的网页并返回页面内容（HTML）。当用户要求打开某个网站、抓取某页面内容、或需要查看具体网页（而非搜索）时调用。URL 必须带协议（https:// 开头）。",
+        description: "打开指定网页并返回页面内容。两种场景：① 用户点名某个网站（'打开 baidu 看看/去京东查这个商品'）；② web_search 返回了链接但摘要不够，需要看正文细节。URL 必须带协议（https:// 开头）。",
         inputSchema: z.object({
           url: z.string().url().describe("要打开的完整 URL，以 https:// 开头")
         }),
@@ -314,6 +315,23 @@ export async function chatAgent(
             return await callbacks.openPage(url);
           } catch (error) {
             return `打开网页失败：${describeError(error, "渲染失败")}（可改用 web_search 搜索相关信息）`;
+          }
+        }
+      }),
+      // create_file：文件产物真工具。此前只靠提示词约定"写围栏代码块"，模型会自我怀疑"我没有文件写入工具"
+      // 而道歉推脱（实测复现）——模型对工具调用的信任远高于对文字约定的信任，产物交付必须工具化。
+      create_file: tool({
+        description: "生成文件并保存到用户的文件产物区（聊天中自动出现文件卡片，可预览、可在文件夹中打开）。这是你生成 Excel/表格、网页、文档的标准方式——用户要任何文件时调用本工具，而不是输出代码块或道歉。kind: csv/tsv（表格→存 .xlsx，Excel 可直接打开）、html（网页/小工具/游戏）、md（Word/文档）。",
+        inputSchema: z.object({
+          kind: z.enum(["html", "csv", "tsv", "md"]).describe("文件类型：csv/tsv=表格(存为.xlsx)、html=网页、md=文档"),
+          name: z.string().describe("文件名（不含扩展名，如'科技新闻'）"),
+          content: z.string().describe("完整文件内容：csv/tsv 首行为表头；html 为完整网页；md 为 markdown 正文")
+        }),
+        execute: async (params) => {
+          try {
+            return await callbacks.createFile({ ...params, kind: params.kind === "csv" || params.kind === "tsv" ? "xlsx" : params.kind });
+          } catch (error) {
+            return `保存文件失败：${describeError(error, "未知错误")}（请改用围栏代码块输出内容）`;
           }
         }
       })
@@ -383,7 +401,8 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
     const result = await chatAgent(options, probeMessages, {
       webSearch: async () => "（探测）",
       generateVideo: async () => "（探测）",
-      openPage: async () => "（探测）"
+      openPage: async () => "（探测）",
+      createFile: async () => "（探测）"
     }, () => { sent += 1; }, AbortSignal.timeout(60_000));
     const supported = result.toolCalls > 0 || result.textLength > 0;
     if (!supported) return { supported: false, message: "模型未返回任何内容，可能不支持工具调用（智能体模式不可用），将自动改用普通对话。" };

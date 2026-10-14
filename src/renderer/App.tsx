@@ -912,9 +912,9 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
       if (!dragRef.current) return;
       // 向左拖增宽：面板在右侧，宽度 = 起点 + (起点X - 当前X)。
       const available = dragRef.current.startWidth + (dragRef.current.startX - ev.clientX);
-      // 聊天列保底 300px：面板最宽 = pg-main 总宽 - 300，拖再宽也不会把聊天区压没。
+      // 聊天列保底 30px：面板最宽 = pg-main 总宽 - 30，拖到底聊天列只留一线但不出"只剩弹窗"的错觉。
       const mainWidth = document.querySelector(".pg-main")?.getBoundingClientRect().width ?? 0;
-      onResize(Math.max(360, Math.min(available, Math.max(360, mainWidth - 300))));
+      onResize(Math.max(360, Math.min(available, Math.max(360, mainWidth - 30))));
     };
     const up = () => {
       dragRef.current = undefined;

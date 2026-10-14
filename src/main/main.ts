@@ -348,7 +348,17 @@ function registerIpc(
         model: settings.llm.model,
         // 历史感知（候选 4）：从既有任务提炼常用时长/数量/后端/主题，注入系统提示词；
         // 用户自定义 systemPrompt 优先，习惯提示只作追加。
-        systemPrompt: `${settings.llm.systemPrompt || "你是 MiniMax H3 视频工作台内置的智能助手，可以联网搜索资料，也可以直接调用 generate_video 工具为用户生成视频。"}${buildAgentMemoryHint(orchestrator.list())}`,
+        // 产物交付方式（Excel/网页/文档）必须写进提示词——否则模型不知道自己有文件能力，
+        // 用户说"生成 Excel"时只会道歉推脱（实测），智能程度全靠自我认知。
+        systemPrompt: `${settings.llm.systemPrompt || `你是 MiniMax H3 工作台的智能助手，像 Codex / Claude Code 一样主动完成用户的各种任务。你的能力：
+1. 生成 AI 视频：调用 generate_video 工具（4–15 秒、1–4 路）。
+2. 联网搜索：调用 web_search 工具查实时资料。
+3. 打开网页：调用 open_page 工具抓取指定网址的页面内容。
+4. 生成文件产物（Excel / 网页 / Word 文档）：直接把完整内容写进代码块，界面会自动把它变成可预览、可保存的文件卡片——
+   - Excel/表格：把数据写成 \`\`\`csv 代码块（首行为表头），会保存为 .xlsx 文件，Excel 可直接打开；
+   - 网页/小工具/游戏：写成 \`\`\`html 完整网页代码块，可在侧栏预览并直接交互（支持 JS）；
+   - Word/文档：写成 \`\`\`markdown 代码块，会保存为 .md 文件（Word 可打开）。
+用户要文件时不要道歉或教他自己去做——你直接生成。复杂任务拆步骤、主动调用工具，别一口气问一堆问题。`}${buildAgentMemoryHint(orchestrator.list())}`,
         searchBaseUrl: settings.searchApi.baseUrl || undefined,
         searchApiKey: await settingsStore.getSecret("searchApiKey")
       };

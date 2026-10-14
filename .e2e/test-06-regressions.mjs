@@ -155,10 +155,14 @@ const sendAgentMsg = async (toggleWebSearch) => {
   llmToolNames = [];
   await cdp.eval(`Array.from(document.querySelectorAll('.page-title button')).find(b => b.textContent === '新对话').click()`);
   await delay(300);
-  const isOn = await cdp.eval(`Array.from(document.querySelectorAll('.pg-chip')).find(b => b.textContent.includes('联网'))?.classList.contains('on')`);
-  if (Boolean(isOn) !== toggleWebSearch) {
-    await cdp.eval(`Array.from(document.querySelectorAll('.pg-chip')).find(b => b.textContent.includes('联网'))?.click()`);
-    await delay(300);
+  // 联网/浏览器搜索默认开启且不互斥（fc040d3）：要彻底关掉 web_search 工具须两个 chip 都关。
+  for (const chip of ["联网", "浏览器搜索"]) {
+    const shouldOn = toggleWebSearch;
+    await cdp.eval(`(() => {
+      const b = Array.from(document.querySelectorAll('.pg-chip')).find(x => x.textContent.includes(${JSON.stringify(chip)}));
+      if (b && b.classList.contains('on') !== ${shouldOn}) b.click();
+    })()`);
+    await delay(200);
   }
   await cdp.eval(`(() => { ${setReact}; window.__set(document.querySelector('.pg-input-row textarea'), '回归测试消息'); })()`);
   await delay(200);

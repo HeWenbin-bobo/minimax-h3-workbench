@@ -355,10 +355,19 @@ button { cursor: pointer; }
 .pg-preview-tab { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 12px; background: #141821; border: 1px solid var(--line); border-bottom: none; border-radius: 8px 8px 0 0; align-self: flex-end; margin-bottom: -1px; }
 .pg-preview-actions { display: flex; gap: 4px; }
 .pg-preview-frame { flex: 1; width: 100%; border: 0; background: #fff; }
-.pg-preview-bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
-.pg-preview-tab { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 12px; background: #141821; border: 1px solid var(--line); border-bottom: none; border-radius: 8px 8px 0 0; align-self: flex-end; margin-bottom: -1px; }
-.pg-preview-actions { display: flex; gap: 4px; }
-.pg-preview-frame { flex: 1; width: 100%; border: 0; background: #fff; }
+/* 表格/文档产物预览区：白底可滚动内容区（非 iframe）。 */
+.pg-preview-doc { flex: 1; overflow: auto; background: #fff; padding: 20px 24px; }
+.pg-preview-doc-empty { color: #999; text-align: center; }
+/* 文档排版（.md 产物）：衬线、松行高——读起来像文档而不是聊天。 */
+.pg-preview-doc h3, .pg-preview-doc h4, .pg-preview-doc h5 { margin: 18px 0 8px; color: #1a1a2b; }
+.pg-preview-doc p { margin: 0 0 10px; color: #333; line-height: 1.8; font-family: Georgia, "Times New Roman", "Microsoft YaHei", serif; font-size: 14px; }
+.pg-preview-doc ul, .pg-preview-doc ol { margin: 6px 0 12px; padding-left: 24px; color: #333; line-height: 1.8; font-family: Georgia, "Times New Roman", "Microsoft YaHei", serif; }
+.pg-preview-doc h3 { text-align: center; font-size: 20px; }
+/* 表格预览：紧贴 Excel 观感（网格线、表头浅灰置顶、斑马纹）。 */
+.pg-sheet-table { border-collapse: collapse; width: 100%; font-size: 12px; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+.pg-sheet-table th, .pg-sheet-table td { border: 1px solid #d0d3da; padding: 5px 10px; text-align: left; white-space: nowrap; }
+.pg-sheet-table th { background: #f0f2f5; font-weight: 600; position: sticky; top: 0; }
+.pg-sheet-table tr:nth-child(even) td { background: #fafbfc; }
 .pg-thumb { width: 88px; height: 88px; object-fit: cover; border-radius: 10px; margin-bottom: 6px; margin-right: 6px; border: 1px solid var(--line); }
 .pg-cursor { display: inline-block; width: 7px; height: 14px; background: var(--pink); border-radius: 2px; vertical-align: -2px; margin-left: 2px; animation: pg-blink 0.9s steps(2) infinite; }
 @keyframes pg-blink { 50% { opacity: 0; } }

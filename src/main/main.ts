@@ -507,21 +507,39 @@ function registerIpc(
     await shell.openExternal(url);
     return true;
   });
-  // 游乐场 HTML 产物落盘：存 userData/artifacts/<sessionId>/，返回 {name,path,size} 供文件卡片展示。
+  // 游乐场产物落盘：存 userData/artifacts/<sessionId>/，返回 {name,path,size} 供文件卡片展示。
   // 渲染端只传文本与文件名，路径由主进程生成——渲染端无法指定任意位置写文件。
-  handle("artifact:save", async (_event, payload: { sessionId: string; name: string; html: string }) => {
-    const safeName = path.basename(String(payload.name || "artifact.html")).replace(/[\\/:*?"<>|]/g, "_") || "artifact.html";
-    if (!safeName.toLowerCase().endsWith(".html")) throw new Error("只支持保存 HTML 产物。");
+  // kind: html/csv/tsv/md 写文本；xlsx 用 SheetJS 把 CSV 文本转成真 Excel 二进制（双击可开）。
+  handle("artifact:save", async (_event, payload: { sessionId: string; name: string; content: string; kind: string }) => {
+    const extByKind: Record<string, string> = { html: ".html", csv: ".csv", tsv: ".tsv", md: ".md", xlsx: ".xlsx" };
+    const ext = extByKind[payload.kind] || ".html";
+    const safeName = path.basename(String(payload.name || `artifact${ext}`)).replace(/[\\/:*?"<>|]/g, "_") || `artifact${ext}`;
+    if (!Object.values(extByKind).some((allowed) => safeName.toLowerCase().endsWith(allowed))) {
+      throw new Error(`不支持的产物类型：${payload.kind}`);
+    }
     const dir = path.join(app.getPath("userData"), "artifacts", path.basename(String(payload.sessionId || "unknown")));
     await mkdir(dir, { recursive: true });
     const filePath = path.join(dir, safeName);
-    await writeFile(filePath, payload.html, "utf8");
-    return { name: safeName, path: filePath, size: Buffer.byteLength(payload.html, "utf8") };
+    if (payload.kind === "xlsx") {
+      // SheetJS：CSV 文本 → 工作簿 → xlsx 二进制。用户点名要"能保存成 .xlsx"，纯 CSV 落盘达不到。
+      const XLSX = await import("xlsx");
+      const book = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(parseCsvRows(payload.content)), "Sheet1");
+      XLSX.writeFile(book, filePath);
+      const info = await stat(filePath);
+      return { name: safeName, path: filePath, size: info.size };
+    }
+    await writeFile(filePath, payload.content, "utf8");
+    return { name: safeName, path: filePath, size: Buffer.byteLength(payload.content, "utf8") };
   });
 }
 
-// h3media / showItem 白名单的补充放行集合：本应用自己产出过的结果路径。
-// 用户改过输出目录后，历史结果仍留在旧目录；只认当前目录会让历史视频全部变成打不开的死链。
+/** CSV 文本 → string[][]：按行切分再按逗号/制表符切格。模型输出极少含引号转义，简单切分够用。 */
+function parseCsvRows(content: string): string[][] {
+  return content.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.split(/,|\t/).map((cell) => cell.trim()));
+}
+
+// h3media / showItem 白名单的补充放行集合：本应用自己产出过的结果路径。// 用户改过输出目录后，历史结果仍留在旧目录；只认当前目录会让历史视频全部变成打不开的死链。
 // 安全性不降：放行的只是任务记录里记着的、由本应用写出的文件，渲染端仍无法随意读本地文件。
 function knownOutputPaths(orchestrator: GenerationOrchestrator): Set<string> {
   const paths = new Set<string>();

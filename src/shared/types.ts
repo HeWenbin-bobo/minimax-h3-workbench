@@ -229,8 +229,8 @@ export interface WorkbenchApi {
   /** 回收站：列出已删除任务（含剩余毫秒数由渲染端按 deletedAt 自算）。 */
   listDeletedTasks(): Promise<ApiResponse<GenerationTask[]>>;
   showItem(filePath: string): Promise<ApiResponse<boolean>>;
-  /** 游乐场 HTML 产物落盘：存 userData/artifacts/<sessionId>/，返回 {name,path,size} 供文件卡片展示。 */
-  saveArtifact(sessionId: string, name: string, html: string): Promise<ApiResponse<{ name: string; path: string; size: number }>>;
+  /** 游乐场产物落盘：存 userData/artifacts/<sessionId>/，kind 决定扩展名与转换（xlsx 走 SheetJS），返回 {name,path,size}。 */
+  saveArtifact(sessionId: string, name: string, content: string, kind: "html" | "csv" | "tsv" | "md" | "xlsx"): Promise<ApiResponse<{ name: string; path: string; size: number }>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
   /**
    * 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。agent=true 走 AI SDK 工具循环。

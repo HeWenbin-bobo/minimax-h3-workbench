@@ -804,9 +804,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
               {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
               <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <PgToolSteps steps={msg.toolSteps} running={Boolean(msg.streaming)} />}{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
-                // 消息含完整 HTML 产物时给「预览」按钮（Artifacts 式侧栏）。流式未结束先不亮，避免半截 HTML。
-                const html = msg.role === "assistant" && !msg.streaming ? extractHtmlArtifact(msg.content) : undefined;
-                return html && <PgArtifactCard html={html} sessionId={activeId} onPreview={setPreview} onError={onError} />;
+                // 产物三探测（html > 表格 > 文档）：流式未结束先不亮，避免半截内容。
+                const artifact = msg.role === "assistant" && !msg.streaming ? extractArtifact(msg.content) : undefined;
+                return artifact && <PgArtifactCard kind={artifact.kind} content={artifact.content} sessionId={activeId} onPreview={setPreview} onError={onError} />;
               })()}</div>
               {msg.taskGroups && msg.taskGroups.length > 0 && msg.taskGroups.map((group, gi) => group.length > 0 && <div key={`${msg.id}-${gi}`} className="result-grid pg-task-grid">{group.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} />)}</div>)}
             </div>)}
@@ -878,30 +878,55 @@ function extractHtmlArtifact(content: string): string | undefined {
   return undefined;
 }
 
-interface ArtifactInfo { name: string; path: string; size: number; html: string }
+type ArtifactKind = "html" | "sheet" | "doc";
+
+/** 产物统一提取：html > 表格(csv/tsv) > 文档(markdown/docx 围栏)。一次消息只出一张卡片。
+ * Word 决策：模型输出本就是纯文本/markdown——落盘 .md（卡片注明 Word 可开），真 .docx 二进制留作升级（加 docx npm 包）。 */
+function extractArtifact(content: string): { kind: ArtifactKind; content: string } | undefined {
+  const html = extractHtmlArtifact(content);
+  if (html) return { kind: "html", content: html };
+  const fences = [...content.matchAll(/```(\w*)\n([\s\S]*?)```/g)];
+  for (const [, lang, body] of fences) {
+    const code = body.trim();
+    if (/^(csv|tsv)$/i.test(lang)) {
+      // CSV/TSV 围栏要有结构化数据的样子（≥2 行且含分隔符），排除随手贴的单行文本。
+      const sep = lang.toLowerCase() === "tsv" ? "\t" : ",";
+      if (code.split("\n").length >= 2 && code.includes(sep)) return { kind: "sheet", content: code };
+    }
+    if (/^(markdown|docx|doc)$/i.test(lang)) return { kind: "doc", content: code };
+  }
+  return undefined;
+}
+
+interface ArtifactInfo { name: string; path: string; size: number; kind: ArtifactKind; content: string }
 
 /** 产物文件卡片：图标 + 文件名 + 大小 + 预览/打开文件夹（WorkBuddy 形态）。产物懒落盘——首次点「预览」才写文件。 */
-function PgArtifactCard({ html, sessionId, onPreview, onError }: { html: string; sessionId: string; onPreview: (artifact: ArtifactInfo) => void; onError: (e: unknown) => void }) {
+function PgArtifactCard({ kind, content, sessionId, onPreview, onError }: { kind: ArtifactKind; content: string; sessionId: string; onPreview: (artifact: ArtifactInfo) => void; onError: (e: unknown) => void }) {
   const [artifact, setArtifact] = useState<ArtifactInfo>();
   const sizeLabel = (bytes: number) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  // 表格产物存 .xlsx（Excel 双击可开，主进程 SheetJS 转换）；文档存 .md；网页存 .html。
+  const ext = kind === "html" ? ".html" : kind === "sheet" ? ".xlsx" : ".md";
+  const label = kind === "html" ? "HTML 文件" : kind === "sheet" ? "Excel 表格" : "Markdown 文档 · Word 可打开";
   async function ensureSaved(): Promise<ArtifactInfo | undefined> {
     if (artifact) return artifact;
-    const name = `artifact-${Date.now()}.html`;
-    const response = await window.h3.saveArtifact(sessionId, name, html);
+    const name = `artifact-${Date.now()}${ext}`;
+    const saveKind = kind === "sheet" ? "xlsx" : kind === "doc" ? "md" : "html";
+    const response = await window.h3.saveArtifact(sessionId, name, content, saveKind);
     if (!response.data) { onError(response.message); return undefined; }
-    const info = { ...response.data, html };
+    const info = { ...response.data, kind, content };
     setArtifact(info);
     return info;
   }
   return <div className="pg-artifact-card">
-    <span className="pg-artifact-icon">📄</span>
-    <span className="pg-artifact-name">{artifact?.name || "网页产物"}<small>{artifact ? sizeLabel(artifact.size) : "HTML 文件 · 预览时自动保存"}</small></span>
+    <span className="pg-artifact-icon">{kind === "sheet" ? "📊" : kind === "doc" ? "📝" : "📄"}</span>
+    <span className="pg-artifact-name">{artifact?.name || label}<small>{artifact ? sizeLabel(artifact.size) : `${label} · 预览时自动保存`}</small></span>
     <button title="在侧栏预览" onClick={async () => { const info = await ensureSaved(); if (info) onPreview(info); }}>预览</button>
     {artifact && <button title="在文件夹中显示" onClick={() => window.h3.showItem(artifact.path).then((r) => { if (!r.ok) onError(r.message); }).catch(onError)}>📁</button>}
   </div>;
 }
 
-/** HTML 产物侧栏预览：占位压缩聊天区（非悬浮），左缘拖拽条可调宽度；iframe sandbox 渲染。 */
+/** 产物侧栏预览：占位压缩聊天区（非悬浮），左缘拖拽条可调宽度。渲染区按 kind 分支：
+ * html→沙箱 iframe（可交互）；sheet→CSV 渲染表格；doc→renderMarkdown 文档排版。 */
 function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: ArtifactInfo; onClose: () => void; width: number; onResize: (width: number) => void }) {
   const [nonce, setNonce] = useState(0);
   const dragRef = useRef<{ startX: number; startWidth: number } | undefined>(undefined);
@@ -928,18 +953,32 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
   // 贪吃蛇类键盘游戏就没法直接玩（用户实测）。mount 后把焦点送进 iframe。
   const frameRef = useRef<HTMLIFrameElement>(null);
   useEffect(() => { frameRef.current?.focus(); }, []);
+  const icon = artifact.kind === "sheet" ? "📊" : artifact.kind === "doc" ? "📝" : "🌐";
   return <aside className="pg-preview" style={{ width }}>
     <div className="pg-preview-drag" onMouseDown={onDragStart} title="拖动调整宽度" />
     <div className="pg-preview-bar">
-      <span className="pg-preview-tab">📄 {artifact.name}</span>
+      <span className="pg-preview-tab">{icon} {artifact.name}</span>
       <span className="pg-preview-actions">
         <button className="pg-tool" title="重新加载" onClick={() => setNonce((n) => n + 1)}>↻</button>
         <button className="pg-tool" title="在文件夹中显示" onClick={() => window.h3.showItem(artifact.path).catch(() => undefined)}>📁</button>
         <button className="pg-tool" title="关闭预览" onClick={onClose}>×</button>
       </span>
     </div>
-    <iframe key={nonce} ref={frameRef} className="pg-preview-frame" sandbox="allow-scripts" srcDoc={artifact.html} title={artifact.name} />
+    {artifact.kind === "html" && <iframe key={nonce} ref={frameRef} className="pg-preview-frame" sandbox="allow-scripts" srcDoc={artifact.content} title={artifact.name} />}
+    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}><SheetTable csv={artifact.content} /></div>}
+    {artifact.kind === "doc" && <div className="pg-preview-doc" key={nonce}>{renderMarkdown(artifact.content)}</div>}
   </aside>;
+}
+
+/** CSV/TSV 文本 → 表格渲染（首行表头）。渲染端简单 split，不引解析库。 */
+function SheetTable({ csv }: { csv: string }) {
+  const rows = csv.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.split(/,\t?|\t/).map((cell) => cell.trim()));
+  if (rows.length === 0) return <p className="pg-preview-doc-empty">（空表格）</p>;
+  const [header, ...body] = rows;
+  return <table className="pg-sheet-table">
+    <thead><tr>{header.map((cell, i) => <th key={i}>{cell}</th>)}</tr></thead>
+    <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{cell}</td>)}</tr>)}</tbody>
+  </table>;
 }
 
 /** 工具调用步骤日志（可折叠）：生成中默认展开（实时透明），完成后默认折叠为一行摘要——对标 WorkBuddy，

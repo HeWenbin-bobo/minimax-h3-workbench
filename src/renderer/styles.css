@@ -332,27 +332,34 @@ button { cursor: pointer; }
 .pg-msg.assistant .pg-bubble h3, .pg-msg.assistant .pg-bubble h4, .pg-msg.assistant .pg-bubble h5 { margin: 8px 0 4px; }
 .pg-msg.assistant .pg-bubble a { color: var(--cyan); }
 .pg-msg.assistant .pg-bubble code { background: rgba(122, 39, 255, 0.08); color: #7a27ff; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
-.md-code { background: #141821; color: #e6e8eb; border-radius: 10px; padding: 12px 14px; overflow-x: auto; margin: 8px 0; font-size: 11px; line-height: 1.6; }
+/* 代码块：跟随品牌浅色主题（此前是近黑底浅字，与整体浅色界面割裂）。
+   注意选择器要压过 `.pg-msg.assistant .pg-bubble code`（行内代码的紫底）——
+   那个规则特异性更高，不写足就会让块内代码又变成行内样式。 */
+.md-code, .pg-msg.assistant .pg-bubble .md-code { background: #f3f4f7; color: #24292f; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; overflow-x: auto; margin: 8px 0; font-size: 11px; line-height: 1.6; }
+.pg-msg.assistant .pg-bubble .md-code code { background: transparent; color: inherit; padding: 0; border-radius: 0; font-size: inherit; }
 /* Markdown 表格：模型常用表格输出结构化结果（如热搜榜单），无样式时挤成一坨纯文本。 */
 .pg-msg.assistant .pg-bubble table { border-collapse: collapse; margin: 8px 0; font-size: 11px; width: auto; max-width: 100%; display: block; overflow-x: auto; }
 .pg-msg.assistant .pg-bubble th, .pg-msg.assistant .pg-bubble td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; white-space: nowrap; }
 .pg-msg.assistant .pg-bubble th { background: rgba(122, 39, 255, 0.08); font-weight: 600; }
 
 /* HTML 产物（对标 WorkBuddy）：聊天内文件卡片 + 右侧宽幅预览面板（标签页顶栏 + 操作按钮）。 */
-.pg-artifact-card { display: flex; align-items: center; gap: 10px; margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #141821; font-size: 12px; }
+/* 产物文件卡片：浅色面。此前是 #141821 近黑底但没设文字色，继承气泡的 --ink 变成黑底黑字。 */
+.pg-artifact-card { display: flex; align-items: center; gap: 10px; margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #f7f8fa; color: var(--ink); font-size: 12px; }
 .pg-artifact-icon { font-size: 18px; }
 .pg-artifact-name { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.pg-artifact-name small { color: #8b93a5; font-size: 11px; }
-.pg-artifact-card button { background: transparent; border: 1px solid var(--line); color: var(--cyan); border-radius: 8px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
-.pg-artifact-card button:hover { border-color: var(--cyan); }
+.pg-artifact-name strong { color: var(--ink); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pg-artifact-name small { color: var(--muted); font-size: 11px; }
+.pg-artifact-card button { background: #fff; border: 1px solid var(--line); color: var(--purple); border-radius: 8px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
+.pg-artifact-card button:hover { border-color: var(--purple); background: #f6f2ff; }
 /* HTML 产物预览（对标 WorkBuddy）：嵌入页面 flex 布局，弹开时压缩聊天区而非悬浮其上；
    左缘细条可拖拽调宽；聊天区因 flex:1 自动收缩，分栏效果与截图一致。 */
 @keyframes pg-preview-in { from { opacity: 0; } to { opacity: 1; } }
-.pg-preview { position: relative; display: flex; flex-direction: column; flex: none; min-width: 360px; border: 1px solid var(--line); border-radius: 14px; background: #0e1117; overflow: hidden; animation: pg-preview-in 0.2s ease-out; }
+.pg-preview { position: relative; display: flex; flex-direction: column; flex: none; min-width: 360px; border: 1px solid var(--line); border-radius: 14px; background: #fff; overflow: hidden; animation: pg-preview-in 0.2s ease-out; }
 .pg-preview-drag { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 5; }
 .pg-preview-drag:hover { background: rgba(122, 39, 255, 0.25); }
-.pg-preview-bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--line); font-size: 12px; flex: none; }
-.pg-preview-tab { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 12px; background: #141821; border: 1px solid var(--line); border-bottom: none; border-radius: 8px 8px 0 0; align-self: flex-end; margin-bottom: -1px; }
+.pg-preview-bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--line); background: #f7f8fa; font-size: 12px; flex: none; }
+/* 标签页同样曾是近黑底 + 继承深字（与产物卡片同一个病），改浅底 + 显式文字色。 */
+.pg-preview-tab { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 12px; background: #fff; color: var(--ink); border: 1px solid var(--line); border-bottom: none; border-radius: 8px 8px 0 0; align-self: flex-end; margin-bottom: -1px; }
 .pg-preview-actions { display: flex; gap: 4px; }
 .pg-preview-frame { flex: 1; width: 100%; border: 0; background: #fff; }
 /* 表格/文档产物预览区：白底可滚动内容区（非 iframe）。 */

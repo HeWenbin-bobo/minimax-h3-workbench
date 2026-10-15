@@ -28,6 +28,8 @@ import { checkForUpdates, checkFrameworkUpdate } from "./modules/updateChecker";
 import { renderHtml, clearBrowserFetchCache } from "./modules/browserFetch";
 import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
+import { buildSections, diffWorldState, historyTextOf, type WorldStateSnapshot } from "./modules/worldState";
+import { buildSystemPrompt } from "../shared/agentPrompt";
 import {
   activeContextTokens,
   advanceWindow,
@@ -40,6 +42,7 @@ import {
   type ContextWindowState
 } from "./modules/contextBudget";
 import { buildCompactedHistory, summarizeHistory } from "./modules/compaction";
+import { withPlanMode } from "../shared/planMode";
 import { contextWindowFor } from "../shared/modelWindows";
 
 /**
@@ -211,6 +214,12 @@ function registerIpc(
     sessionBudgets.set(sessionId, created);
     return created;
   };
+  /**
+   * world state 快照：按会话隔离，只存内存。
+   * 重启后丢基线不是 bug——diffWorldState 会退化为"按历史里的标记判断是否已注入过"，
+   * 最坏情况是多花一次 token 重发一遍环境事实，不会漏注入（安全降级）。
+   */
+  const sessionWorldState = new Map<string, WorldStateSnapshot>();
   const rebuildLlm = async (): Promise<LlmService> => {
     const settings = await settingsStore.get();
     llm = new LlmService({
@@ -246,6 +255,8 @@ function registerIpc(
     sessionServices.clear();
     // 换模型/换上游后，旧窗口的大小与基线全部作废——下一次对话从零重新锚定。
     sessionBudgets.clear();
+    // world state 同理：换了模型就是换了一个"没见过这些环境事实"的对话方，必须重注入一遍。
+    sessionWorldState.clear();
   };
   const sendChunk = (event: LlmStreamEvent) => mainWindow?.webContents.send("llm:chunk", event);
   const sendDone = (event: LlmDoneEvent) => mainWindow?.webContents.send("llm:done", event);
@@ -404,7 +415,7 @@ function registerIpc(
 
   // 游乐场：流式对话（异步跑完，期间 llm:chunk/llm:done 推送）、中断、附件读取。
   // agent 模式走 AI SDK 工具循环（web_search / generate_video），普通聊天走原路径零回归。
-  handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch: boolean) => {
+  handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch: boolean, planMode?: "plan" | "execute") => {
     // sessionId 由渲染端生成；缺失时退化成一次性的匿名会话（老调用方兼容），不再共用全局单例。
     // browserSearch=true 是「浏览器搜索」联网项：只用应用自带 Chromium 渲染抓取。
     // 与 webSearch 同开时浏览器渲染优先（实测渲染结果质量最稳）；只关掉浏览器搜索时才用 API/HTTP 链路。
@@ -457,34 +468,36 @@ function registerIpc(
       let agentTaskCount = 0; // 本轮已建任务数：非 0 时不得整轮重试（否则会重复建任务）
       const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
       const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
+      // world state 差异注入：只把**本轮有变化**的环境事实追加进提示词。
+      // 开关必须传真实生效值——提示词说"你可以联网"但工具表里已摘掉 web_search，
+      // 模型会调一个不存在的工具、然后为"我调不了"道歉（CLAUDE.md 记过同类事故）。
+      // 快照在本轮采样完成后才写回：中途抛错不应把"已注入"记成事实。
+      const worldDiff = diffWorldState(
+        buildSections({
+          webSearch,
+          browserSearch: browserOnly,
+          searchApiReady: Boolean(settings.searchApi.baseUrl),
+          artifactKinds: planMode === "plan" ? [] : ["html（网页/小工具）", "xlsx（表格，由 csv/tsv 生成）", "md（文档）"]
+        }),
+        sessionWorldState.get(session),
+        historyTextOf(effective)
+      );
+      const worldStateText = worldDiff.text;
       const agentOptions = {
         baseUrl: settings.llm.baseUrl,
         apiKey: await settingsStore.getSecret("llmApiKey"),
         model: settings.llm.model,
-        // 历史感知（候选 4）：从既有任务提炼常用时长/数量/后端/主题，注入系统提示词；
-        // 用户自定义 systemPrompt 优先，习惯提示只作追加。
         // 提示词工程 = 智能体表现的最大杠杆（用户实测：同款国产模型接 Claude Code 明显更聪明，
-        // 差距就在系统提示词与工具描述的打磨）。对齐 Claude Code 形态：行为规则 + 工具策略 + 产物规范。
-        systemPrompt: `${settings.llm.systemPrompt || `# 角色
-你是 MiniMax H3 工作台的智能助手，一位主动、务实的执行者。用户提出任何任务，你的默认反应是"动手做"，而不是解释你做不了或反问一堆。
-
-# 你的工具
-- generate_video(prompt, duration, count)：生成 AI 视频（4–15 秒、1–4 路）。用户描述画面即调用。
-- web_search(query)：联网搜索实时资料。涉及价格、新闻、时效信息、具体事实核查时调用。
-- open_page(url)：打开指定网页并返回内容。需要看某个具体页面、抓取详情时调用（比搜索更精准）。
-
-# 文件产物（你的核心能力——界面自动把代码块变成可预览、可保存的文件卡片）
-- Excel/表格数据：写成 \`\`\`csv 代码块（首行表头，逗号分隔）。保存为 .xlsx，Excel 可直接打开。
-- 网页/小工具/游戏：写成 \`\`\`html 完整网页（含 <!DOCTYPE html>）。侧栏可预览、可直接交互，支持 JS。
-- Word/文档/报告：写成 \`\`\`markdown 代码块。保存为 .md，Word 可打开。
-用户要文件时**直接生成完整内容**——不要道歉、不要教他自己去做、不要只给示例。
-
-# 工作方式（对齐 Codex / Claude Code）
-1. **能动手就不问**：信息足够就直接做；只在缺关键参数且无法合理默认时才问，且一次只问最必要的。
-2. **复杂任务拆步骤**：先搜索 → 再整合 → 输出产物，一步一步来，每步工具结果消化完再下一步。
-3. **工具结果要消化**：搜索/网页返回的内容要提炼后回答，不要把原始结果粘贴给用户。
-4. **失败就换路**：一个工具失败或结果不相关时换个查询词或换 open_page 重试，不要就此放弃。
-5. **回答简洁完整**：先给结果（表格/文件/结论），再给一两句说明。不要长篇铺垫。`}${buildAgentMemoryHint(orchestrator.list())}`,
+        // 差距就在系统提示词与工具描述的打磨）。三段组装，顺序固定：
+        //   ① 通用提示词（shared/agentPrompt.ts 的四层；用户自定义则整体替换）
+        //   ② 历史使用习惯（从既有任务提炼，用户自定义提示词时仍追加）
+        //   ③ world state 差异块——**只含本轮变化**，未变的环境事实不重发
+        // 最后再套 withPlanMode：本轮规则是强约束，放最末才不被环境事实淹没。
+        systemPrompt: withPlanMode(buildSystemPrompt({
+          custom: settings.llm.systemPrompt,
+          memoryHint: buildAgentMemoryHint(orchestrator.list()),
+          worldState: worldStateText
+        }), planMode),
         searchBaseUrl: settings.searchApi.baseUrl || undefined,
         searchApiKey: await settingsStore.getSecret("searchApiKey")
       };
@@ -557,7 +570,7 @@ function registerIpc(
             sendLlmTool({ tool, input, phase: "start", sessionId: session });
           }, (tool, summary) => {
             sendLlmTool({ tool, input: "", phase: "end", result: summary, sessionId: session });
-          });
+          }, planMode === "plan");
           break;
         } catch (error) {
           if (controller.signal.aborted) { done({ ok: true }); return; }
@@ -600,6 +613,9 @@ function registerIpc(
         const budget = budgetFor(session);
         budget.window = recordBaseline(budget.window, activeContextTokens(effective, undefined), "estimated");
       }
+      // world state 快照写回：本轮已把这批环境事实发给了模型，下一轮只发差异。
+      // 放在采样成功之后——中途失败没真正注入，不该记成"已注入"（否则下一轮会漏发）。
+      sessionWorldState.set(session, worldDiff.snapshot);
       done({ ok: true });
     })().catch((error: unknown) => {
       const aborted = controller.signal.aborted;

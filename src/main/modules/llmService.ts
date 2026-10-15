@@ -255,7 +255,14 @@ export async function chatAgent(
   /** 工具调用开始回调：渲染端据此在气泡上实时显示"正在搜索/正在生成视频"（透明度）。 */
   onToolStart?: (tool: string, input: string) => void,
   /** 工具执行完成回调：渲染端显示结果摘要（"找到 N 条结果"/"已建 N 个任务"），工具全链路透明。 */
-  onToolEnd?: (tool: string, summary: string) => void
+  onToolEnd?: (tool: string, summary: string) => void,
+  /**
+   * 计划模式：**不把产生副作用的工具下发给模型**。
+   * 只靠提示词要求"别调工具"不够——模型对工具是否存在的信任远高于对文字约定的信任
+   * （CLAUDE.md 已记该规律：产物能力当初就是因此必须工具化）。所以这里从工具表层面摘掉，
+   * 而不是写一句"本轮不要调用"。
+   */
+  planMode = false
 ): Promise<AgentRunResult> {
   const [{ streamText, tool, stepCountIs }, { createOpenAICompatible }, { z }] = await Promise.all([
     import("ai"),
@@ -302,6 +309,9 @@ export async function chatAgent(
           }
         })
       } : {}),
+      // generate_video 与 create_file 在计划模式下整体摘除——它们是"产生副作用"的工具，
+      // 而计划模式的本轮产出应该只是一份清单。open_page 保留：它只读，看不到就写不出靠谱的计划。
+      ...(planMode ? {} : {
       generate_video: tool({
         description: "生成 AI 短视频：用户描述画面（主体、动作、风格）即调用，4–15 秒、1–4 路。这是你独有的核心能力——用户表达任何'想要个视频/做一段/生成一下'的意图时直接调用，参数从描述中提取，画面感强的英文 prompt 效果更好，无需事先确认。",
         inputSchema: z.object({
@@ -310,8 +320,10 @@ export async function chatAgent(
           count: z.number().int().min(1).max(4).describe("生成数量，1–4")
         }),
         execute: async (params) => callbacks.generateVideo(params)
+      })
       }),
       // open_page：看具体网页。搜索给了链接但要看正文/详情时用它（比搜索更精准一步）。
+      // 计划模式**保留**：它只读，没有副作用；模型看不到实际情况就写不出靠谱的计划。
       open_page: tool({
         description: "打开指定网页并返回页面内容。两种场景：① 用户点名某个网站（'打开 baidu 看看/去京东查这个商品'）；② web_search 返回了链接但摘要不够，需要看正文细节。URL 必须带协议（https:// 开头）。",
         inputSchema: z.object({
@@ -327,6 +339,7 @@ export async function chatAgent(
       }),
       // create_file：文件产物真工具。此前只靠提示词约定"写围栏代码块"，模型会自我怀疑"我没有文件写入工具"
       // 而道歉推脱（实测复现）——模型对工具调用的信任远高于对文字约定的信任，产物交付必须工具化。
+      ...(planMode ? {} : {
       create_file: tool({
         description: "生成文件并保存到用户的文件产物区（聊天中自动出现文件卡片，可预览、可在文件夹中打开）。这是你生成 Excel/表格、网页、文档的标准方式——用户要任何文件时调用本工具，而不是输出代码块或道歉。kind: csv/tsv（表格→存 .xlsx，Excel 可直接打开）、html（网页/小工具/游戏）、md（Word/文档）。",
         inputSchema: z.object({
@@ -341,6 +354,7 @@ export async function chatAgent(
             return `保存文件失败：${describeError(error, "未知错误")}（请改用围栏代码块输出内容）`;
           }
         }
+      })
       })
     },
     stopWhen: stepCountIs(10),

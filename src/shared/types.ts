@@ -238,7 +238,7 @@ export interface WorkbenchApi {
    * browserSearch=true 走「浏览器搜索」：只用应用自带 Chromium 渲染抓取（跳过搜索 API 与 HTTP 直抓），
    * 与 webSearch 互斥。
    */
-  chatLlm(messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch?: boolean): Promise<ApiResponse<boolean>>;
+  chatLlm(messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch?: boolean, planMode?: "plan" | "execute"): Promise<ApiResponse<boolean>>;
   /** 智能体框架独立更新检查（npm registry 最新版 vs 打包版本）。 */
   checkAgentFrameworkUpdate(): Promise<ApiResponse<{ bundledVersion: string; latestVersion?: string; updateAvailable: boolean; message: string }>>;
   /** 中止指定会话的对话（省略则中止全部会话）。 */
@@ -267,6 +267,10 @@ export interface WorkbenchApi {
 export type ChatRole = "user" | "assistant" | "system";
 
 /** 游乐场消息：文本内容 + 可选图片附件（data URL）。 */
+/**
+ * 游乐场消息：文本内容 + 可选图片附件（data URL）。
+ * 渲染端的 PlaygroundMessage 在 App.tsx 内定义（含流式/工具步骤等瞬态字段）。
+ */
 export interface ChatMessage {
   role: ChatRole;
   content: string;

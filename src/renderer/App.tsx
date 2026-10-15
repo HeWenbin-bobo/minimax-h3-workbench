@@ -3,6 +3,7 @@ import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMess
 import { LLM_PROVIDERS, MAX_PROMPT_LENGTH } from "../shared/types";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
 import { describeError } from "../shared/errors";
+import { looksLikePlan, type PlanMode } from "../shared/planMode";
 import { renderMarkdown } from "./markdown";
 
 type Page = "ready" | "studio" | "playground" | "downloads" | "guide" | "connections";
@@ -456,6 +457,8 @@ interface PlaygroundMessage {
   /** 瞬态：智能体多步工具调用日志（"→ 正在搜索：xxx" / "✓ 找到 6 条结果"），仅流式期间存在，落盘前与读取时都剥离。
    *  多步循环每步都追加一条——用户能看到完整过程，而不是只有光标在闪。 */
   toolSteps?: string[];
+  /** 计划模式下产出的方案清单（尚未执行）：渲染端据此显示「继续执行」按钮。 */
+  plan?: boolean;
 }
 
 const pgSessionsKey = "h3-playground-sessions";
@@ -553,6 +556,11 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const bottomRef = useRef<HTMLDivElement>(null);
   const searchReady = Boolean(settings.searchApi.baseUrl);
   const generating = generatingIds.includes(activeId);
+  // 计划模式：下一次发送只出方案。
+  const [planNext, setPlanNext] = useState(false);
+  // 以 plan 语义发出的会话集合（按会话隔离，多会话并发时不串味）。
+  // offDone 是订阅回调、读不到最新 state，故用 ref；由 onLlmDone 消费后自行删除。
+  const planTurnRef = useRef(new Set<string>());
   // 上下文占用：分母是「模型窗口 × 80%」= 压缩触发点。按当前会话的历史轮询（主进程持有记账状态）。
   const [contextStatus, setContextStatus] = useState<ContextStatus>();
   const [compacting, setCompacting] = useState(false);
@@ -607,7 +615,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       const targetId = event.sessionId;
       const buffered = targetId ? streamBuffers.current.get(targetId) ?? "" : "";
       const pendingGroups = targetId ? taskIdBuffers.current.get(targetId) ?? [] : [];
+      // 本轮是否以 plan 语义发出：决定要不要给收尾消息打「待确认」标记（渲染端据此亮「继续执行」）。
+      const wasPlanTurn = targetId ? planTurnRef.current.has(targetId) : false;
       if (targetId) {
+        planTurnRef.current.delete(targetId);
         streamBuffers.current.delete(targetId);
         taskIdBuffers.current.delete(targetId);
       }
@@ -615,16 +626,20 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         setSessions((all) => patchLast(all, targetId, (msg) => {
           // 收尾取缓冲区与消息内容的较长者：避免真实回复被空 content 覆盖（"发消息没回复"）。
           const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
+          const failed = !event.ok && Boolean(event.message);
           // 收尾把缓冲的整组任务并入分组结构（保持"哪几路是一起提交的"）。
           const mergedGroups = [...(msg.taskGroups ?? []), ...(pendingGroups.length ? [pendingGroups] : [])];
           return {
             ...msg,
             streaming: false,
             // 步骤日志完成后保留（回答旁边能看到"这条回答是怎么来的"）；仅重启时剥离（瞬态）。
-            error: !event.ok && Boolean(event.message),
+            error: failed,
             taskGroups: mergedGroups.length ? mergedGroups : undefined,
+            // 计划语义下拿到一份像样的清单 → 打「待确认」标记，渲染端亮「继续执行」按钮。
+            // 失败或模型直接动手（不像计划）时不打标记：没有可确认的方案，按钮亮出来反而误导。
+            plan: wasPlanTurn && !failed && looksLikePlan(base) ? true : undefined,
             // 失败必显文案：气泡为空写完整错误；已有内容（如回落提示）在末尾追加错误详情。
-            content: !event.ok && event.message
+            content: failed
               ? (base ? `${base}\n\n请求失败：${event.message}` : `请求失败：${event.message}`)
               : base
           };
@@ -750,17 +765,52 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const extraText = attachments.map((a) => a.text ? `\n\n--- 附件 ${a.name} ---\n${a.text}` : `\n\n（附件：${a.name}）`).join("");
     const userMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "user", content: text + extraText, images: userImages.length ? userImages : undefined };
     const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: "", streaming: true };
+    // 计划模式（用户点了「📋 计划」）：本轮只出方案，主进程会摘掉副作用工具并注入计划提示词。
+    const planArg: PlanMode = planNext ? "plan" : undefined;
+    if (planArg) planTurnRef.current.add(sessionId);
     const history: ChatMessage[] = [...(session.messages).filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })), { role: "user", content: userMsg.content, images: userMsg.images }];
     setSessions((all) => all.map((s) => s.id === sessionId ? { ...s, title: s.messages.length === 0 && text ? text.slice(0, 20) : s.title, updatedAt: new Date().toISOString(), messages: [...s.messages, userMsg, assistantMsg] } : s));
-    setInput(""); setAttachments([]);
+    setInput(""); setAttachments([]); setPlanNext(false);
     setGeneratingIds((all) => all.includes(sessionId) ? all : [...all, sessionId]);
     streamBuffers.current.set(sessionId, "");
     taskIdBuffers.current.delete(sessionId);
-    const result = await window.h3.chatLlm(history, webSearch, agentMode, sessionId, browserSearch);
+    const result = await window.h3.chatLlm(history, webSearch, agentMode, sessionId, browserSearch, planArg);
     if (!result.ok) {
       setGeneratingIds((all) => all.filter((id) => id !== sessionId));
       sendingRef.current.delete(sessionId);
       setSessions((all) => patchLast(all, sessionId, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
+    }
+  }
+
+  /**
+   * 继续执行：把上一轮的计划当方案确认，以 execute 语义重发同一份历史。
+   * 不新增用户气泡（用户并没有输入新内容）——只在发给模型的历史末尾补一句确认指令。
+   */
+  async function executePlan() {
+    const target = active;
+    if (!target || generatingIds.includes(target.id) || sendingRef.current.has(target.id)) return;
+    const planMsg = [...target.messages].reverse().find((m) => m.role === "assistant" && !m.streaming && m.plan);
+    if (!planMsg) return;
+    sendingRef.current.add(target.id);
+    const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: "", streaming: true };
+    const history: ChatMessage[] = [
+      ...target.messages.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })),
+      { role: "user", content: "按上面的计划执行。" }
+    ];
+    // 该计划消息去掉"待确认"标记（已确认），避免按钮重复出现。
+    setSessions((all) => all.map((s) => s.id !== target.id ? s : {
+      ...s,
+      updatedAt: new Date().toISOString(),
+      messages: [...s.messages.map((m) => m.id === planMsg.id ? { ...m, plan: undefined } : m), assistantMsg]
+    }));
+    setGeneratingIds((all) => all.includes(target.id) ? all : [...all, target.id]);
+    streamBuffers.current.set(target.id, "");
+    taskIdBuffers.current.delete(target.id);
+    const result = await window.h3.chatLlm(history, webSearch, agentMode, target.id, browserSearch, "execute");
+    if (!result.ok) {
+      setGeneratingIds((all) => all.filter((id) => id !== target.id));
+      sendingRef.current.delete(target.id);
+      setSessions((all) => patchLast(all, target.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
     }
   }
 
@@ -926,6 +976,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
                 const artifact = msg.role === "assistant" && !msg.streaming ? extractArtifact(msg.content) : undefined;
                 return artifact && <PgArtifactCard kind={artifact.kind} content={artifact.content} sessionId={activeId} onPreview={setPreview} onError={onError} />;
               })()}</div>
+              {/* 计划待确认：模型在计划模式下交出了一份像样的清单，用户点头才开工。
+                  不自动执行——计划模式的全部意义就是把"做之前先看一眼"这个闸门交给用户。 */}
+              {msg.plan && <div className="pg-plan-actions">
+                <button className="pg-plan-run" disabled={generating} onClick={executePlan} title="按上面的计划开始执行（会把这份计划原样交给模型接着做）">▶ 继续执行</button>
+                <span className="pg-plan-hint">确认后才会真正创建视频/文件</span>
+              </div>}
               {msg.taskGroups && msg.taskGroups.length > 0 && msg.taskGroups.map((group, gi) => group.length > 0 && <div key={`${msg.id}-${gi}`} className="result-grid pg-task-grid">{group.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} />)}</div>)}
             </div>)}
           <div ref={bottomRef} />
@@ -963,6 +1019,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => setWebSearch(!webSearch)}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
             <button className={browserSearch ? "pg-chip on" : "pg-chip"} title="浏览器搜索：用应用自带的浏览器真实打开搜索页再读取结果（最接近人工浏览，结果质量最稳，速度稍慢）；与「联网」同开时优先用浏览器渲染" onClick={() => setBrowserSearch(!browserSearch)}>🖥 浏览器搜索</button>
             <button className={agentMode ? "pg-chip on" : "pg-chip"} title="智能体模式：AI 可自主联网搜索、直接帮你提交视频生成任务（Codex/Claude Code 形态的多步工具循环）" onClick={() => setAgentMode(!agentMode)}>🤖 智能体</button>
+            <button className={planNext ? "pg-chip on" : "pg-chip"} title="计划模式：本轮只出方案、不动手（生成视频与写文件两个工具本轮不下发）。看清方案后点助手消息下方的「继续执行」即可开工。" onClick={() => setPlanNext(!planNext)}>📋 计划</button>
             <button className={showVideoForm ? "pg-chip on" : "pg-chip"} onClick={() => setShowVideoForm(!showVideoForm)}>🎬 生成视频</button>
             <button className="pg-chip" onClick={pickAttachment}>📎 附件</button>
             <span className="pg-model">{settings.llm.model || "未配置模型"}{generating ? " · 生成中…" : ""}</span>

@@ -455,6 +455,13 @@ button { cursor: pointer; }
 .pg-chip.ctx.warm { border-color: #ffb27c; background: #fff7f0; color: var(--orange); }
 .pg-chip.ctx.hot { border-color: #f3c2c2; background: #fff1f1; color: var(--danger); font-weight: 700; }
 .pg-model { margin-left: auto; color: var(--subtle); font-size: 10px; }
+/* 计划待确认条：模型交出方案后，用户点「继续执行」才真正动手。
+   与气泡左对齐（附着在这条助手消息下方），不占满整宽以免像全局操作。 */
+.pg-plan-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.pg-plan-run { border: 0; border-radius: 10px; padding: 7px 15px; color: #fff; background: var(--brand-gradient); font-size: 11px; font-weight: 700; box-shadow: 0 6px 16px rgba(255, 39, 111, 0.24); }
+.pg-plan-run:hover:not(:disabled) { transform: translateY(-1px); }
+.pg-plan-run:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
+.pg-plan-hint { color: var(--subtle); font-size: 10px; }
 .pg-video-form { margin: 10px 16px 0; padding: 13px; border: 1px dashed #ff9b7c; background: #fffaf7; border-radius: 12px; display: grid; gap: 4px; }
 .pg-video-form label { color: #6e7782; font-size: 10px; display: block; }
 .pg-video-form input, .pg-video-form select, .pg-video-form textarea { width: 100%; margin-top: 4px; background: #fff; border: 1px solid #dfe3e8; border-radius: 8px; padding: 8px 10px; font: inherit; outline: 0; }

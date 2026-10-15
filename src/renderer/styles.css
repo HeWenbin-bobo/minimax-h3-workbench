@@ -440,6 +440,13 @@ button { cursor: pointer; }
 .pg-chip { border: 1px solid var(--line); background: #f7f8fa; color: var(--muted); border-radius: 20px; padding: 6px 13px; font-size: 10px; }
 .pg-chip.on { border-color: #ff9b7c; background: #fff3ee; color: var(--pink); font-weight: 700; }
 .pg-chip.stop { color: var(--danger); border-color: #f3c2c2; }
+/* 上下文占用：暖色=接近压缩点，危险色=已达触发点。点击即手动压缩。 */
+/* 与模型名同属"右侧信息组"，不再各自 margin-left:auto——否则两者被推到两端、中间留出大段空白。 */
+.pg-chip.ctx { cursor: pointer; font-variant-numeric: tabular-nums; }
+.pg-chip.ctx:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
+.pg-chip.ctx:disabled { opacity: 0.55; cursor: default; }
+.pg-chip.ctx.warm { border-color: #ffb27c; background: #fff7f0; color: var(--orange); }
+.pg-chip.ctx.hot { border-color: #f3c2c2; background: #fff1f1; color: var(--danger); font-weight: 700; }
 .pg-model { margin-left: auto; color: var(--subtle); font-size: 10px; }
 .pg-video-form { margin: 10px 16px 0; padding: 13px; border: 1px dashed #ff9b7c; background: #fffaf7; border-radius: 12px; display: grid; gap: 4px; }
 .pg-video-form label { color: #6e7782; font-size: 10px; display: block; }
@@ -449,13 +456,39 @@ button { cursor: pointer; }
 .pg-attachment { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 9px; padding: 5px 9px; font-size: 10px; color: var(--muted); }
 .pg-attachment img { width: 34px; height: 34px; object-fit: cover; border-radius: 6px; }
 .pg-attachment button { border: 0; background: transparent; color: var(--subtle); padding: 0 2px; }
-.pg-input-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 12px 16px 16px; align-items: end; }
-.pg-input-row textarea { background: #f7f8fa; border: 1px solid #dfe3e8; border-radius: 12px; padding: 12px 14px; font: inherit; font-size: 12px; outline: 0; resize: none; color: var(--ink); }
+/* 单框内嵌工具条（对齐 Codex composer）：textarea 与发送键同框，圆形发送键贴在右下角。 */
+.pg-input-row { position: relative; display: block; padding: 12px 16px 4px; }
+.pg-input-row textarea { width: 100%; box-sizing: border-box; background: #f7f8fa; border: 1px solid #dfe3e8; border-radius: 14px; padding: 12px 52px 12px 14px; font: inherit; font-size: 12px; outline: 0; resize: none; color: var(--ink); }
 .pg-input-row textarea:focus { background: #fff; border-color: #ff795b; color: var(--ink); }
 .pg-input-row textarea::placeholder { color: #86909c; }
 .pg-video-form input, .pg-video-form select, .pg-video-form textarea { color: var(--ink); }
-.pg-input-row .primary { padding: 12px 22px; border: 0; border-radius: 12px; color: #fff; background: var(--brand-gradient); font-size: 12px; }
-.pg-input-row .primary:disabled { opacity: 0.45; cursor: not-allowed; }
+.pg-input-row .primary {
+  position: absolute; right: 26px; bottom: 14px;
+  width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%;
+  color: #fff; background: var(--brand-gradient); font-size: 11px; line-height: 1;
+  display: grid; place-items: center; box-shadow: 0 4px 12px rgba(255, 39, 111, 0.28);
+}
+.pg-input-row .primary:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
+/* 运行面板：默认收成一行，展开后列最近几步（数据取自气泡里的 toolSteps）。 */
+.pg-runs { flex: none; border-top: 1px solid var(--line); background: #fbfcfd; }
+.pg-runs-head { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 16px; background: transparent; border: 0; font-size: 10px; color: var(--muted); text-align: left; }
+.pg-runs-head:hover { color: var(--ink); }
+.pg-runs-arrow { color: var(--cyan); font-size: 9px; }
+.pg-runs-last { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle); }
+.pg-runs-list { margin: 0; padding: 2px 16px 10px 16px; list-style: none; display: grid; gap: 4px; max-height: 132px; overflow-y: auto; }
+.pg-runs-list li { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pg-runs-empty { margin: 0; padding: 2px 16px 12px; font-size: 10px; color: var(--subtle); }
+/* 侧栏「分类 > 会话」二级分组（对齐 Codex 项目 > 对话）。 */
+.pg-group { display: flex; flex-direction: column; gap: 6px; }
+.pg-group-head { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 8px; background: #f2f4f7; border: 0; border-radius: 8px; font-size: 10.5px; font-weight: 700; color: var(--ink); text-align: left; letter-spacing: 0.02em; }
+.pg-group-head:hover { background: #e9ecf1; }
+.pg-group-arrow { color: var(--cyan); font-size: 9px; }
+.pg-group-count { margin-left: auto; color: var(--muted); font-weight: 400; }
+.pg-session.indented { margin-left: 10px; }
+.pg-session-time { position: absolute; right: 10px; top: 10px; font-size: 9px; color: var(--subtle); font-variant-numeric: tabular-nums; }
+.pg-session:hover .pg-session-time { opacity: 0; }
+/* 生成中的状态点：对齐 Codex 侧栏的蓝色小圆点语义（我们沿用品牌粉）。 */
+.pg-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--pink); margin-right: 4px; vertical-align: 1px; animation: pg-blink 1.2s steps(2) infinite; }
 .pg-model-select { max-width: 150px; margin-top: 7px !important; border-radius: 0 10px 10px 0 !important; border-left: 0 !important; }
 
 /* 游乐场页面高度自适应：占满视口剩余空间，内部滚动，页面本身不出滚动条 */

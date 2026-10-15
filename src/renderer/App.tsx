@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMessage, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LlmStreamEvent, LocalModelStatus, ResourceLink, UpdateInfo } from "../shared/types";
+import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMessage, ContextStatus, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LlmStreamEvent, LocalModelStatus, ResourceLink, UpdateInfo } from "../shared/types";
 import { LLM_PROVIDERS, MAX_PROMPT_LENGTH } from "../shared/types";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
 import { describeError } from "../shared/errors";
@@ -460,6 +460,19 @@ interface PlaygroundMessage {
 
 const pgSessionsKey = "h3-playground-sessions";
 
+/** token 数的可读格式：12345 → "12.3k"。用于上下文占用与压缩提示。 */
+function formatTokens(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens < 0) return "0";
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(Math.round(tokens));
+}
+
+/** ISO 时间戳 → "23:07"。会话列表用；无效时间戳返回空串（不显示脏值）。 */
+function formatClock(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
 /** 会话落盘上限。 */
 const PG_SESSION_CAP = 50;
 
@@ -540,6 +553,22 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const bottomRef = useRef<HTMLDivElement>(null);
   const searchReady = Boolean(settings.searchApi.baseUrl);
   const generating = generatingIds.includes(activeId);
+  // 上下文占用：分母是「模型窗口 × 80%」= 压缩触发点。按当前会话的历史轮询（主进程持有记账状态）。
+  const [contextStatus, setContextStatus] = useState<ContextStatus>();
+  const [compacting, setCompacting] = useState(false);
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    const probe = () => {
+      const history = activeThreadMessages();
+      if (!history.length) return;
+      void window.h3.getContextStatus(history, activeId).then((response) => { if (!cancelled) setContextStatus(response.data); }).catch(() => {});
+    };
+    probe();
+    // 20 秒轮询：占用是低频变化的量，没必要每渲染一次都问主进程。
+    const timer = setInterval(probe, 20_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [activeId, active?.messages.length]);
 
   // 落盘上限 50：内存态一并裁剪，否则 UI 显示得出来、重启后却凭空少几个（用户可感知的静默丢失）。
   // 按"最近使用"裁剪，且绝不丢弃正在生成回复的会话——否则一段正在跑的对话会被静默砍掉。
@@ -616,7 +645,27 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       // 实时显示：把本次批次作为一个新组追加（工具可能在一轮里多次调用）。
       setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, taskGroups: [...(msg.taskGroups ?? []), event.taskIds] })));
     });
-    return () => { offChunk(); offDone(); offTasks(); offTool(); };
+    // 上下文被压缩（自动或手动）：在对话流里插一条系统提示，让用户知道历史被摘要过了。
+    // 不静默——历史被改写是用户可感知的变化，必须可见（CLAUDE.md「失败必须可见」的同一条纪律）。
+    // 插入位置：正在流式的助手气泡**之前**。自动压缩发生在流式开始前，若直接追加到末尾，
+    // 之后每个 llm:chunk 的 patchLast 都会写进这条提示而不是回复气泡（流式内容错位）。
+    const offCompaction = window.h3.onLlmCompaction((event) => {
+      const targetId = event.sessionId;
+      if (!targetId) return;
+      const notice: PlaygroundMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: `（${event.reason}：上下文已从约 ${formatTokens(event.before)} 压到约 ${formatTokens(event.after)}，保留最近对话 + 交接摘要；此前细节以摘要形式保留）`
+      };
+      setSessions((all) => all.map((session) => {
+        if (session.id !== targetId) return session;
+        const messages = session.messages;
+        const last = messages[messages.length - 1];
+        const insertAt = last?.streaming ? messages.length - 1 : messages.length;
+        return { ...session, messages: [...messages.slice(0, insertAt), notice, ...messages.slice(insertAt)] };
+      }));
+    });
+    return () => { offChunk(); offDone(); offTasks(); offTool(); offCompaction(); };
   }, []);
   // 粘底自动滚动：仅在用户接近底部时跟随。
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
@@ -657,6 +706,28 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     if (!payload.data) { onError(new Error(payload.message || "读取附件失败")); return; }
     if (payload.data.kind === "other") { onNotice(`已添加附件 ${payload.data.name}（此类型仅作为文件名提示发送）`); }
     setAttachments((all) => [...all, { name: payload.data!.name, dataUrl: payload.data!.dataUrl, text: payload.data!.text }]);
+  }
+
+  /** 当前会话传给主进程的历史（与 send() 里构造的完全一致，使压缩记账锚定同一份消息）。 */
+  function activeThreadMessages(): ChatMessage[] {
+    if (!active) return [];
+    return active.messages.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images }));
+  }
+
+  /** 手动压缩：对齐 Codex 的 Manual trigger。压缩事件由主进程推回，气泡里的提示统一样式。 */
+  async function manualCompact() {
+    if (!activeId || compacting || generating) return;
+    setCompacting(true);
+    try {
+      const response = await window.h3.compactContext(activeThreadMessages(), activeId);
+      if (!response.ok) throw new Error(response.message || "压缩失败");
+      const refreshed = await window.h3.getContextStatus(activeThreadMessages(), activeId);
+      if (refreshed.ok) setContextStatus(refreshed.data);
+    } catch (error) {
+      onError(error);
+    } finally {
+      setCompacting(false);
+    }
   }
 
   async function send() {
@@ -734,6 +805,30 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [renamingId, setRenamingId] = useState<string>();
   const [renameDraft, setRenameDraft] = useState("");
   const filteredSessions = sessionFilter === "全部" ? visibleSessions : visibleSessions.filter((s) => s.category === sessionFilter);
+  // 「分类 > 会话」二级分组（对齐 Codex Desktop 的 项目 > 对话 层级）。
+  // 只在真的有分类时才分组——全未分类时保持扁平渲染，避免凭空多一层无信息量的标题。
+  // 同组内沿用 filteredSessions 的最近使用顺序，跨组顺序按分类名。
+  const [collapsedGroups, setCollapsedGroups] = useState<string[]>([]);
+  const sessionGroups = useMemo(() => {
+    const ungrouped = "未分类";
+    const groups = new Map<string, PlaygroundSession[]>();
+    for (const session of filteredSessions) {
+      const key = session.category || ungrouped;
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(session); else groups.set(key, [session]);
+    }
+    // 未分类永远排最后（有分类的先展示，符合"我分过类的是重点"的直觉）。
+    return [...groups.entries()]
+      .sort(([a], [b]) => (a === ungrouped ? 1 : b === ungrouped ? -1 : a.localeCompare(b)))
+      .map(([label, sessions]) => ({ label, sessions }));
+  }, [filteredSessions]);
+  const grouped = sessionGroups.length > 1;
+  // 运行面板：扁平收集当前会话的工具步骤（跨气泡、按时间顺序），最近 8 条。
+  const [showRuns, setShowRuns] = useState(false);
+  const recentRuns = useMemo(
+    () => (active?.messages ?? []).flatMap((msg) => msg.toolSteps ?? []).slice(-8).reverse(),
+    [active?.messages]
+  );
   const current = visibleSessions.find((s) => s.id === activeId);
   // 当前会话被删除/过滤时自动落到列表第一个。
   useEffect(() => {
@@ -772,6 +867,32 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     setCatSessionId(undefined);
   }
 
+  /** 单个会话条目（分组与扁平两种渲染共用，避免两处 JSX 漂移）。 */
+  function renderSessionItem(session: PlaygroundSession, indented: boolean) {
+    const running = generatingIds.includes(session.id);
+    return <div key={session.id} className={`pg-session${session.id === activeId ? " active" : ""}${running ? " running" : ""}${indented ? " indented" : ""}`}>
+      {renamingId === session.id
+        ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(undefined); }} onFocus={(e) => e.target.select()} />
+        : catSessionId === session.id
+        ? <input className="pg-rename" autoFocus value={catSessionDraft} placeholder="分类名（留空清除）" onChange={(e) => setCatSessionDraft(e.target.value)} onBlur={commitSessionCategory} onKeyDown={(e) => { if (e.key === "Enter") commitSessionCategory(); if (e.key === "Escape") setCatSessionId(undefined); }} onFocus={(e) => e.target.select()} />
+        : <button className="pg-session-body" onClick={() => { switchSession(session.id); }} onDoubleClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }} title="双击重命名">
+          <strong>{session.title || "新对话"}</strong>
+          <small>
+            {running && <span className="pg-dot" aria-hidden />}
+            {/* 已分组时不再重复分类名（分组标题已经写了）；未分组时才带出来。 */}
+            {running ? "正在回复…" : `${session.messages.length} 条消息`}{!grouped && session.category ? ` · ${session.category}` : ""}
+          </small>
+        </button>}
+      {/* 最近使用时间：对齐 Codex 侧栏的时间戳，多会话并发时能一眼看出先后。 */}
+      <time className="pg-session-time" dateTime={sessionRecency(session)}>{formatClock(sessionRecency(session))}</time>
+      <div className="pg-session-tools">
+        <button className="pg-tool" title="重命名" onClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }}>✎</button>
+        <button className="pg-tool" title="设置分类" onClick={() => { setCatSessionId(session.id); setCatSessionDraft(session.category || ""); }}>🏷</button>
+        <button className="pg-tool" title="删除会话（可在回收站恢复 7 天）" onClick={() => deleteSession(session)}>×</button>
+      </div>
+    </div>;
+  }
+
   return <section className="page playground"><div className="page-title"><div><span className="eyebrow">PLAY</span><h1>游乐场</h1></div><button className="primary" onClick={newSession}>新对话</button></div>
     <div className="playground-layout">
       <aside className="pg-sessions">
@@ -781,20 +902,17 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           <button className={sessionFilter === "__trash" ? "on" : ""} onClick={() => setShowPgTrash(true)}>🗑 回收站{trashSessions.length > 0 ? ` (${trashSessions.length})` : ""}</button>
         </div>
         {filteredSessions.length === 0 && trashSessions.length === 0 && <p className="footnote">还没有对话。点击右上角"新对话"开始。</p>}
-        {filteredSessions.map((session) => <div key={session.id} className={`pg-session${session.id === activeId ? " active" : ""}${generatingIds.includes(session.id) ? " running" : ""}`}>
-          {renamingId === session.id
-            ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(undefined); }} onFocus={(e) => e.target.select()} />
-            : catSessionId === session.id
-            ? <input className="pg-rename" autoFocus value={catSessionDraft} placeholder="分类名（留空清除）" onChange={(e) => setCatSessionDraft(e.target.value)} onBlur={commitSessionCategory} onKeyDown={(e) => { if (e.key === "Enter") commitSessionCategory(); if (e.key === "Escape") setCatSessionId(undefined); }} onFocus={(e) => e.target.select()} />
-            : <button className="pg-session-body" onClick={() => { switchSession(session.id); }} onDoubleClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }} title="双击重命名">
-              <strong>{session.title || "新对话"}</strong><small>{generatingIds.includes(session.id) ? "正在回复…" : `${session.messages.length} 条消息`}{session.category ? ` · ${session.category}` : ""}</small>
-            </button>}
-          <div className="pg-session-tools">
-            <button className="pg-tool" title="重命名" onClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }}>✎</button>
-            <button className="pg-tool" title="设置分类" onClick={() => { setCatSessionId(session.id); setCatSessionDraft(session.category || ""); }}>🏷</button>
-            <button className="pg-tool" title="删除会话（可在回收站恢复 7 天）" onClick={() => deleteSession(session)}>×</button>
-          </div>
-        </div>)}
+        {sessionGroups.map(({ label, sessions: groupSessions }) => {
+          const collapsed = collapsedGroups.includes(label);
+          return <div key={label} className="pg-group">
+            {grouped && label !== "未分类" && <button
+              className={`pg-group-head${collapsed ? " collapsed" : ""}`}
+              onClick={() => setCollapsedGroups((all) => all.includes(label) ? all.filter((x) => x !== label) : [...all, label])}
+              title={collapsed ? "展开分组" : "收起分组"}
+            ><span className="pg-group-arrow">{collapsed ? "▸" : "▾"}</span>{label}<span className="pg-group-count">{groupSessions.length}</span></button>}
+            {!collapsed && groupSessions.map((session) => renderSessionItem(session, grouped && label !== "未分类"))}
+          </div>;
+        })}
       </aside>
       {showPgTrash && <PgTrashPanel sessions={trashSessions} onRestore={restoreSession} onPurge={purgeSession} onClose={() => setShowPgTrash(false)} retentionDays={7} />}
       <div className="pg-main">
@@ -812,16 +930,19 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             </div>)}
           <div ref={bottomRef} />
         </div>
+        {/* 运行面板（对齐 Codex Desktop 底部可折叠面板的骨架）：默认收起，只占一行。
+            数据直接复用气泡里的 toolSteps——不新增数据源，也就不会与气泡显示不一致。 */}
+        <div className={`pg-runs${showRuns ? " open" : ""}`}>
+          <button className="pg-runs-head" onClick={() => setShowRuns(!showRuns)} title={showRuns ? "收起运行记录" : "展开运行记录"}>
+            <span className="pg-runs-arrow">{showRuns ? "▾" : "▸"}</span>
+            运行面板
+            {recentRuns.length > 0 && <span className="pg-runs-last">{recentRuns[recentRuns.length - 1]}</span>}
+          </button>
+          {showRuns && (recentRuns.length === 0
+            ? <p className="pg-runs-empty">本会话还没有工具调用。开启「联网」或「智能体」后，这里会记录每一步。</p>
+            : <ol className="pg-runs-list">{recentRuns.map((run, i) => <li key={`${i}-${run}`}>{run}</li>)}</ol>)}
+        </div>
         <div className="pg-composer">
-          <div className="pg-chips">
-            <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => setWebSearch(!webSearch)}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
-            <button className={browserSearch ? "pg-chip on" : "pg-chip"} title="浏览器搜索：用应用自带的浏览器真实打开搜索页再读取结果（最接近人工浏览，结果质量最稳，速度稍慢）；与「联网」同开时优先用浏览器渲染" onClick={() => setBrowserSearch(!browserSearch)}>🖥 浏览器搜索</button>
-            <button className={agentMode ? "pg-chip on" : "pg-chip"} title="智能体模式：AI 可自主联网搜索、直接帮你提交视频生成任务（Codex/Claude Code 形态的多步工具循环）" onClick={() => setAgentMode(!agentMode)}>🤖 智能体</button>
-            <button className={showVideoForm ? "pg-chip on" : "pg-chip"} onClick={() => setShowVideoForm(!showVideoForm)}>🎬 生成视频</button>
-            <button className="pg-chip" onClick={pickAttachment}>📎 附件</button>
-            <span className="pg-model">{settings.llm.model || "未配置模型"}{generating ? " · 生成中…" : ""}</span>
-            {generating && <button className="pg-chip stop" onClick={stop}>■ 停止</button>}
-          </div>
           {showVideoForm && <div className="pg-video-form">
             <div className="form-grid">
               <label>生成后端<select value={videoRequest.backend} onChange={(e) => { const backend = e.target.value as BackendKind; const preset = undefined; setVideoRequest({ ...videoRequest, backend, preset, duration: clampDuration(videoRequest.duration, durationOptionsFor(backend, preset)) }); }}>{(["local", "ssh", "minimax", "rb"] as BackendKind[]).map((kind) => <option key={kind} value={kind}>{backendLabel(kind)}</option>)}</select></label>
@@ -832,9 +953,28 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             <button className="primary" onClick={submitVideo}>提交生成任务</button>
           </div>}
           {attachments.length > 0 && <div className="pg-attachments">{attachments.map((a, i) => <span key={i} className="pg-attachment">{a.dataUrl ? <img src={a.dataUrl} alt={a.name} /> : `📄 ${a.name}`}<button onClick={() => setAttachments((all) => all.filter((_, j) => j !== i))}>×</button></span>)}</div>}
+          {/* 单框内嵌工具条（对齐 Codex 的 composer 形态）：输入框与发送键同框，工具 chips 在框下。
+              保留 .pg-input-row / .primary 类名——E2E 与既有样式都按它们定位，改类名等于无谓的回归面。 */}
           <div className="pg-input-row">
             <textarea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder={generating ? "AI 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
-            <button className="primary" disabled={generating || (!input.trim() && attachments.length === 0)} onClick={send}>{generating ? "回复中…" : "发送"}</button>
+            <button className="primary" aria-label={generating ? "正在回复" : "发送"} title={generating ? "正在回复" : "发送（Enter）"} disabled={generating || (!input.trim() && attachments.length === 0)} onClick={send}>{generating ? "■" : "▲"}</button>
+          </div>
+          <div className="pg-chips">
+            <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => setWebSearch(!webSearch)}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
+            <button className={browserSearch ? "pg-chip on" : "pg-chip"} title="浏览器搜索：用应用自带的浏览器真实打开搜索页再读取结果（最接近人工浏览，结果质量最稳，速度稍慢）；与「联网」同开时优先用浏览器渲染" onClick={() => setBrowserSearch(!browserSearch)}>🖥 浏览器搜索</button>
+            <button className={agentMode ? "pg-chip on" : "pg-chip"} title="智能体模式：AI 可自主联网搜索、直接帮你提交视频生成任务（Codex/Claude Code 形态的多步工具循环）" onClick={() => setAgentMode(!agentMode)}>🤖 智能体</button>
+            <button className={showVideoForm ? "pg-chip on" : "pg-chip"} onClick={() => setShowVideoForm(!showVideoForm)}>🎬 生成视频</button>
+            <button className="pg-chip" onClick={pickAttachment}>📎 附件</button>
+            <span className="pg-model">{settings.llm.model || "未配置模型"}{generating ? " · 生成中…" : ""}</span>
+            {/* 上下文占用：分母是「模型窗口 × 80%」，100% 即自动压缩触发点。
+                基线来自上游实测（server）时数字可信；纯估算（estimated）时标「估」。 */}
+            {contextStatus && contextStatus.activeTokens > 0 && <button
+              className={`pg-chip ctx${contextStatus.percent >= 100 ? " hot" : contextStatus.percent >= 60 ? " warm" : ""}${compacting ? " busy" : ""}`}
+              title={`上下文占用约 ${formatTokens(contextStatus.activeTokens)} / ${formatTokens(contextStatus.modelLimitTokens)} token（模型窗口）${contextStatus.baselineSource === "server" ? "，数字来自上游实测" : "，数字为本地估算"}；点击立即压缩`}
+              disabled={compacting || generating}
+              onClick={manualCompact}
+            >{compacting ? "⏳ 压缩中…" : `📦 上下文 ${contextStatus.percent}%${contextStatus.baselineSource === "server" ? "" : "（估）"}`}</button>}
+            {generating && <button className="pg-chip stop" onClick={stop}>■ 停止</button>}
           </div>
         </div>
         </div>

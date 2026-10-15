@@ -20,7 +20,7 @@ import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequ
 import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
-import { LlmService, chatAgent } from "./modules/llmService";
+import { LlmService, chatAgent, type AgentRunResult } from "./modules/llmService";
 import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
@@ -28,6 +28,33 @@ import { checkForUpdates, checkFrameworkUpdate } from "./modules/updateChecker";
 import { renderHtml, clearBrowserFetchCache } from "./modules/browserFetch";
 import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
+import {
+  activeContextTokens,
+  advanceWindow,
+  createContextWindowState,
+  looksLikeContextOverflow,
+  markWindowExceeded,
+  recordBaseline,
+  shouldCompact,
+  type ContextSample,
+  type ContextWindowState
+} from "./modules/contextBudget";
+import { buildCompactedHistory, summarizeHistory } from "./modules/compaction";
+import { contextWindowFor } from "../shared/modelWindows";
+
+/**
+ * 每个会话的上下文预算状态（按 sessionId 隔离，对齐 Codex 的 per-thread window）。
+ * 只存内存：压缩后的历史是可由原始 messages 重算的派生数据，落盘会变成脏状态
+ * （CLAUDE.md「端点/路径类配置不存入设置」同一条纪律）。
+ */
+interface SessionContextBudget {
+  window: ContextWindowState;
+  /** 最近一次服务端 usage 样本 + 当时的消息条数，用于锚定真实 token 量。 */
+  sample?: ContextSample;
+  /** 上一次压缩产出的消息列表，及其对应的**原始 messages 条数**（续接游标）。 */
+  compacted?: ChatMessage[];
+  compactedThrough?: number;
+}
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "h3media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
@@ -175,6 +202,15 @@ function registerIpc(
   let llm: LlmService | undefined; // 共享实例：仅用于 llm:test / llm:models 这类无状态探测
   const sessionServices = new Map<string, LlmService>();
   const sessionAborters = new Map<string, AbortController>();
+  /** 上下文预算：按会话隔离；随会话生命周期管理（见 llm:chat 与 llm:abort）。 */
+  const sessionBudgets = new Map<string, SessionContextBudget>();
+  const budgetFor = (sessionId: string): SessionContextBudget => {
+    const existing = sessionBudgets.get(sessionId);
+    if (existing) return existing;
+    const created: SessionContextBudget = { window: createContextWindowState() };
+    sessionBudgets.set(sessionId, created);
+    return created;
+  };
   const rebuildLlm = async (): Promise<LlmService> => {
     const settings = await settingsStore.get();
     llm = new LlmService({
@@ -208,6 +244,8 @@ function registerIpc(
   const invalidateLlmSessions = () => {
     llm = undefined;
     sessionServices.clear();
+    // 换模型/换上游后，旧窗口的大小与基线全部作废——下一次对话从零重新锚定。
+    sessionBudgets.clear();
   };
   const sendChunk = (event: LlmStreamEvent) => mainWindow?.webContents.send("llm:chunk", event);
   const sendDone = (event: LlmDoneEvent) => mainWindow?.webContents.send("llm:done", event);
@@ -307,6 +345,63 @@ function registerIpc(
     };
     return orchestrator.purgeTasks(Array.isArray(ids) ? ids : [], safeDelete);
   });
+  /**
+   * 本轮实际发给模型的消息：压缩过就返回「上次压缩结果 + 其后新增」，否则原样。
+   * 记账与显示都必须基于这一份——否则压缩后 UI 会拿原始长历史算占用，
+   * 报出的比例与实际发出去的内容对不上。
+   */
+  function effectiveFor(session: string, messages: ChatMessage[]): ChatMessage[] {
+    const budget = sessionBudgets.get(session);
+    if (!budget?.compacted || budget.compactedThrough === undefined) return messages;
+    if (messages.length < budget.compactedThrough) return messages; // 历史被改短（删消息），缓存作废
+    return [...budget.compacted, ...messages.slice(budget.compactedThrough)];
+  }
+
+  /**
+   * 上下文压缩前置检查：超阈值就把历史压成「保留的最近用户消息 + 交接摘要」。
+   *
+   * 记账要点（移植 Codex 的 AutoCompactWindow）：
+   * - 锚定：以上一次服务端回报的 inputTokens 为基线，叠加其后新增消息的估算量
+   *   （Codex 的 prefill_input_tokens + get_total_token_usage 同构）；
+   * - 计入量：首个窗口算全量（Total），压缩过的窗口只算基线后的增量（BodyAfterPrefix）；
+   * - 触发：计入量占「模型窗口 × 80%，或总量触达模型硬窗口；
+   * - 压缩后开新窗口、基线清零，下一轮由新的服务端样本重新锚定。
+   *
+   * 压缩失败（摘要为空）不阻断对话——走占位摘要并在 UI 标注，绝不静默吞掉
+   * （CLAUDE.md「失败必须可见」）。
+   */
+  async function maybeCompact(
+    session: string,
+    messages: ChatMessage[],
+    trigger: "auto" | "manual",
+    signal: AbortSignal
+  ): Promise<{ messages: ChatMessage[]; info?: { before: number; after: number; windowNumber: number; reason: string } }> {
+    const budget = budgetFor(session);
+    const settings = await settingsStore.get();
+    const modelLimit = contextWindowFor(settings.llm.model);
+    const effective = effectiveFor(session, messages);
+    const active = activeContextTokens(effective, budget.sample);
+    const decision = shouldCompact({ activeInputTokens: active, state: budget.window, modelLimitTokens: modelLimit });
+
+    if (trigger === "auto" && !decision.compact) return { messages: effective };
+
+    const summary = await summarizeHistory({ ...settings.llm, apiKey: await settingsStore.getSecret("llmApiKey") }, messages, signal);
+    const compacted = buildCompactedHistory(messages, summary);
+    budget.compacted = compacted;
+    budget.compactedThrough = messages.length;
+    budget.window = advanceWindow(budget.window);
+    budget.sample = undefined; // 基线作废，等下一轮服务端样本重新锚定
+    const info = {
+      before: active,
+      after: activeContextTokens(compacted, undefined),
+      windowNumber: budget.window.windowNumber,
+      // 摘要为空说明压缩请求失败——如实告知，别让用户以为上下文被完整保留了。
+      reason: summary ? (trigger === "manual" ? "手动压缩" : decision.reason === "hard-window" ? "上下文已达模型上限" : "上下文接近上限") : "压缩失败（摘要不可用）"
+    };
+    mainWindow?.webContents.send("llm:compaction", { ...info, sessionId: session });
+    return { messages: compacted, info };
+  }
+
   // 游乐场：流式对话（异步跑完，期间 llm:chunk/llm:done 推送）、中断、附件读取。
   // agent 模式走 AI SDK 工具循环（web_search / generate_video），普通聊天走原路径零回归。
   handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch: boolean) => {
@@ -320,22 +415,42 @@ function registerIpc(
     if (sessionAborters.has(session) || service.busy) throw new Error("该会话的上一轮回复还在进行中，请先停止或等待完成。");
     const chunk = (event: LlmStreamEvent) => sendChunk({ ...event, sessionId: session });
     const done = (event: LlmDoneEvent) => sendDone({ ...event, sessionId: session });
+    // 上下文压缩前置：超阈值才动手，未超时原样透传（零回归）。
+    // 放在这里而不是各分支内部，是为了普通对话与智能体共用同一套记账——两条路径吃的是同一份历史。
+    const controller = new AbortController();
+    sessionAborters.set(session, controller);
+    let effective = messages;
+    try {
+      effective = (await maybeCompact(session, messages, "auto", controller.signal)).messages;
+    } catch (error) {
+      // 压缩链路异常绝不阻断对话：如实记录后按原历史继续。
+      console.warn("[llm] 上下文压缩失败，按原始历史继续：", describeError(error, "未知错误"));
+    }
     if (!agent) {
-      void service.chat(messages, webSearch || browserOnly, chunk, browserOnly)
+      // 普通对话同样要能吃下"上游报超窗"这一信号（LlmService 用状态码+错误体摘要构造 message）。
+      const onChatError = (error: unknown) => {
+        if (!controller.signal.aborted && looksLikeContextOverflow(describeError(error, ""))) {
+          // 本地模型表把窗口估小了——记下来，并在气泡里说清"下一轮会自动压缩"，
+          // 而不是把上游的英文报错原样糊给用户。
+          sessionBudgets.set(session, { ...budgetFor(session), window: markWindowExceeded(budgetFor(session).window) });
+          chunk({ seq: 1, delta: "（本轮上下文超出模型可接受的长度。已记录，下一条消息会自动压缩历史后再发送；也可点输入框右侧的「上下文」按钮立即压缩。）\n\n" });
+        }
+      };
+      void service.chat(effective, webSearch || browserOnly, chunk, browserOnly)
         .then(() => done({ ok: true }))
         .catch((error: unknown) => {
           // 用户主动停止（abort）不算错误：正常收尾，不显示红色报错。
           const aborted = error instanceof DOMException && error.name === "AbortError";
+          if (!aborted) onChatError(error);
           done({ ok: aborted, message: aborted ? undefined : describeError(error, "对话失败") });
-        });
+        })
+        .finally(() => { sessionAborters.delete(session); });
       return true;
     }
     // 智能体模式：AI SDK 多步工具循环。视频工具直接接 orchestrator（提交即返回任务 ID，卡片实时刷新）。
     // 工具支持自动检测：模型不支持工具调用（0 文本 + 0 工具调用）或 agent 路径异常但尚未输出任何内容时，
     // 自动用相同消息回落普通对话（runtime fallback）——避免出现"又是空回复"且对用户透明。
-    // agent 不走 LlmService，绕过了它的 busy 检查，故这里按会话登记取消器并挡住同会话并发。
-    const controller = new AbortController();
-    sessionAborters.set(session, controller);
+    // agent 不走 LlmService，绕过了它的 busy 检查，故上面已按会话登记取消器并挡住同会话并发。
     void (async () => {
       const settings = await settingsStore.get();
       let agentSent = 0;
@@ -417,7 +532,7 @@ function registerIpc(
           return `文件已生成并保存：${saved.name}（${saved.size >= 1024 * 1024 ? `${(saved.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(saved.size / 1024))}KB`}）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。请简短告知用户文件已生成及内容概要。`;
         }
       };
-      let result: { textLength: number; toolCalls: number } | undefined;
+      let result: AgentRunResult | undefined;
       let agentError: unknown;
       let attempts = 0;
       // 整轮重试：智能体是多步工具循环，而 SDK 的 maxRetries 只覆盖"首个请求"——
@@ -438,7 +553,7 @@ function registerIpc(
           // browserOnly 只是改变搜索的执行方式（只用 Chromium 渲染）。漏传会导致工具不暴露，
           // 模型只能凭训练知识回答"该商品尚未发布"——UI 实测抓到的就是这个 bug。
           // 工具调用开始即推送 llm:tool：气泡实时显示"正在搜索/正在生成视频"；完成时显示结果摘要（全链路透明）。
-          result = await chatAgent(agentOptions, messages, agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
+          result = await chatAgent(agentOptions, effective, agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
             sendLlmTool({ tool, input, phase: "start", sessionId: session });
           }, (tool, summary) => {
             sendLlmTool({ tool, input: "", phase: "end", result: summary, sessionId: session });
@@ -459,20 +574,31 @@ function registerIpc(
         // "模型不支持工具"会误导用户去换模型。（真"不支持工具"走下面全 0 分支，不抛错。）
         const reason = describeError(agentError, "智能体请求失败");
         chunk({ seq: 1, delta: `（智能体模式请求失败：${reason}，已自动改用普通对话模式）\n\n` });
-        await service.chat(messages, webSearch || browserOnly, chunk, browserOnly);
+        await service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
         done({ ok: true });
         return;
       }
       if (agentSent === 0 && result.textLength === 0 && result.toolCalls === 0) {
         // 模型走了 agent 路径但没出文本也没出工具调用——基本就是不支持函数调用。自动回落普通对话。
         chunk({ seq: 1, delta: "（当前模型不支持工具调用，已自动改用普通对话模式）\n\n" });
-        await service.chat(messages, webSearch || browserOnly, chunk, browserOnly);
+        await service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
         done({ ok: true });
         return;
       }
       if (agentSent === 0 && result.toolCalls > 0) {
         // 工具调成功了（任务卡片已经推给渲染端）但模型没再输出收尾文本：不能留空气泡让用户看到"（空回复）"。
         chunk({ seq: 1, delta: "已按你的要求创建视频生成任务，结果卡片在下方实时显示，也可到「生成工作台」查看。" });
+      }
+      // 服务端 usage 落账：本轮实测的输入 token 数 + 当时的消息条数，作为下次压缩判定的锚点。
+      // 拿不到 usage 时不写样本——下一轮自动回落到字符估算（估算值不覆盖已有的服务端样本）。
+      if (result.usage) {
+        const budget = budgetFor(session);
+        budget.sample = { serverInputTokens: result.usage.inputTokens, messageCount: effective.length };
+        budget.window = recordBaseline(budget.window, result.usage.inputTokens, "server");
+      } else {
+        // 无 usage：用当前有效历史的估算量作基线（Codex set_estimated_prefill 的等价物）。
+        const budget = budgetFor(session);
+        budget.window = recordBaseline(budget.window, activeContextTokens(effective, undefined), "estimated");
       }
       done({ ok: true });
     })().catch((error: unknown) => {
@@ -494,7 +620,43 @@ function registerIpc(
     for (const controller of sessionAborters.values()) controller.abort();
     for (const service of sessionServices.values()) service.abort();
     return true;
-  });  handle("attachment:read", async (_event, filePath: string) => {
+  });
+
+  /**
+   * 上下文占用查询：渲染端据此显示「上下文 42%」，并在超阈值时把压缩按钮点亮。
+   * 返回的百分比以「模型窗口 × 80%」为分母——100% 即压缩触发点。
+   */
+  handle("llm:context-status", async (_event, messages: ChatMessage[], sessionId: string) => {
+    const settings = await settingsStore.get();
+    const session = typeof sessionId === "string" && sessionId ? sessionId : "anon";
+    const budget = budgetFor(session);
+    const modelLimit = contextWindowFor(settings.llm.model);
+    // 与真正发给模型的那份保持同一口径（压缩后就是压缩结果 + 新增）。
+    const active = activeContextTokens(effectiveFor(session, messages ?? []), budget.sample);
+    const decision = shouldCompact({ activeInputTokens: active, state: budget.window, modelLimitTokens: modelLimit });
+    return {
+      percent: Math.max(0, decision.percent),
+      activeTokens: active,
+      modelLimitTokens: modelLimit,
+      windowNumber: budget.window.windowNumber,
+      // 基线来源：server=已用上游实测值，estimated=纯本地估算（提示用户数字是估的）。
+      baselineSource: budget.window.baselineSource
+    };
+  });
+
+  /** 手动压缩：用户点「立即压缩上下文」时触发（对齐 Codex 的 Manual trigger）。 */
+  handle("llm:compact", async (_event, messages: ChatMessage[], sessionId: string) => {
+    const session = typeof sessionId === "string" && sessionId ? sessionId : "anon";
+    const controller = new AbortController();
+    try {
+      const { info } = await maybeCompact(session, messages ?? [], "manual", controller.signal);
+      return info ?? { before: 0, after: 0, windowNumber: 0, reason: "未触发压缩" };
+    } catch (error) {
+      throw new Error(describeError(error, "压缩失败"));
+    }
+  });
+
+  handle("attachment:read", async (_event, filePath: string) => {
     if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
     const extension = path.extname(filePath).toLowerCase();
     const name = path.basename(filePath);

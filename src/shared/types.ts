@@ -249,12 +249,18 @@ export interface WorkbenchApi {
   testLlm(): Promise<ApiResponse<BackendTestResult>>;
   /** 游乐场：读取本地附件为 data URL（图片）或文本内容。 */
   readAttachment(path: string): Promise<ApiResponse<AttachmentPayload>>;
+  /** 上下文占用查询：渲染端据此显示「上下文 N%」并把压缩按钮点亮。 */
+  getContextStatus(messages: ChatMessage[], sessionId: string): Promise<ApiResponse<ContextStatus>>;
+  /** 手动压缩上下文（对齐 Codex 的 Manual trigger）。 */
+  compactContext(messages: ChatMessage[], sessionId: string): Promise<ApiResponse<CompactionEvent>>;
   onLlmChunk(listener: (chunk: LlmStreamEvent) => void): () => void;
   onLlmDone(listener: (event: LlmDoneEvent) => void): () => void;
   /** 智能体工具经 generate_video 建好任务后推送任务 id：渲染端把卡片挂到当前会话气泡上。 */
   onLlmTasks(listener: (event: LlmTasksEvent) => void): () => void;
   /** 智能体工具调用开始事件：渲染端把"正在搜索/正在生成视频"实时显示在气泡上（透明度）。 */
   onLlmTool(listener: (event: LlmToolEvent) => void): () => void;
+  /** 上下文被压缩（自动或手动）：渲染端在对话流里插入分割提示。 */
+  onLlmCompaction(listener: (event: CompactionEvent) => void): () => void;
   onTaskUpdate(listener: (task: GenerationTask) => void): () => void;
 }
 
@@ -308,5 +314,29 @@ export interface LlmToolEvent {
   phase?: "start" | "end";
   /** end 阶段的结果摘要文本。 */
   result?: string;
+  sessionId?: string;
+}
+
+/** 上下文占用查询结果（渲染端据此显示占用比例并把压缩按钮点亮）。 */
+export interface ContextStatus {
+  /** 已用比例（分母为「模型窗口 × 80%」，即 100% 就是压缩触发点）。 */
+  percent: number;
+  activeTokens: number;
+  modelLimitTokens: number;
+  /** 已压缩次数；0 表示还没压过。 */
+  windowNumber: number;
+  /** 基线来源：server=上游实测，estimated=本地字符估算，none=还没锚定。 */
+  baselineSource: "server" | "estimated" | "none";
+}
+
+/** 一次压缩的结果摘要，用于在对话里插入分割提示。 */
+export interface CompactionEvent {
+  /** 压缩前/后的 token 估算量。 */
+  before: number;
+  after: number;
+  /** 人类可读的触发原因。 */
+  reason: string;
+  /** 压缩后的窗口序号。 */
+  windowNumber: number;
   sessionId?: string;
 }

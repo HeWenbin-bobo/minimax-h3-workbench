@@ -237,6 +237,13 @@ function humanizeToolInput(toolName: string, input: unknown): string {
   return String(input).slice(0, 120);
 }
 
+/** 一轮智能体对话的收尾统计。usage 供上下文压缩记账；拿不到时调用方回落到字符估算。 */
+export interface AgentRunResult {
+  textLength: number;
+  toolCalls: number;
+  usage?: { inputTokens: number };
+}
+
 export async function chatAgent(
   options: LlmServiceOptions,
   messages: ChatMessage[],
@@ -249,7 +256,7 @@ export async function chatAgent(
   onToolStart?: (tool: string, input: string) => void,
   /** 工具执行完成回调：渲染端显示结果摘要（"找到 N 条结果"/"已建 N 个任务"），工具全链路透明。 */
   onToolEnd?: (tool: string, summary: string) => void
-): Promise<{ textLength: number; toolCalls: number }> {
+): Promise<AgentRunResult> {
   const [{ streamText, tool, stepCountIs }, { createOpenAICompatible }, { z }] = await Promise.all([
     import("ai"),
     import("@ai-sdk/openai-compatible"),
@@ -385,7 +392,16 @@ export async function chatAgent(
     // 没有则原样抛 AI SDK 的占位错误。
     throw underlyingError ?? error;
   }
-  return { textLength, toolCalls };
+  // usage 用于上下文压缩的基线记账（inputTokens 是"本窗口的输入起点"）。
+  // 上游不返回 usage 时字段为 undefined——调用方回落字符估算，不能当成 0。
+  let usage: { inputTokens: number } | undefined;
+  try {
+    const measured = await stream.usage;
+    if (typeof measured?.inputTokens === "number") usage = { inputTokens: measured.inputTokens };
+  } catch {
+    // usage 不可用不影响本轮结果。
+  }
+  return { textLength, toolCalls, usage };
 }
 
 /**

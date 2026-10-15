@@ -462,6 +462,37 @@ button { cursor: pointer; }
 .pg-plan-run:hover:not(:disabled) { transform: translateY(-1px); }
 .pg-plan-run:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
 .pg-plan-hint { color: var(--subtle); font-size: 10px; }
+
+/* 执行清单（update_plan）：模型把任务拆解写出来。常驻展开、不折叠——
+   清单是用户判断"它做得对不对"的主要依据，藏起来就失去意义了。 */
+.pg-plan-steps { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfd; padding: 9px 12px; }
+.pg-plan-steps-head { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: 0.02em; }
+.pg-plan-progress { margin-left: auto; color: var(--cyan); font-variant-numeric: tabular-nums; }
+.pg-plan-steps ol { margin: 7px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.pg-plan-step { display: flex; align-items: flex-start; gap: 7px; font-size: 11px; line-height: 1.6; color: var(--muted); }
+.pg-plan-step-icon { flex: none; width: 12px; text-align: center; color: var(--subtle); }
+.pg-plan-step.completed { color: var(--subtle); text-decoration: line-through; }
+.pg-plan-step.completed .pg-plan-step-icon { color: var(--success); }
+.pg-plan-step.in_progress { color: var(--ink); font-weight: 600; }
+.pg-plan-step.in_progress .pg-plan-step-icon { color: var(--pink); animation: pg-pulse 1.1s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .pg-plan-step.in_progress .pg-plan-step-icon { animation: none; } }
+
+/* 选择题卡片（request_user_input）：主进程挂起等回答，卡片就是那个"闸门"。
+   必须给「跳过」出口——否则用户不想答时只能干等 3 分钟超时。 */
+.pg-question-card { margin-top: 8px; border: 1px solid #ffc1ad; border-radius: 12px; background: #fffaf7; padding: 12px 14px; display: grid; gap: 11px; }
+.pg-question-head { color: var(--pink); font-size: 10px; font-weight: 800; letter-spacing: 0.04em; }
+.pg-question { display: grid; gap: 7px; }
+.pg-question-title { color: var(--ink); font-size: 11.5px; line-height: 1.65; display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+.pg-question-chip { flex: none; border-radius: 20px; background: #fff3ee; color: var(--pink); font-size: 9px; font-weight: 700; padding: 2px 8px; }
+.pg-question-options { display: grid; gap: 6px; }
+.pg-question-option { text-align: left; display: grid; gap: 2px; border: 1px solid #ffdcd0; background: #fff; border-radius: 10px; padding: 8px 11px; cursor: pointer; }
+.pg-question-option:hover { border-color: #ff9b7c; background: #fff8f5; }
+.pg-question-option.picked { border-color: var(--pink); background: #fff3ee; box-shadow: 0 0 0 2px rgba(255, 39, 111, 0.12); }
+.pg-question-option strong { color: var(--ink); font-size: 11px; }
+.pg-question-option small { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.pg-question-actions { display: flex; align-items: center; gap: 10px; }
+.pg-question-skip { border: 0; background: transparent; color: var(--muted); font-size: 10px; text-decoration: underline; padding: 4px 2px; }
+.pg-question-skip:hover { color: var(--ink); }
 .pg-video-form { margin: 10px 16px 0; padding: 13px; border: 1px dashed #ff9b7c; background: #fffaf7; border-radius: 12px; display: grid; gap: 4px; }
 .pg-video-form label { color: #6e7782; font-size: 10px; display: block; }
 .pg-video-form input, .pg-video-form select, .pg-video-form textarea { width: 100%; margin-top: 4px; background: #fff; border: 1px solid #dfe3e8; border-radius: 8px; padding: 8px 10px; font: inherit; outline: 0; }

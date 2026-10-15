@@ -190,6 +190,23 @@ export interface AgentToolCallbacks {
   openPage: (url: string) => Promise<string>;
   /** 文件产物工具（create_file）：把内容保存为文件并返回给模型的确认文本。 */
   createFile: (params: { kind: "html" | "csv" | "tsv" | "md" | "xlsx"; name: string; content: string }) => Promise<string>;
+  /** 步骤清单工具（update_plan）：把进度推给渲染端，返回给模型的确认文本。 */
+  updatePlan: (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => Promise<string>;
+  /**
+   * 交互提问工具（request_user_input）：把选择题推给渲染端并**等待**用户回答。
+   * 实现方必须带超时，且超时时 reject（不是 resolve 空值）——这样模型能区分"用户选了跳过"
+   * 与"拿到了答案"，从而按最佳判断继续而不是以为用户什么都没选。
+   */
+  requestUserInput: (params: { questions: AgentQuestion[] }) => Promise<string>;
+}
+
+/** 交互提问的一道题。与 Codex `request_user_input` 的 schema 一致。 */
+export interface AgentQuestion {
+  id: string;
+  header: string;
+  question: string;
+  multiSelect?: boolean;
+  options: Array<{ id: string; label: string; description: string }>;
 }
 
 /** 从打包产物读取智能体框架版本（agentVersion.ts 由构建脚本从 node_modules/ai 同步）。 */
@@ -294,17 +311,26 @@ export async function chatAgent(
     system: options.systemPrompt || "你是 MiniMax H3 视频工作台内置的智能助手，可以联网搜索资料，也可以直接调用 generate_video 工具为用户生成视频。",
     messages: toModelMessages(messages),
     tools: {
+      // 工具描述一律按 Codex `*_spec.rs` 的写法组织：先讲"什么时候用"、再讲"什么时候不用"，
+      // 参数约束下沉到 schema（enum / min / max / describe），不在描述里重复一遍。
+      // 这样做的理由是实测教训：描述写得含糊时模型会凭训练知识作答，而不是先调工具核实。
       // 「联网」开关关闭时不暴露 web_search，避免模型调用一个用户已关掉的工具。
       ...(enableWebSearch ? {
         web_search: tool({
-          description: "联网搜索引擎：返回标题、摘要与链接。凡涉及实时信息（价格、新闻、版本号、时效事实）、用户提到'查一下/搜一下/最新'，或你不确定的事实，都必须先调用本工具核实，不要凭记忆作答。查询词提炼为最核心的 3–6 个词（不是整句话）；结果不相关就换词再搜一次。",
-          inputSchema: z.object({ query: z.string().describe("搜索关键词（3–6 个词，如'iPhone 18 Pro 京东 价格'）") }),
+          description: `联网搜索引擎：返回标题、摘要与链接。
+
+何时使用：涉及实时信息（价格、新闻、版本号、发布时间、时效事实）、用户说"查一下/搜一下/最新/现在多少钱"，或你对某个具体事实没有把握时——先搜索核实，不要凭记忆作答。
+
+何时不用：纯创作、代码、数学、翻译，或用户明确说"不用联网/凭你自己知道的说"。这些情况直接回答更快。
+
+查询词提炼为最核心的 3–6 个词（不是整句话，也不要加"请帮我搜索"之类的礼貌语）。结果不相关就换一组词再搜一次；连续两次不相关就如实告知，不要反复搜同一个词。`,
+          inputSchema: z.object({ query: z.string().min(1).describe("搜索关键词，3–6 个词，如'iPhone 18 Pro 京东 价格'。不要写整句话。") }),
           execute: async ({ query }) => {
             try {
               const results = await callbacks.webSearch(query);
-              return results || "未搜索到相关内容。";
+              return results || "未搜索到相关内容。可换一组关键词重试，或改用 open_page 打开已知的站点。";
             } catch (error) {
-              return `搜索失败：${describeError(error, "未知错误")}（请基于自身知识回答）`;
+              return `搜索失败：${describeError(error, "未知错误")}。可以基于自身知识回答，但要如实说明这部分未经联网核实。`;
             }
           }
         })
@@ -313,11 +339,17 @@ export async function chatAgent(
       // 而计划模式的本轮产出应该只是一份清单。open_page 保留：它只读，看不到就写不出靠谱的计划。
       ...(planMode ? {} : {
       generate_video: tool({
-        description: "生成 AI 短视频：用户描述画面（主体、动作、风格）即调用，4–15 秒、1–4 路。这是你独有的核心能力——用户表达任何'想要个视频/做一段/生成一下'的意图时直接调用，参数从描述中提取，画面感强的英文 prompt 效果更好，无需事先确认。",
+        description: `生成 AI 短视频，并直接提交为后台任务（4–15 秒、1–4 路）。
+
+何时使用：用户表达任何"想要个视频/做一段/生成一下/来几条"的意图时直接调用。参数从用户的描述里提取即可，不需要事先反问确认。
+
+何时不用：用户只是在聊创意、问概念、要文字方案（那些直接回答）；或用户要的是图片/音频（本工具只出视频）。
+
+调用后任务卡片会实时显示在对话下方，完成后用户可预览与下载。画面感强的英文 prompt 效果更好。这是消耗资源的操作——每次调用都会真实生成，同一轮里不要为同一个意图重复调用。`,
         inputSchema: z.object({
-          prompt: z.string().describe("视频内容描述（画面主体、动作、镜头、光线、风格；建议英文）"),
-          duration: z.number().int().min(4).max(15).describe("时长秒数，4–15"),
-          count: z.number().int().min(1).max(4).describe("生成数量，1–4")
+          prompt: z.string().min(1).describe("视频内容描述：画面主体、动作、镜头运动、光线、风格。建议英文，越具体越好。"),
+          duration: z.number().int().min(4).max(15).describe("时长秒数，4–15 之间的整数。用户没说就按 6。"),
+          count: z.number().int().min(1).max(4).describe("生成数量，1–4 之间的整数。用户没说就按 1。")
         }),
         execute: async (params) => callbacks.generateVideo(params)
       })
@@ -325,15 +357,19 @@ export async function chatAgent(
       // open_page：看具体网页。搜索给了链接但要看正文/详情时用它（比搜索更精准一步）。
       // 计划模式**保留**：它只读，没有副作用；模型看不到实际情况就写不出靠谱的计划。
       open_page: tool({
-        description: "打开指定网页并返回页面内容。两种场景：① 用户点名某个网站（'打开 baidu 看看/去京东查这个商品'）；② web_search 返回了链接但摘要不够，需要看正文细节。URL 必须带协议（https:// 开头）。",
+        description: `打开指定网页，返回渲染后的页面正文。
+
+何时使用：① 用户点名某个网站（"打开百度看看/去京东查这个商品"）；② web_search 返回了链接，但摘要不足以回答，需要看正文细节。
+
+何时不用：你只是想找信息、还不知道哪个页面有——那是 web_search 的活。另外不要打开搜索结果页本身（那是搜索引擎的界面，不是内容），要打开结果里的具体链接。`,
         inputSchema: z.object({
-          url: z.string().url().describe("要打开的完整 URL，以 https:// 开头")
+          url: z.string().url().describe("要打开的完整 URL，必须带协议（https:// 开头）。")
         }),
         execute: async ({ url }) => {
           try {
             return await callbacks.openPage(url);
           } catch (error) {
-            return `打开网页失败：${describeError(error, "渲染失败")}（可改用 web_search 搜索相关信息）`;
+            return `打开网页失败：${describeError(error, "渲染失败")}。可改用 web_search 搜索相关信息，或换一个更直接的链接。`;
           }
         }
       }),
@@ -341,20 +377,87 @@ export async function chatAgent(
       // 而道歉推脱（实测复现）——模型对工具调用的信任远高于对文字约定的信任，产物交付必须工具化。
       ...(planMode ? {} : {
       create_file: tool({
-        description: "生成文件并保存到用户的文件产物区（聊天中自动出现文件卡片，可预览、可在文件夹中打开）。这是你生成 Excel/表格、网页、文档的标准方式——用户要任何文件时调用本工具，而不是输出代码块或道歉。kind: csv/tsv（表格→存 .xlsx，Excel 可直接打开）、html（网页/小工具/游戏）、md（Word/文档）。",
+        description: `生成文件并保存到用户的文件产物区。保存后对话里会出现文件卡片，用户可点「预览」查看、可在文件夹中打开。
+
+何时使用：用户要任何形式的文件产物——表格/Excel、网页/小工具/游戏、文档/报告/Word。这是产出文件的标准方式。
+
+何时不用：用户只是想要一段可以直接读的文字回答（那就直接在回复里写），或只是问个问题。不要为了"显得专业"而把普通回答塞进文件。
+
+类型选择：结构化数据用 csv/tsv（首行是表头，保存为 .xlsx，Excel 可直接打开）；可交互的网页、小工具、游戏用 html（要完整，含 <!DOCTYPE html>）；纯文本报告用 md。
+
+用户要文件时**直接生成完整内容**——不要道歉、不要教他自己去做、不要只给示例、不要把内容同时贴在回复里（文件卡片已经承载了内容，重复一遍是浪费）。`,
         inputSchema: z.object({
-          kind: z.enum(["html", "csv", "tsv", "md"]).describe("文件类型：csv/tsv=表格(存为.xlsx)、html=网页、md=文档"),
-          name: z.string().describe("文件名（不含扩展名，如'科技新闻'）"),
-          content: z.string().describe("完整文件内容：csv/tsv 首行为表头；html 为完整网页；md 为 markdown 正文")
+          kind: z.enum(["html", "csv", "tsv", "md"]).describe("文件类型。csv/tsv=结构化数据（存为 .xlsx）；html=网页/小工具/游戏；md=文档/报告。"),
+          name: z.string().min(1).describe("文件名，不含扩展名（如'科技新闻'）。不要带 .xlsx / .html 等后缀。"),
+          content: z.string().min(1).describe("完整文件内容。csv/tsv 首行为表头；html 为完整网页（含 <!DOCTYPE html>）；md 为 markdown 正文。")
         }),
         execute: async (params) => {
           try {
             return await callbacks.createFile({ ...params, kind: params.kind === "csv" || params.kind === "tsv" ? "xlsx" : params.kind });
           } catch (error) {
-            return `保存文件失败：${describeError(error, "未知错误")}（请改用围栏代码块输出内容）`;
+            return `保存文件失败：${describeError(error, "未知错误")}。请把内容改写成围栏代码块直接输出，并在回复里说明文件未能保存。`;
           }
         }
       })
+      }),
+      // update_plan（对齐 Codex `plan_spec.rs` 的 update_plan）：把任务拆解**写出来**。
+      // 不是计划模式——计划模式是"这一轮不动手"，本工具是"动手期间让用户看得见进展"。
+      // 工具化的理由同 create_file：靠提示词要求"先说步骤"模型会跳过，给它一个工具才会用。
+      update_plan: tool({
+        description: `更新当前任务的步骤清单，让用户看到你打算怎么做、现在走到哪一步。
+
+何时使用：任务需要 3 步以上、或要连续调用多个工具时，**在开始动手前先列一遍**，之后每完成一步就更新一次状态。
+
+何时不用：一步就能做完的任务（直接做，别为了列清单而列清单）；也不要用它代替正常回答——清单是给用户看进度的，不是回答本身。
+
+规则：整个清单里最多一项是 in_progress。步骤写完就不要改措辞（用户会对照着看），只改 status。`,
+        inputSchema: z.object({
+          explanation: z.string().describe("一句话说明这次更新的原因（如'已完成搜索，开始整理数据'）。仅当状态变化需要解释时才写。").optional(),
+          plan: z.array(z.object({
+            step: z.string().describe("步骤描述，写清要做什么，如'搜索 2025 年国产显卡价格'。"),
+            status: z.enum(["pending", "in_progress", "completed"]).describe("步骤状态。pending=未开始，in_progress=进行中（全清单最多一项），completed=已完成。")
+          })).min(1).describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。")
+        }),
+        execute: async (params) => {
+          try {
+            return await callbacks.updatePlan(params);
+          } catch (error) {
+            return `步骤清单更新失败：${describeError(error, "未知错误")}（不影响任务继续，请直接用文字说明进度）`;
+          }
+        }
+      }),
+      // request_user_input（对齐 Codex `request_user_input_spec.rs`）：把选择题做成工具，
+      // 而不是让模型在回复里手写 A/B/C 等用户打字——手写选项用户得自己复述，容易理解错。
+      // 主进程会挂起等渲染端回答，超时则按"无回答、按最佳判断继续"收尾。
+      request_user_input: tool({
+        description: `向用户提一个选择题，拿到答复后再继续。这是唯一会真正等到用户回答的交互方式。
+
+何时使用：卡在**一两个关键取舍**上、且不同选择会导致明显不同的产出一一例如视频时长、文件格式、风格方向、要不要包含某类内容。这时问清楚比猜一个再做要省事。
+
+何时不用：能从上下文或历史习惯合理推断的（那就直接做，按 CLAUDE.md 的工作方式第 1 条：能动手就不问）；也不要一次问一串问题——最多 3 个，且每个都要有"我推荐哪个"的隐含信息。
+
+一次调用最多 3 个问题，每个问题 2–4 个选项。用户可以选择不回答（超时或跳过），此时你必须按自己认为最合理的方式继续，不要卡住不动。`,
+        inputSchema: z.object({
+          questions: z.array(z.object({
+            id: z.string().describe("问题标识（英文短名，如'video_duration'），用于回传答案时对应。"),
+            header: z.string().describe("很短的中文标签，最多 12 个字（如'视频时长'）。"),
+            question: z.string().describe("完整问题，一句话说清要用户在什么之间做选择。"),
+            multiSelect: z.boolean().describe("是否允许多选。只有确实可以同时选多个时才设为 true。").optional(),
+            options: z.array(z.object({
+              id: z.string().describe("选项标识（英文短名）。"),
+              label: z.string().describe("选项显示文字，简短（如'8 秒'）。"),
+              description: z.string().describe("这个选项意味着什么，一句话。")
+            })).min(2).max(4).describe("2–4 个互斥选项。")
+          })).min(1).max(3).describe("1–3 个问题。")
+        }),
+        execute: async (params) => {
+          try {
+            return await callbacks.requestUserInput(params);
+          } catch (error) {
+            // 用户没回答不算失败：必须让模型继续，而不是让它在这里死等或反复重试。
+            return `未获得用户回答（${describeError(error, "用户选择了跳过或未在时限内回答")}）。请按你认为最合理的方式继续执行，并在回复里说明你做了哪些默认假设。`;
+          }
+        }
       })
     },
     stopWhen: stepCountIs(10),
@@ -432,7 +535,10 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
       webSearch: async () => "（探测）",
       generateVideo: async () => "（探测）",
       openPage: async () => "（探测）",
-      createFile: async () => "（探测）"
+      createFile: async () => "（探测）",
+      // 探测不需要真的弹选择题/改清单：给个无害的返回值即可。
+      updatePlan: async () => "（探测）",
+      requestUserInput: async () => "（探测）"
     }, () => { sent += 1; }, AbortSignal.timeout(60_000));
     const supported = result.toolCalls > 0 || result.textLength > 0;
     if (!supported) return { supported: false, message: "模型未返回任何内容，可能不支持工具调用（智能体模式不可用），将自动改用普通对话。" };

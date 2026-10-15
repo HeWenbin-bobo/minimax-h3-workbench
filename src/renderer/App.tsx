@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMessage, ContextStatus, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LlmStreamEvent, LocalModelStatus, ResourceLink, UpdateInfo } from "../shared/types";
+import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMessage, ContextStatus, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LlmQuestion, LlmStreamEvent, LocalModelStatus, PlanStep, ResourceLink, UpdateInfo } from "../shared/types";
 import { LLM_PROVIDERS, MAX_PROMPT_LENGTH } from "../shared/types";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
 import { describeError } from "../shared/errors";
@@ -459,6 +459,16 @@ interface PlaygroundMessage {
   toolSteps?: string[];
   /** 计划模式下产出的方案清单（尚未执行）：渲染端据此显示「继续执行」按钮。 */
   plan?: boolean;
+  /**
+   * 步骤清单（update_plan 工具）：模型把任务拆解写出来，用户在气泡上看到进度。
+   * 与 plan 的区别：plan 是"这一轮不动手、等你点头"，步骤清单是"正在动手、让你看得见走到哪"。
+   */
+  planSteps?: PlanStep[];
+  /**
+   * 挂起的选择题（request_user_input）：模型问了一两个关键取舍，等用户点选。
+   * 渲染端据此在消息下方渲染选择卡片；用户点完后清空（工具循环那边已经拿到答案继续了）。
+   */
+  questions?: { requestId: string; questions: LlmQuestion[] };
 }
 
 const pgSessionsKey = "h3-playground-sessions";
@@ -680,7 +690,24 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         return { ...session, messages: [...messages.slice(0, insertAt), notice, ...messages.slice(insertAt)] };
       }));
     });
-    return () => { offChunk(); offDone(); offTasks(); offTool(); offCompaction(); };
+    // 步骤清单更新（update_plan）：整份替换，不是增量。模型每完成一步就重发全量，
+    // 渲染端直接覆盖即可——累积拼接会让"已完成"永远追不上实际状态。
+    const offPlan = window.h3.onLlmPlan((event) => {
+      const targetId = event.sessionId;
+      if (!targetId) return;
+      setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, planSteps: event.plan })));
+    });
+    // 交互提问（request_user_input）：挂到当前气泡上渲染选择卡片。
+    // 此刻主进程的工具循环正挂起等 answerLlmQuestion——用户不点，这一轮就不会往下走。
+    const offQuestion = window.h3.onLlmQuestion((event) => {
+      const targetId = event.sessionId;
+      if (!targetId) return;
+      setSessions((all) => patchLast(all, targetId, (msg) => ({
+        ...msg,
+        questions: { requestId: event.requestId, questions: event.questions }
+      })));
+    });
+    return () => { offChunk(); offDone(); offTasks(); offTool(); offCompaction(); offPlan(); offQuestion(); };
   }, []);
   // 粘底自动滚动：仅在用户接近底部时跟随。
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
@@ -820,6 +847,29 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     setGeneratingIds((all) => all.filter((id) => id !== activeId));
     sendingRef.current.delete(activeId);
     setSessions((all) => patchLast(all, activeId, (msg) => ({ ...msg, streaming: false })));
+  }
+
+  /**
+   * 回传选择题答案。主进程的工具循环正挂起等这个调用。
+   * 无论成功与否都把卡片摘掉：留着会让用户以为还能再答一次，而那个 requestId 早已落定。
+   */
+  async function answerQuestions(requestId: string, answers: Record<string, string[]>) {
+    setSessions((all) => all.map((session) => session.id !== activeId ? session : {
+      ...session,
+      messages: session.messages.map((msg) => msg.questions?.requestId === requestId ? { ...msg, questions: undefined } : msg)
+    }));
+    const result = await window.h3.answerLlmQuestion(requestId, answers);
+    // 返回 false 通常是超时竞态（用户点得太慢），不是错误——提示一下即可，不弹红色报错。
+    if (!result.ok || !result.data) onNotice("这组问题已经超时或结束了，AI 会按最合理的方式继续。");
+  }
+
+  /** 跳过整组问题：立即放行工具循环，不必干等超时。 */
+  async function skipQuestions(requestId: string) {
+    setSessions((all) => all.map((session) => session.id !== activeId ? session : {
+      ...session,
+      messages: session.messages.map((msg) => msg.questions?.requestId === requestId ? { ...msg, questions: undefined } : msg)
+    }));
+    await window.h3.skipLlmQuestion(requestId);
   }
 
   async function submitVideo() {
@@ -976,6 +1026,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
                 const artifact = msg.role === "assistant" && !msg.streaming ? extractArtifact(msg.content) : undefined;
                 return artifact && <PgArtifactCard kind={artifact.kind} content={artifact.content} sessionId={activeId} onPreview={setPreview} onError={onError} />;
               })()}</div>
+              {/* 步骤清单：常驻显示（不折叠）——它是用户判断"它做得对不对"的主要依据。 */}
+              {msg.planSteps && msg.planSteps.length > 0 && <PgPlanSteps steps={msg.planSteps} />}
+              {/* 选择题：主进程此刻挂起等回答，所以必须给「跳过」出口。 */}
+              {msg.questions && <PgQuestionCard
+                questions={msg.questions.questions}
+                onSubmit={(answers) => void answerQuestions(msg.questions!.requestId, answers)}
+                onSkip={() => void skipQuestions(msg.questions!.requestId)}
+              />}
               {/* 计划待确认：模型在计划模式下交出了一份像样的清单，用户点头才开工。
                   不自动执行——计划模式的全部意义就是把"做之前先看一眼"这个闸门交给用户。 */}
               {msg.plan && <div className="pg-plan-actions">
@@ -1177,6 +1235,67 @@ function SheetTable({ csv }: { csv: string }) {
     <thead><tr>{header.map((cell, i) => <th key={i}>{cell}</th>)}</tr></thead>
     <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{cell}</td>)}</tr>)}</tbody>
   </table>;
+}
+
+/**
+ * 步骤清单（update_plan 工具）：模型把任务拆解写出来，让用户看到走到哪了。
+ * 与「计划模式」的区别见 PlaygroundMessage.planSteps 的注释——这里只是进度展示，不拦执行。
+ * 全展开不折叠：清单通常 3–7 行，是用户判断"它做得对不对"的主要依据，藏起来就失去意义。
+ */
+function PgPlanSteps({ steps }: { steps: PlanStep[] }) {
+  const done = steps.filter((entry) => entry.status === "completed").length;
+  const icon = (status: PlanStep["status"]) => status === "completed" ? "✓" : status === "in_progress" ? "◐" : "○";
+  return <div className="pg-plan-steps">
+    <div className="pg-plan-steps-head">执行清单<span className="pg-plan-progress">{done}/{steps.length}</span></div>
+    <ol>
+      {steps.map((entry, i) => <li key={i} className={`pg-plan-step ${entry.status}`}>
+        <span className="pg-plan-step-icon">{icon(entry.status)}</span>{entry.step}
+      </li>)}
+    </ol>
+  </div>;
+}
+
+/**
+ * 选择题卡片（request_user_input 工具）：模型中途问 1–3 个关键取舍。
+ * 主进程此刻正挂起等回答——所以这里必须给"跳过"出口，否则用户不想答时只能干等超时（3 分钟）。
+ * 单选点一下即提交（少一次点击）；多选靠复选框 + 确认按钮。
+ */
+function PgQuestionCard({ questions, onSubmit, onSkip }: {
+  questions: LlmQuestion[];
+  onSubmit: (answers: Record<string, string[]>) => void;
+  onSkip: () => void;
+}) {
+  const [picked, setPicked] = useState<Record<string, string[]>>({});
+  const toggle = (question: LlmQuestion, optionId: string) => {
+    setPicked((all) => {
+      const current = all[question.id] ?? [];
+      if (!question.multiSelect) return { ...all, [question.id]: [optionId] };
+      return { ...all, [question.id]: current.includes(optionId) ? current.filter((id) => id !== optionId) : [...current, optionId] };
+    });
+    // 单选：点完立刻提交这一题（只有一道题时就是提交全部，多道题时逐题落定）。
+    if (!question.multiSelect && questions.length === 1) onSubmit({ [question.id]: [optionId] });
+  };
+  return <div className="pg-question-card">
+    <div className="pg-question-head">AI 想先确认几件事</div>
+    {questions.map((question) => <div key={question.id} className="pg-question">
+      <div className="pg-question-title">{question.header && <span className="pg-question-chip">{question.header}</span>}{question.question}</div>
+      <div className="pg-question-options">
+        {question.options.map((option) => <button
+          key={option.id}
+          className={`pg-question-option${(picked[question.id] ?? []).includes(option.id) ? " picked" : ""}`}
+          onClick={() => toggle(question, option.id)}
+        >
+          <strong>{option.label}</strong>
+          <small>{option.description}</small>
+        </button>)}
+      </div>
+    </div>)}
+    <div className="pg-question-actions">
+      {/* 多选或有多个问题时需要显式提交；单选单题已在点选时直接提交，这里不重复渲染按钮。 */}
+      {!(questions.length === 1 && !questions[0].multiSelect) && <button className="pg-plan-run" onClick={() => onSubmit(picked)}>确认</button>}
+      <button className="pg-question-skip" onClick={onSkip} title="不回答，让 AI 自己按最合理的方式做">跳过，你决定</button>
+    </div>
+  </div>;
 }
 
 /** 工具调用步骤日志（可折叠）：生成中默认展开（实时透明），完成后默认折叠为一行摘要——对标 WorkBuddy，

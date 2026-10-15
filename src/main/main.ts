@@ -16,11 +16,11 @@ import {
 import { AdapterRegistry } from "./backends/adapterRegistry";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import { describeError, isNetworkError } from "../shared/errors";
-import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmDoneEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, SecretName } from "../shared/types";
+import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmDoneEvent, LlmPlanEvent, LlmQuestionEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, SecretName } from "../shared/types";
 import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
-import { LlmService, chatAgent, type AgentRunResult } from "./modules/llmService";
+import { LlmService, chatAgent, type AgentQuestion, type AgentRunResult } from "./modules/llmService";
 import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
@@ -29,6 +29,7 @@ import { renderHtml, clearBrowserFetchCache } from "./modules/browserFetch";
 import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, historyTextOf, type WorldStateSnapshot } from "./modules/worldState";
+import { QuestionBridge } from "./modules/questionBridge";
 import { buildSystemPrompt } from "../shared/agentPrompt";
 import {
   activeContextTokens,
@@ -220,6 +221,12 @@ function registerIpc(
    * 最坏情况是多花一次 token 重发一遍环境事实，不会漏注入（安全降级）。
    */
   const sessionWorldState = new Map<string, WorldStateSnapshot>();
+  /**
+   * 交互提问桥：工具循环挂起等渲染端回答（`request_user_input`）。
+   * 必须带超时——没有超时的话用户关窗走开会让该会话的取消器永久占着，
+   * 那条会话从此再也发不出消息（同会话并发守卫一直拒绝）。
+   */
+  const questionBridge = new QuestionBridge();
   const rebuildLlm = async (): Promise<LlmService> => {
     const settings = await settingsStore.get();
     llm = new LlmService({
@@ -264,6 +271,10 @@ function registerIpc(
   const sendLlmTool = (event: LlmToolEvent) => mainWindow?.webContents.send("llm:tool", event);
   // 智能体工具建好任务后推送任务 id：游乐场把卡片挂到对应会话气泡上。
   const sendLlmTasks = (event: LlmTasksEvent) => mainWindow?.webContents.send("llm:tasks", event);
+  // 步骤清单更新（update_plan）：渲染端在气泡上显示进度。
+  const sendLlmPlan = (event: LlmPlanEvent) => mainWindow?.webContents.send("llm:plan", event);
+  // 交互提问（request_user_input）：渲染端弹选择卡片；工具循环此刻正挂起等待回答。
+  const sendLlmQuestion = (event: LlmQuestionEvent) => mainWindow?.webContents.send("llm:question", event);
   // LLM 连接测试（cc-switch 模式）：拉模型列表验证连通性——不发对话（不花钱），
   // 不受对话端点路径差异影响；/models 不通的服务商回退发一条最小对话。
   handle("llm:test", async () => {
@@ -543,6 +554,20 @@ function registerIpc(
           // 通知渲染端：消息末尾追加一个产物标记（渲染端据此挂文件卡片）。
           chunk({ seq: 0, delta: `\n\n\`\`\`${params.kind === "md" ? "markdown" : params.kind}\n${params.content}\n\`\`\`\n` });
           return `文件已生成并保存：${saved.name}（${saved.size >= 1024 * 1024 ? `${(saved.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(saved.size / 1024))}KB`}）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。请简短告知用户文件已生成及内容概要。`;
+        },
+        // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。
+        updatePlan: async (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => {
+          sendLlmPlan({ plan: params.plan, explanation: params.explanation, sessionId: session });
+          const done = params.plan.filter((entry) => entry.status === "completed").length;
+          return `步骤清单已更新（${done}/${params.plan.length} 已完成），用户能在对话里看到。继续执行下一步，不要在回复里重复整个清单。`;
+        },
+        // request_user_input：把选择题交给渲染端，挂起工具循环等用户回答。
+        // 超时/跳过会 reject（见 QuestionBridge），execute 层把它翻译成"按最佳判断继续"。
+        requestUserInput: async (params: { questions: AgentQuestion[] }) => {
+          const requestId = randomUUID();
+          // 先推事件再挂起：渲染端要拿到 requestId 才能回传答案。
+          sendLlmQuestion({ requestId, questions: params.questions, sessionId: session });
+          return questionBridge.ask(session, requestId, params.questions, controller.signal);
         }
       };
       let result: AgentRunResult | undefined;
@@ -629,6 +654,8 @@ function registerIpc(
   // 取消：给了 sessionId 就只中止该会话（多会话并发时不能连坐），否则中止全部。
   handle("llm:abort", async (_event, sessionId?: string) => {
     if (sessionId) {
+      // 挂起的选择题必须先放行：否则工具循环还在等回答，取消器摘不掉，该会话永久拒发新消息。
+      questionBridge.cancelSession(sessionId);
       sessionAborters.get(sessionId)?.abort();
       sessionServices.get(sessionId)?.abort();
       return true;
@@ -637,6 +664,13 @@ function registerIpc(
     for (const service of sessionServices.values()) service.abort();
     return true;
   });
+  // 回传选择题答案：主进程的工具循环正挂起等这个调用，resolve 后模型继续往下走。
+  handle("llm:answer", (_event, requestId: string, answers: Record<string, string[]>) => {
+    // 返回 false 是正常竞态（超时后用户才点选），不抛错——抛错会在界面上弹一个无意义的失败提示。
+    return questionBridge.answer(requestId, answers ?? {});
+  });
+  // 跳过整组问题：立即放行工具循环（模型按最佳判断继续），不必干等超时。
+  handle("llm:skip-question", (_event, requestId: string) => questionBridge.skip(requestId));
 
   /**
    * 上下文占用查询：渲染端据此显示「上下文 42%」，并在超阈值时把压缩按钮点亮。

@@ -261,6 +261,18 @@ export interface WorkbenchApi {
   onLlmTool(listener: (event: LlmToolEvent) => void): () => void;
   /** 上下文被压缩（自动或手动）：渲染端在对话流里插入分割提示。 */
   onLlmCompaction(listener: (event: CompactionEvent) => void): () => void;
+  /** 智能体更新步骤清单（update_plan）：渲染端在气泡上显示/刷新进度清单。 */
+  onLlmPlan(listener: (event: LlmPlanEvent) => void): () => void;
+  /** 智能体向用户提选择题（request_user_input）：渲染端弹选择卡片，答案经 answerLlmQuestion 回传。 */
+  onLlmQuestion(listener: (event: LlmQuestionEvent) => void): () => void;
+  /**
+   * 回传选择题答案。主进程的工具循环正挂起等待这个调用。
+   * answers 形如 `{ questionId: [optionId, ...] }`。**未作答的题不要放进 map**——
+   * 主进程据此区分"用户选了跳过"与"这道题没答"。
+   */
+  answerLlmQuestion(requestId: string, answers: Record<string, string[]>): Promise<ApiResponse<boolean>>;
+  /** 跳过整组问题：主进程立即放行工具循环（模型按最佳判断继续），不必等超时。 */
+  skipLlmQuestion(requestId: string): Promise<ApiResponse<boolean>>;
   onTaskUpdate(listener: (task: GenerationTask) => void): () => void;
 }
 
@@ -318,6 +330,49 @@ export interface LlmToolEvent {
   phase?: "start" | "end";
   /** end 阶段的结果摘要文本。 */
   result?: string;
+  sessionId?: string;
+}
+
+/** 步骤清单里的一项（update_plan 工具）。 */
+export interface PlanStep {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/** 智能体更新步骤清单事件（update_plan）：渲染端在气泡上显示进度清单。 */
+export interface LlmPlanEvent {
+  /** 全量清单（每次调用都替换，不是增量）。 */
+  plan: PlanStep[];
+  /** 本次更新的原因，可能缺省。 */
+  explanation?: string;
+  sessionId?: string;
+}
+
+/** 交互提问的一个选项（request_user_input 工具）。 */
+export interface LlmQuestionOption {
+  id: string;
+  label: string;
+  description: string;
+}
+
+/** 交互提问的一道题。 */
+export interface LlmQuestion {
+  id: string;
+  /** 很短的标签（最多 12 字），渲染成 chip。 */
+  header: string;
+  question: string;
+  multiSelect?: boolean;
+  options: LlmQuestionOption[];
+}
+
+/**
+ * 智能体向用户提选择题事件（request_user_input）。
+ * 渲染端弹出选择卡片，用户点选后经 `answerLlmQuestion` 回传——主进程那边工具循环正挂起等待。
+ */
+export interface LlmQuestionEvent {
+  /** 本次提问的标识：回传答案时必须原样带上，否则主进程找不到对应的待答登记。 */
+  requestId: string;
+  questions: LlmQuestion[];
   sessionId?: string;
 }
 

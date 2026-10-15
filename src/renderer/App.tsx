@@ -4,6 +4,7 @@ import { LLM_PROVIDERS, MAX_PROMPT_LENGTH } from "../shared/types";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
 import { describeError } from "../shared/errors";
 import { looksLikePlan, type PlanMode } from "../shared/planMode";
+import { applyTheme, loadThemeChoice, saveThemeChoice, systemPrefersDark, themeLabel, type ThemeChoice } from "./theme";
 import { renderMarkdown } from "./markdown";
 
 type Page = "ready" | "studio" | "playground" | "downloads" | "guide" | "connections";
@@ -27,6 +28,18 @@ export function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo>();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installing, setInstalling] = useState(false);
+  // 主题三态：只存渲染端 localStorage，不进 settingsStore（见 theme.ts 的说明）。
+  const [theme, setTheme] = useState<ThemeChoice>(loadThemeChoice);
+  useEffect(() => {
+    applyTheme(theme, systemPrefersDark());
+    // 选择为 system 时要跟着系统走：系统在应用运行期间切了主题也得跟着变。
+    if (theme !== "system" || typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyTheme("system", media.matches);
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [theme]);
+  const pickTheme = (choice: ThemeChoice) => { setTheme(choice); saveThemeChoice(choice); };
   const showError = (error: unknown) => setNotice({ text: describeError(error, "操作失败"), error: true });
 
   useEffect(() => {
@@ -105,6 +118,12 @@ export function App() {
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand"><div className="brand-mark">H3</div><div><strong>MiniMax H3</strong><span>视频生成工作台</span></div></div>
       <nav>{pages.map((item) => <button key={item.id} data-page={item.id} className={page === item.id ? "active" : ""} onClick={() => setPage(item.id)}><i>{item.eyebrow}</i><span>{item.label}</span></button>)}</nav>
+      {/* 主题切换：三态循环（跟随系统 → 浅色 → 深色）。做成单个按钮而不是下拉，
+          侧栏底部空间紧，且这个设置改一次就不动。 */}
+      <button className="sidebar-theme" onClick={() => pickTheme(theme === "system" ? "light" : theme === "light" ? "dark" : "system")} title="切换浅色 / 深色 / 跟随系统">
+        <span className="sidebar-theme-icon">{theme === "light" ? "☀" : theme === "dark" ? "☾" : "◐"}</span>
+        <span>{themeLabel(theme)}</span>
+      </button>
       <button className={`sidebar-update ${updateInfo?.updateAvailable ? "available" : ""}`} onClick={update} disabled={checkingUpdate || installing}>
         <span className="status-dot" /><span><strong>{installing ? "正在下载更新…" : updateInfo?.updateAvailable ? "立即更新" : checkingUpdate ? "正在检查…" : "检查更新"}</strong><small>{installing ? "完成后自动重启" : updateInfo?.updateAvailable ? `v${updateInfo.latestVersion} 可安装` : `轻量版 v${updateInfo?.currentVersion || "0.1.5"}`}</small></span>
       </button></aside>

@@ -30,6 +30,9 @@ import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, historyTextOf, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
+import { normalizeHistory } from "./modules/historyNormalize";
+import { freezeTurn } from "./modules/stepSnapshot";
+import { CONTENT_FILTER_GUIDANCE, contentFilterNotice, isContentFilterError, retryDelayMs, retryNotice } from "./modules/errorRecovery";
 import { buildSystemPrompt } from "../shared/agentPrompt";
 import {
   activeContextTokens,
@@ -448,6 +451,18 @@ function registerIpc(
       // 压缩链路异常绝不阻断对话：如实记录后按原历史继续。
       console.warn("[llm] 上下文压缩失败，按原始历史继续：", describeError(error, "未知错误"));
     }
+    // 历史规范化：丢空白残留、剥掉模型收不下的图片、修掉非法的首条 assistant。
+    // 放在压缩之后——压缩会改写历史，规范化必须作用在**真正要发出去的那份**上。
+    const turn = freezeTurn({
+      model: (await settingsStore.get()).llm.model,
+      browserOnly,
+      webSearch: Boolean(webSearch),
+      planMode: planMode ?? "none"
+    });
+    const normalized = normalizeHistory(effective, { model: turn.value.model });
+    effective = normalized.messages;
+    // 剥掉了东西要如实告知（静默改动用户输入不可接受）：直接写进气泡开头。
+    if (normalized.notes.length > 0) chunk({ seq: 0, delta: `${normalized.notes.join("\n")}\n\n` });
     if (!agent) {
       // 普通对话同样要能吃下"上游报超窗"这一信号（LlmService 用状态码+错误体摘要构造 message）。
       const onChatError = (error: unknown) => {
@@ -582,7 +597,13 @@ function registerIpc(
       while (attempts < 3) {
         if (attempts > 0) {
           // 重试前等待：让出抖动窗口。等待期间用户点停止要能立即退出（sleep 原生支持 signal）。
-          try { await sleep(3_000, undefined, { signal: controller.signal }); }
+          // 时长取「服务端 retry-after」与「我们的 3 秒退避」的较大值（见 errorRecovery.retryDelayMs）：
+          // 服务端在冷却窗口里会明确报数，不听它的就会在窗口内反复撞墙；但建议过长时不采纳，
+          // 因为我们不延长重试次数——等 5 分钟实际等于放弃这一轮。
+          const waitMs = retryDelayMs(agentError, 3_000);
+          // 重试状态写进气泡：此前只写日志，用户看到的是一个静止的光标，像是卡死了。
+          chunk({ seq: 0, delta: retryNotice(attempts, 3, waitMs) });
+          try { await sleep(waitMs, undefined, { signal: controller.signal }); }
           catch { done({ ok: true }); return; }
         }
         attempts += 1;
@@ -600,6 +621,13 @@ function registerIpc(
         } catch (error) {
           if (controller.signal.aborted) { done({ ok: true }); return; }
           agentError = error;
+          // 内容被安全策略拒绝：原样重试同一个 prompt 必然同样被拒，得先注入改写指引。
+          // 注入在历史末尾（作为一条普通 user 消息），下一轮重试就会带上它。
+          if (isContentFilterError(error) && attempts < 3 && agentSent === 0) {
+            chunk({ seq: 0, delta: contentFilterNotice(attempts, 3) });
+            effective = [...effective, { role: "user", content: CONTENT_FILTER_GUIDANCE }];
+            continue;
+          }
           const retryable = attempts < 3 && agentSent === 0 && agentTaskCount === 0 && isNetworkError(error);
           if (!retryable) break;
         }

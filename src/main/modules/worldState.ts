@@ -1,4 +1,4 @@
-import type { PromptFragment } from "../../shared/agentPrompt";
+import type { ChatMessage } from "../../shared/types";
 
 /**
  * 世界状态注入（移植 OpenAI Codex `core/src/context/world_state/mod.rs` 的 section 模型）。
@@ -6,15 +6,18 @@ import type { PromptFragment } from "../../shared/agentPrompt";
  * 问题：有些事实每轮都成立（今天几号、能不能联网、能产出什么文件），但它们**会变**
  * （用户关掉了联网、跨天了、上下文快满了），模型必须拿到**当前**事实才不犯错。
  *
- * **关键差异（这是移植时踩到的坑，已修正）**：Codex 的 world state 片段是追加进
- * **持久历史**的——历史会累积，所以"没变就不发"能省 token，且旧片段仍在历史里可见。
- * 但本应用的载体是**每轮由 buildSystemPrompt 重新拼的 system prompt**：上一轮的正文不会保留。
- * 若沿用 Codex 的"没变就不发"，模型从第 2 轮起就再也看不到任何环境事实
- * （实测请求体捕获到：第 1 轮 system 含全部标记，第 2 轮一个都没有）。
+ * **两个移植时踩到的坑（都已修正，读代码看不出来、实测才现形）**：
  *
- * 所以这里的规则是：**每个 section 每轮都必须渲染进 system prompt**。
- * 节流（`shouldReinject`）只决定"正文要不要刷新"，不决定"要不要出现"：
- * 被节流时沿用上一轮的正文（保持 system 前缀稳定、利于上游前缀缓存），到该刷新时再换新值。
+ * 1. **载体必须是"对话片段"，不能是 system prompt**。真实 key A/B 实测（probe-time-channel /
+ *    probe-time-fullprompt）：环境事实拼进 system prompt 时，模型会**直接无视**——问"今天几号"，
+ *    它答"我无法得知今天的日期"，哪怕日期就写在 system 里。测过的 6 种 system 通道
+ *    （末尾追加 / 开头 / 第二条 system 消息 / developer 角色）**全部失败**；
+ *    而作为 **user 消息片段**注入则 100% 生效（4 种位置均通过）。Codex 正是把 world state
+ *    作为**对话片段**注入的。故 `injectWorldState` 把事实拼成一条 user 消息附在历史末尾。
+ *
+ * 2. **每个 section 每轮都必须出现**。因为片段拼在**每轮重建**的请求里（历史尾部的 user 消息
+ *    是每轮临时拼的，不落盘），"没变就不发"会让模型从第 2 轮起再也看不到任何环境事实。
+ *    所以 `diffWorldState` 每轮渲染全部 section；差异只用于**节流正文刷新**。
  */
 
 export type SectionId = "current_time" | "network_access" | "artifacts" | "context_budget";
@@ -225,4 +228,22 @@ export function diffWorldState(
   }
 
   return { text: blocks.join("\n\n"), snapshot };
+}
+
+/**
+ * 把环境事实注入待发送历史。
+ *
+ * **必须作为一条 user 消息**（不能拼进 system prompt）——真实 key A/B 实测：拼进 system 时
+ * 模型直接无视（问日期答"我无法得知"，哪怕日期就在 system 里）；作为 user 片段则每次都生效。
+ * 见文件头注释。
+ *
+ * 位置：追加在末尾。实测 user 通道的多种位置（末条之前 / 末条之后 / 独立一条）都生效，
+ * 取"追加到末尾"最简单，且天然是"最新的环境事实"，不会被后续对话覆盖成旧值。
+ *
+ * @param messages 待发送历史（不改原数组）
+ * @param worldStateText `diffWorldState().text`。空串时原样返回，不产生多余消息。
+ */
+export function injectWorldState(messages: ChatMessage[], worldStateText: string): ChatMessage[] {
+  if (!worldStateText.trim()) return messages;
+  return [...messages, { role: "user", content: worldStateText }];
 }

@@ -28,7 +28,7 @@ import { checkForUpdates, checkFrameworkUpdate } from "./modules/updateChecker";
 import { renderHtml, clearBrowserFetchCache } from "./modules/browserFetch";
 import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
-import { buildSections, diffWorldState, type WorldStateSnapshot } from "./modules/worldState";
+import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
@@ -565,11 +565,13 @@ function registerIpc(
       const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
       // world state：每轮都注入**完整**的环境事实（时间/联网/产物/余量）。
       //
-      // 为什么是"每轮完整注入"而不是"只发差异"（实测踩到的坑）：这些事实拼进的是
-      // **system prompt**，而 system prompt 每轮由 buildSystemPrompt 从头重建、不累积。
+      // **必须作为 user 消息片段注入，不能拼进 system prompt**（真实 key A/B 实测，见
+      // worldState.ts 文件头）：拼进 system 时模型直接无视——问"今天几号"它答"我无法得知"，
+      // 哪怕日期就在 system 里；作为 user 片段注入则每次都生效。Codex 也是作为对话片段注入的。
+      //
+      // 为什么"每轮完整"而不是"只发差异"：片段拼在**每轮重建**的请求里，不落盘、不累积。
       // 若照搬 Codex 的"没变就不发"，模型从第 2 轮起就再也看不到任何环境事实
-      // （实测捕获请求体：第 1 轮 system 含全部标记，第 2 轮一个都没有）——等于把
-      // 时间/联网/产物能力/上下文余量全部作废。差异只用于**节流正文刷新**（见 worldState.ts）。
+      // （实测捕获请求体：第 1 轮含全部标记，第 2 轮一个都没有）。差异只用于**节流正文刷新**。
       //
       // 开关必须传真实生效值——提示词说"你可以联网"但工具表里已摘掉 web_search，
       // 模型会调一个不存在的工具、然后为"我调不了"道歉（CLAUDE.md 记过同类事故）。
@@ -596,15 +598,14 @@ function registerIpc(
         apiKey: turn.value.llmApiKey,
         model: turn.value.model,
         // 提示词工程 = 智能体表现的最大杠杆（用户实测：同款国产模型接 Claude Code 明显更聪明，
-        // 差距就在系统提示词与工具描述的打磨）。三段组装，顺序固定：
+        // 差距就在系统提示词与工具描述的打磨）。两段组装，顺序固定：
         //   ① 通用提示词（shared/agentPrompt.ts 的四层；用户自定义则整体替换）
         //   ② 历史使用习惯（从既有任务提炼，用户自定义提示词时仍追加）
-        //   ③ world state 差异块——**只含本轮变化**，未变的环境事实不重发
-        // 最后再套 withPlanMode：本轮规则是强约束，放最末才不被环境事实淹没。
+        // 环境事实**不放这里**（实测被忽略），改由 injectWorldState 拼成 user 片段。
+        // 最后再套 withPlanMode：本轮规则是强约束，放最末才不被稀释。
         systemPrompt: withPlanMode(buildSystemPrompt({
           custom: turn.value.systemPrompt,
-          memoryHint: buildAgentMemoryHint(orchestrator.list()),
-          worldState: worldStateText
+          memoryHint: buildAgentMemoryHint(orchestrator.list())
         }), planMode),
         searchBaseUrl: turn.value.searchBaseUrl || undefined,
         searchApiKey: turn.value.searchApiKey
@@ -699,7 +700,9 @@ function registerIpc(
           // browserOnly 只是改变搜索的执行方式（只用 Chromium 渲染）。漏传会导致工具不暴露，
           // 模型只能凭训练知识回答"该商品尚未发布"——UI 实测抓到的就是这个 bug。
           // 工具调用开始即推送 llm:tool：气泡实时显示"正在搜索/正在生成视频"；完成时显示结果摘要（全链路透明）。
-          result = await chatAgent(agentOptions, effective, agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
+          // 环境事实拼成一条 user 消息附在**当轮**历史末尾（见 injectWorldState 的通道说明）。
+          // 放在循环内：内容过滤重试会往 effective 追加改写指引，须基于最新历史注入。
+          result = await chatAgent(agentOptions, injectWorldState(effective, worldStateText), agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
             sendLlmTool({ tool, input, phase: "start", sessionId: session });
           }, (tool, summary) => {
             sendLlmTool({ tool, input: "", phase: "end", result: summary, sessionId: session });

@@ -30,7 +30,8 @@ import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, historyTextOf, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
-import { injectPreviewCsp } from "./modules/previewCsp";
+import { PREVIEW_CSP } from "./modules/previewCsp";
+import { resolveWithinRoot } from "./modules/safePath";
 import { normalizeHistory } from "./modules/historyNormalize";
 import { freezeTurn } from "./modules/stepSnapshot";
 import { CONTENT_FILTER_GUIDANCE, contentFilterNotice, isContentFilterError, retryDelayMs, retryNotice } from "./modules/errorRecovery";
@@ -96,16 +97,13 @@ app.whenReady().then(async () => {
   protocol.handle("h3media", async (request) => {
     const requestedPath = new URL(request.url).searchParams.get("path");
     if (!requestedPath || !path.isAbsolute(requestedPath)) return new Response("Invalid media path", { status: 400 });
-    const resolved = path.resolve(requestedPath);
-    const mediaRoot = await allowedMediaRoot();
-    // path.relative 为空或以 .. 开头 = 目标不在根内；用分隔符判断避免 "C:\out2" 误匹配 "C:\out" 前缀。
-    const relative = path.relative(mediaRoot, resolved);
-    const outside = !relative || relative.startsWith("..") || path.isAbsolute(relative);
+    // 先解析符号链接再判白名单：只比对 path.resolve 的结果挡不住"目录内放一个软链指向外部"。
+    const resolved = await resolveWithinRoot(await allowedMediaRoot(), requestedPath);
     // 用户改过输出目录后，历史结果仍留在原目录——按任务记录放行，否则整个历史都变成打不开的死链。
-    if (outside && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) {
+    if (!resolved && !knownOutputPaths(orchestrator).has(normalizeForCompare(requestedPath))) {
       return new Response("Path outside output directory", { status: 403 });
     }
-    return net.fetch(pathToFileURL(resolved).toString());
+    return net.fetch(pathToFileURL(resolved ?? path.resolve(requestedPath)).toString());
   });
 
   // 产物预览协议：只服务 userData/artifacts/ 内的 HTML 文件。
@@ -118,20 +116,23 @@ app.whenReady().then(async () => {
   protocol.handle("h3preview", async (request) => {
     const requestedPath = new URL(request.url).searchParams.get("path");
     if (!requestedPath || !path.isAbsolute(requestedPath)) return new Response("Invalid preview path", { status: 400 });
-    const resolved = path.resolve(requestedPath);
-    const relative = path.relative(artifactRoot(), resolved);
-    // 路径白名单：越出产物目录一律拒绝（渲染端传什么路径都不认）。
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
-      return new Response("Path outside artifacts directory", { status: 403 });
-    }
+    // 符号链接安全的白名单校验：realpath 后比对，软链指向外部一律拒绝。
+    const resolved = await resolveWithinRoot(artifactRoot(), requestedPath);
+    if (!resolved) return new Response("Path outside artifacts directory", { status: 403 });
     // 只服务 HTML：预览 iframe 仅用于 html 产物，限制扩展名把暴露面压到最小。
     if (!/\.html?$/i.test(resolved)) return new Response("Only HTML preview is served", { status: 403 });
     try {
       const body = await readFile(resolved, "utf8");
-      // 注入预览专用 CSP：内联脚本照跑（否则游戏动不了），但网络出口全封。
-      // 产物由模型生成，按"不可信内容"对待——不该有把用户数据发出去的能力。
-      // URL 加载的文档用自己的策略，这条注入才会生效（这正是改走协议的原因之一）。
-      return new Response(injectPreviewCsp(body), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      // CSP 由**响应头**下发（权威，内容无法构造影响），不注入 <meta>。
+      // 内联脚本照跑（否则游戏动不了），但网络出口全封——产物由模型生成，按不可信内容对待。
+      // nosniff：避免响应体内 content-type 被当成别的类型解释。
+      return new Response(body, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Security-Policy": PREVIEW_CSP,
+          "X-Content-Type-Options": "nosniff"
+        }
+      });
     } catch {
       return new Response("Preview file not found", { status: 404 });
     }

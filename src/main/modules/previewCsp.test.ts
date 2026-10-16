@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { PREVIEW_CSP, injectPreviewCsp } from "./previewCsp";
+import { PREVIEW_CSP } from "./previewCsp";
 
+// 注意：这里**不再**测"注入 <meta>"——那条路已被安全审查否决并删除。
+// 靠正则找 <head> 再插 meta，会匹到注释/脚本里的假 <head>，让安全策略静默失效；
+// 改为由协议处理器通过 HTTP 响应头下发（权威、产物 HTML 无法构造影响）。
+// 响应头那条链路由探针 probe-game-csp-inject.mjs 在真实应用里验证。
 describe("PREVIEW_CSP 策略内容", () => {
   it("默认全禁（default-src 'none'），再逐项放行", () => {
     expect(PREVIEW_CSP).toContain("default-src 'none'");
@@ -23,45 +27,8 @@ describe("PREVIEW_CSP 策略内容", () => {
     expect(PREVIEW_CSP).not.toMatch(/\*/);
     expect(PREVIEW_CSP).not.toMatch(/https?:/);
   });
-});
 
-describe("injectPreviewCsp 注入位置", () => {
-  it("注入到 <head> 之后（meta CSP 只对其后解析的内容生效）", () => {
-    const html = "<!DOCTYPE html><html><head><title>t</title></head><body><script>x()</script></body></html>";
-    const out = injectPreviewCsp(html);
-    const metaAt = out.indexOf("Content-Security-Policy");
-    const scriptAt = out.indexOf("<script>");
-    expect(metaAt).toBeGreaterThan(-1);
-    expect(metaAt).toBeLessThan(scriptAt);
-    // 仍在 head 内
-    expect(out.indexOf("<head>")).toBeLessThan(metaAt);
-    expect(metaAt).toBeLessThan(out.indexOf("</head>"));
-  });
-
-  it("有 <head 属性时也能插进去（<head profile=…> 这类写法）", () => {
-    const out = injectPreviewCsp('<html><head profile="x"><body>hi</body></html>');
-    expect(out).toContain('profile="x"><meta http-equiv="Content-Security-Policy"');
-  });
-
-  it("没有 <head> 但有 <html>：插在 <html> 之后", () => {
-    const out = injectPreviewCsp("<html><body><script>x()</script></body></html>");
-    expect(out.indexOf("Content-Security-Policy")).toBeLessThan(out.indexOf("<script>"));
-    expect(out.startsWith("<html><meta")).toBe(true);
-  });
-
-  it("只有片段（无任何根标签）：前置注入，仍早于内容", () => {
-    const out = injectPreviewCsp("<div>片段</div><script>x()</script>");
-    expect(out.indexOf("Content-Security-Policy")).toBeLessThan(out.indexOf("<script>"));
-  });
-
-  it("大小写不敏感（模型常写 <HEAD> / <Html>）", () => {
-    const out = injectPreviewCsp("<HTML><HEAD></HEAD><BODY></BODY></HTML>");
-    expect(out).toContain("Content-Security-Policy");
-  });
-
-  it("不改动原 HTML 内容（只插入，不删改）", () => {
-    const html = "<!DOCTYPE html><html><head></head><body><h1>标题</h1></body></html>";
-    const out = injectPreviewCsp(html);
-    expect(out.replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, "")).toBe(html);
+  it("是合法的响应头值：单行、无换行（响应头里换行会导致头注入）", () => {
+    expect(PREVIEW_CSP).not.toMatch(/[\r\n]/);
   });
 });

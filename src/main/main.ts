@@ -900,11 +900,16 @@ function registerIpc(
 async function saveArtifactFile(sessionId: string, name: string, content: string, kind: string): Promise<{ name: string; path: string; size: number }> {
   const extByKind: Record<string, string> = { html: ".html", csv: ".csv", tsv: ".tsv", md: ".md", xlsx: ".xlsx" };
   const ext = extByKind[kind] || ".html";
-  // 工具路径模型常传不带扩展名的名字（如"上海出行建议"）——按 kind 自动补齐，否则白名单校验误拒。
-  let safeName = path.basename(String(name || "")).replace(/[\\/:*?"<>|]/g, "_").trim();
-  if (!safeName || !Object.values(extByKind).some((allowed) => safeName.toLowerCase().endsWith(allowed))) {
-    safeName = `${safeName || "artifact"}${ext}`;
-  }
+  // 扩展名**必须与 kind 一致**：先剥掉名字里任何已知产物扩展名，再按 kind 补上正确的那个。
+  //
+  // 为什么不能"以任一扩展名结尾就保留"（实测踩到，probe-artifact-ext 复现）：
+  // 模型常把表格命名为 "data.csv"，而 create_file 会把 csv/tsv 映射成 kind=xlsx——
+  // 旧逻辑见 ".csv" 属已知扩展名就保留 → SheetJS 按扩展名把 **xlsx 二进制写进 .csv 文件**，
+  // 卡片按 .csv 判为文档、预览读二进制成乱码；name="表格.tsv" 更会因 SheetJS 按扩展名判格式而**直接写失败**。
+  // kind=html + name="page.md" 同理：落盘 page.md，卡片按 md 渲染一个 HTML 文件。
+  let base = path.basename(String(name || "")).replace(/[\\/:*?"<>|]/g, "_").trim();
+  base = base.replace(/\.(html?|csv|tsv|md|xlsx)$/i, "").trim();
+  const safeName = `${base || "artifact"}${ext}`;
   const dir = path.join(app.getPath("userData"), "artifacts", path.basename(String(sessionId || "unknown")));
   await mkdir(dir, { recursive: true });
   const filePath = path.join(dir, safeName);

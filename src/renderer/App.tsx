@@ -590,6 +590,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const taskIdBuffers = useRef(new Map<string, string[]>());
   const sendingRef = useRef(new Set<string>());
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // 用户是否贴在底部：流式期间只有贴底才自动跟随。否则用户往上翻看历史时，
+  // 每个 chunk 都会把他拽回底部（注释此前就写着"仅在用户接近底部时跟随"，但代码没实现）。
+  const stickToBottomRef = useRef(true);
   const searchReady = Boolean(settings.searchApi.baseUrl);
   const generating = generatingIds.includes(activeId);
   // 计划模式：下一次发送只出方案。
@@ -745,8 +749,20 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     });
     return () => { offChunk(); offDone(); offTasks(); offTool(); offCompaction(); offPlan(); offQuestion(); offArtifact(); };
   }, []);
-  // 粘底自动滚动：仅在用户接近底部时跟随。
-  useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
+  // 粘底自动滚动：仅在用户接近底部时跟随。用户在流式期间往上翻看历史时，不再被每个
+  // chunk 拽回底部；一旦他滚回接近底部，恢复自动跟随。
+  useEffect(() => {
+    if (!stickToBottomRef.current) return;
+    bottomRef.current?.scrollIntoView({ block: "end" });
+  }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
+  // 切会话时回到"贴底"：新打开的会话应显示最新消息，而不是沿用上一个会话的滚动位置状态。
+  useEffect(() => { stickToBottomRef.current = true; }, [activeId]);
+  const onMessagesScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // 距底部 48px 内视为"贴底"（给一点容差，避免像素级抖动导致跟随断掉）。
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  };
 
   // 会话回收站过期清理：启动时清除超过 7 天的已删除会话。
   useEffect(() => {
@@ -1053,7 +1069,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       {showPgTrash && <PgTrashPanel sessions={trashSessions} onRestore={restoreSession} onPurge={purgeSession} onClose={() => setShowPgTrash(false)} retentionDays={7} />}
       <div className="pg-main">
         <div className="pg-chat">
-        <div className="pg-messages">
+        <div className="pg-messages" ref={scrollRef} onScroll={onMessagesScroll}>
           {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
               {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}

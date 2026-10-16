@@ -8,14 +8,36 @@ metadata:
   modified: 2026-10-16T18:27:38.891Z
 ---
 
-**状态（2026-10-17）：全部已推送，工作区干净，`feature/agent-iteration` 与 `main` / `origin/main` 零差异。**
+**状态（2026-10-17）：工作区干净，`feature/agent-iteration` 已领先 `main` 3 笔（未推送）。**
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
-- 分支共 **40 笔提交**（`v0.2.0..HEAD` 实测）；v0.2.1 之后又有 **4 笔**。
-- HEAD = `1aa607c`。
-- **工作区干净，无未推送提交**——下次开工直接从 main 拉最新即可。
+- 分支共 **43 笔提交**（`v0.2.0..HEAD` 实测）。
+- HEAD = `69a26d7`。
+- **本轮 3 笔修复未推送**（等用户确认）。
 
-## v0.2.1 之后的 4 笔（v0.2.1..HEAD）
+## 本轮（探索模式）3 笔修复：world state 载体不匹配（v0.2.1..HEAD）
+
+同一个根因的三个面——**移植 Codex 时"载体"对不上，读代码看不出来、实测请求体才现形**：
+
+1. `84e8a45` world state 第 2 轮起全部丢失 + 智能体不认上下文超窗
+   - `diffWorldState` 照搬 Codex 的"没变就不发"，但那套成立的前提是片段进**持久历史**；
+     这里载体是每轮重建的 system prompt → 第 2 轮起环境事实全没了。改为**每轮完整渲染**。
+   - 智能体路径不认上游 `ContextWindowExceeded`（只有普通对话认）→ 撞超窗反复撞墙。
+     抽出共用 `noteContextOverflow()`。
+2. `40de905` 二次压缩重发原始全量历史（应在当前历史上继续压）
+   - `maybeCompact` 压缩的是渲染端原始 messages（无界增长），第 2 次压缩重发全量（实测
+     44531→44619 字符不降反增）。改为以 `effective`（当前历史）为压缩对象，对齐 Codex。
+3. `69a26d7` world state 必须作为 **user 片段**注入——拼进 system 会被模型忽略
+   - 真实 key A/B：环境事实拼进 system prompt 时模型**直接无视**（问日期答"我无法得知"），
+     6 种 system 通道全失败；作为 user 片段则 100% 生效。Codex 本就是作为对话片段注入的。
+   - 修后真实 key 端到端：模型答"2026 年 10 月 17 日，周六"（与系统时钟一致）。
+
+**验证**：单测 255 项 / typecheck / build 全绿；新探针 probe-worldstate-turns /
+probe-agent-overflow / probe-compact-source / probe-time-channel / probe-time-fullprompt；
+回归 probe-compaction 22/22、probe-plan-mode / probe-user-input / probe-codex-ui 全过；
+E2E test-01..10 全过（test-03 单独跑 5/5）。
+
+## v0.2.1 之后的 5 笔（v0.2.1..84e8a45 之前）
 
 1. `72c37b8` 修 safePath 测试在 Linux 上失败（CI 红）
 2. `2545f0c` 融入 Codex「剩余上下文余量」注入

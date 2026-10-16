@@ -30,6 +30,7 @@ import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, historyTextOf, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
+import { injectPreviewCsp } from "./modules/previewCsp";
 import { normalizeHistory } from "./modules/historyNormalize";
 import { freezeTurn } from "./modules/stepSnapshot";
 import { CONTENT_FILTER_GUIDANCE, contentFilterNotice, isContentFilterError, retryDelayMs, retryNotice } from "./modules/errorRecovery";
@@ -64,7 +65,12 @@ interface SessionContextBudget {
 }
 
 protocol.registerSchemesAsPrivileged([
-  { scheme: "h3media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
+  { scheme: "h3media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+  // 产物预览专用协议。存在的理由（实测确认）：srcdoc / blob: / data: 加载的 iframe 会
+  // **继承宿主的 CSP**，而宿主是 script-src 'self'（无 unsafe-inline）→ 预览页里的内联
+  // <script> 被浏览器拦掉，游戏/小工具脚本根本不运行（用户报"预览时不能直接玩"就是这个）。
+  // 按 CSP 规范，**URL 加载的文档用自己的策略**、不继承创建者——故改为协议 URL 加载。
+  { scheme: "h3preview", privileges: { standard: true, secure: true, supportFetchAPI: true } }
 ]);
 
 let mainWindow: BrowserWindow | undefined;
@@ -100,6 +106,35 @@ app.whenReady().then(async () => {
       return new Response("Path outside output directory", { status: 403 });
     }
     return net.fetch(pathToFileURL(resolved).toString());
+  });
+
+  // 产物预览协议：只服务 userData/artifacts/ 内的 HTML 文件。
+  //
+  // 为什么不用 srcDoc（实测确认的根因）：srcdoc / blob: / data: 加载的 iframe 会**继承宿主 CSP**，
+  // 宿主是 script-src 'self'（无 unsafe-inline）→ 预览页里的内联 <script> 被浏览器拦掉，
+  // 游戏/小工具脚本根本不运行（用户报"预览时不能直接玩"就是这个）。按 CSP 规范，
+  // **URL 加载的文档用自己的策略**，故改走本协议；宿主 CSP 保持严格、预览仍是 sandbox 不透明源。
+  const artifactRoot = () => path.join(app.getPath("userData"), "artifacts");
+  protocol.handle("h3preview", async (request) => {
+    const requestedPath = new URL(request.url).searchParams.get("path");
+    if (!requestedPath || !path.isAbsolute(requestedPath)) return new Response("Invalid preview path", { status: 400 });
+    const resolved = path.resolve(requestedPath);
+    const relative = path.relative(artifactRoot(), resolved);
+    // 路径白名单：越出产物目录一律拒绝（渲染端传什么路径都不认）。
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+      return new Response("Path outside artifacts directory", { status: 403 });
+    }
+    // 只服务 HTML：预览 iframe 仅用于 html 产物，限制扩展名把暴露面压到最小。
+    if (!/\.html?$/i.test(resolved)) return new Response("Only HTML preview is served", { status: 403 });
+    try {
+      const body = await readFile(resolved, "utf8");
+      // 注入预览专用 CSP：内联脚本照跑（否则游戏动不了），但网络出口全封。
+      // 产物由模型生成，按"不可信内容"对待——不该有把用户数据发出去的能力。
+      // URL 加载的文档用自己的策略，这条注入才会生效（这正是改走协议的原因之一）。
+      return new Response(injectPreviewCsp(body), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    } catch {
+      return new Response("Preview file not found", { status: 404 });
+    }
   });
 
   // 回收站过期清理：删除超过 7 天的任务，连同输出目录内的视频文件一并清除（安全删除白名单内）。

@@ -2,7 +2,12 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: h3media:; media-src 'self' blob: data: h3media:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*;" />
+    <!-- CSP 说明：script-src 保持 'self'（不含 unsafe-inline）——宿主页面自身没有 HTML 注入面，
+         没必要放开。产物预览因此不能走 srcDoc（srcdoc iframe 会继承本 CSP，预览页里的内联
+         <script> 会被拦掉，游戏跑不起来），改走 h3preview: 协议 URL 加载——URL 加载的文档
+         用自己的策略、不继承宿主 CSP。frame-src 显式列出 'self' 与 h3preview:，比原先靠
+         default-src 回落更严。 -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: h3media: h3preview:; media-src 'self' blob: data: h3media:; frame-src 'self' h3preview:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*;" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>MiniMax H3 工作台</title>

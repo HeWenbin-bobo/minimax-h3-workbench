@@ -1224,10 +1224,22 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   }
-  // 点「预览」即自动聚焦沙箱：不点一下 iframe 内部，方向键全被宿主聊天区吃掉——
-  // 贪吃蛇类键盘游戏就没法直接玩（用户实测）。mount 后把焦点送进 iframe。
+  // 键盘可达性：iframe 内的游戏要能直接玩，靠两点——
+  // ① 预览页必须**真的在跑**。此前用 srcDoc，而 srcdoc iframe 会继承宿主 CSP
+  //    （script-src 'self'，无 unsafe-inline）→ 预览页里的内联 <script> 被拦、游戏压根没运行。
+  //    这才是"不能直接玩"的真正原因（实测：摘掉宿主 CSP 后脚本立刻跑起来）。现改走 h3preview: 协议。
+  // ② mount / 重载后把焦点交给 iframe：不交的话方向键落在聊天区，游戏收不到。
+  //    注意 iframe.focus() 只移动**宿主侧**焦点，不等于 iframe 文档拿到焦点，
+  //    故文档就绪后再补一次（早于 load 的 focus 会落空）。
   const frameRef = useRef<HTMLIFrameElement>(null);
-  useEffect(() => { frameRef.current?.focus(); }, []);
+  const focusFrame = useCallback(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    frame.focus();
+    // 跨源（sandbox 不透明源）时 contentWindow.focus() 可能抛错，包起来。
+    try { frame.contentWindow?.focus(); } catch { /* 不透明源不可访问；宿主侧 focus 已足够 */ }
+  }, []);
+  useEffect(() => { focusFrame(); }, [focusFrame, nonce]);
   const icon = artifact.kind === "sheet" ? "📊" : artifact.kind === "doc" ? "📝" : "🌐";
   return <aside className="pg-preview" style={{ width }}>
     <div className="pg-preview-drag" onMouseDown={onDragStart} title="拖动调整宽度" />
@@ -1239,7 +1251,18 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
         <button className="pg-tool" title="关闭预览" onClick={onClose}>×</button>
       </span>
     </div>
-    {artifact.kind === "html" && <iframe key={nonce} ref={frameRef} className="pg-preview-frame" sandbox="allow-scripts" srcDoc={artifact.content} title={artifact.name} />}
+    {/* HTML 预览走 h3preview: 协议**按 URL 加载**，不用 srcDoc——srcdoc iframe 会继承宿主 CSP，
+        预览页的内联脚本会被拦掉（游戏跑不起来）。sandbox 保持 allow-scripts：不透明源，
+        拿不到宿主 DOM 与 window.h3.* 的 IPC 面。 */}
+    {artifact.kind === "html" && <iframe
+      key={nonce}
+      ref={frameRef}
+      className="pg-preview-frame"
+      sandbox="allow-scripts"
+      src={`h3preview://artifact/?path=${encodeURIComponent(artifact.path)}`}
+      onLoad={focusFrame}
+      title={artifact.name}
+    />}
     {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}><SheetTable csv={artifact.content} /></div>}
     {artifact.kind === "doc" && <div className="pg-preview-doc" key={nonce}>{renderMarkdown(artifact.content)}</div>}
   </aside>;

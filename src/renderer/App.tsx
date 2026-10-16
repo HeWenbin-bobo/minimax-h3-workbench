@@ -1238,13 +1238,19 @@ function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }:
 function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: ArtifactInfo; onClose: () => void; width: number; onResize: (width: number) => void }) {
   const [nonce, setNonce] = useState(0);
   const [diskContent, setDiskContent] = useState<string>();
+  const [readError, setReadError] = useState<string>();
   const needsContent = artifact.kind !== "html" && !artifact.content;
   useEffect(() => {
     if (!needsContent) return;
     let cancelled = false;
+    setReadError(undefined);
     void window.h3.readArtifactText(artifact.path).then((r) => {
-      if (!cancelled && r.data) setDiskContent(r.data);
-    }).catch(() => undefined);
+      if (cancelled) return;
+      // 读取失败必须让人看见（CLAUDE.md「出错必须让人看见」）——否则面板永远停在
+      // "（正在读取…）"，看起来像卡住，实际是读文件报错了（xlsx 预览整片失效就是这样被掩盖的）。
+      if (r.data !== undefined) setDiskContent(r.data);
+      else setReadError(r.message || "读取产物内容失败。");
+    }).catch((e) => { if (!cancelled) setReadError(describeError(e, "读取产物内容失败。")); });
     return () => { cancelled = true; };
   }, [artifact.path, needsContent]);
   const content = artifact.content || diskContent || "";
@@ -1307,8 +1313,8 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
       onLoad={focusFrame}
       title={artifact.name}
     />}
-    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}>{content ? <SheetTable csv={content} /> : <p className="pg-preview-doc-empty">（正在读取…）</p>}</div>}
-    {artifact.kind === "doc" && <div className="pg-preview-doc" key={nonce}>{content ? renderMarkdown(content) : <p className="pg-preview-doc-empty">（正在读取…）</p>}</div>}
+    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : content ? <SheetTable csv={content} /> : <p className="pg-preview-doc-empty">（正在读取…）</p>}</div>}
+    {artifact.kind === "doc" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : content ? renderMarkdown(content) : <p className="pg-preview-doc-empty">（正在读取…）</p>}</div>}
   </aside>;
 }
 

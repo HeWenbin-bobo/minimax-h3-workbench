@@ -61,9 +61,14 @@ export class SettingsStore {
 
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
     const current = await this.get();
+    // 嵌套对象一律**局部合并**：patch 只带 llm.model 时，不能把 llm.baseUrl/provider/systemPrompt
+    // 打回默认值。此前只对 ssh 做了合并，llm/searchApi 是整体替换——同样的坑（实测
+    // probe-settings-partial 复现：只更新 llm.model → baseUrl 被清成官方默认）。
     const next = {
       ...current,
       ...patch,
+      llm: patch.llm ? { ...current.llm, ...patch.llm } : current.llm,
+      searchApi: patch.searchApi ? { ...current.searchApi, ...patch.searchApi } : current.searchApi,
       ssh: patch.ssh ? { ...current.ssh, ...patch.ssh } : current.ssh
     };
     await this.atomicWrite(this.filePath, next);

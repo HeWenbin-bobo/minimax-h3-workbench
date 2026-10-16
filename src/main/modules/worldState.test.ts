@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildSections, diffWorldState, type WorldStateSnapshot } from "./worldState";
+import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./worldState";
 
 const NOW = new Date("2026-03-14T10:30:00");
 const baseInput = { webSearch: true, browserSearch: true, searchApiReady: true, artifactKinds: ["html", "xlsx", "md"], now: NOW };
@@ -148,5 +148,30 @@ describe("上下文余量 section", () => {
   it("剩余量被夹到 0（不会出现负数百分比）", () => {
     const text = budgetOf(withBudget(-500))!.render();
     expect(text).toContain("剩余约 0%");
+  });
+});
+
+// injectWorldState：环境事实必须作为一条 user 消息附在历史末尾（不能拼进 system prompt——
+// 真实 key 实测拼进 system 会被模型无视）。这条是回归护栏。
+describe("injectWorldState", () => {
+  const history = [
+    { role: "user" as const, content: "你好" },
+    { role: "assistant" as const, content: "你好" }
+  ];
+
+  it("把环境事实作为一条 user 消息追加到末尾", () => {
+    const out = injectWorldState(history, "# 当前时间\n2026年10月17日");
+    expect(out).toHaveLength(3);
+    expect(out[2]).toEqual({ role: "user", content: "# 当前时间\n2026年10月17日" });
+  });
+
+  it("不改原数组（纯函数）", () => {
+    injectWorldState(history, "x");
+    expect(history).toHaveLength(2);
+  });
+
+  it("空/空白文本原样返回，不产生多余空消息", () => {
+    expect(injectWorldState(history, "")).toBe(history);
+    expect(injectWorldState(history, "   \n ")).toBe(history);
   });
 });

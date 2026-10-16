@@ -553,12 +553,19 @@ function registerIpc(
       // 开关必须传真实生效值——提示词说"你可以联网"但工具表里已摘掉 web_search，
       // 模型会调一个不存在的工具、然后为"我调不了"道歉（CLAUDE.md 记过同类事故）。
       // 快照在本轮采样完成后才写回：中途抛错不应把"已注入"记成事实。
+      //
+      // 剩余上下文余量（对齐 Codex TokenBudgetRemainingContext）：让模型知道自己快没空间了，
+      // 从而主动收尾而不是展开新工作。用与「上下文 N%」UI 完全相同的记账口径（同一份 sample/window），
+      // 避免"界面说还剩 30%、模型以为还剩 90%"这种自相矛盾。
+      const modelLimit = contextWindowFor(turn.value.model);
+      const activeTokens = activeContextTokens(effective, budgetFor(session).sample);
       const worldDiff = diffWorldState(
         buildSections({
           webSearch: turn.value.webSearch,
           browserSearch: turn.value.browserOnly,
           searchApiReady: Boolean(turn.value.searchBaseUrl),
-          artifactKinds: turn.value.planMode === "plan" ? [] : ["html（网页/小工具）", "xlsx（表格，由 csv/tsv 生成）", "md（文档）"]
+          artifactKinds: turn.value.planMode === "plan" ? [] : ["html（网页/小工具）", "xlsx（表格，由 csv/tsv 生成）", "md（文档）"],
+          contextBudget: { remainingTokens: Math.max(0, modelLimit - activeTokens), modelLimitTokens: modelLimit }
         }),
         sessionWorldState.get(session),
         historyTextOf(effective)

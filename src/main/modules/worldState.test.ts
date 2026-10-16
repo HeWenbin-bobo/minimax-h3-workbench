@@ -116,3 +116,55 @@ describe("historyTextOf", () => {
     expect(historyTextOf([{ role: "user", content: "A" }, { role: "assistant", content: "" }, { role: "user", content: "B" }])).toBe("A\n\nB");
   });
 });
+
+// 剩余上下文余量（移植 Codex TokenBudgetRemainingContext）：
+// 让模型知道自己快没空间了，主动收尾而不是展开新工作。
+describe("上下文余量 section", () => {
+  const withBudget = (remaining: number, limit = 100_000) => ({ ...baseInput, contextBudget: { remainingTokens: remaining, modelLimitTokens: limit } });
+  const budgetOf = (input: Parameters<typeof buildSections>[0]) => buildSections(input).find((s) => s.id === "context_budget");
+
+  it("拿不到可信数字时**不注入**（不写「未知」当噪声）", () => {
+    expect(budgetOf(baseInput)).toBeUndefined();
+  });
+
+  it("窗口上限为 0 时也不注入（避免除零与无意义提示）", () => {
+    expect(budgetOf({ ...baseInput, contextBudget: { remainingTokens: 0, modelLimitTokens: 0 } })).toBeUndefined();
+  });
+
+  it("充裕时给出正常推进的措辞", () => {
+    const text = budgetOf(withBudget(90_000))!.render();
+    expect(text).toContain("# 上下文余量");
+    expect(text).toContain("剩余约 90%");
+    expect(text).toContain("空间充裕");
+  });
+
+  it("告急时明确要求立刻收尾、不要再开新工作", () => {
+    const text = budgetOf(withBudget(5_000))!.render();
+    expect(text).toContain("空间告急");
+    expect(text).toContain("立刻收尾");
+    expect(text).toContain("不要再展开新工作");
+  });
+
+  it("三档措辞各不相同（10/25/50 边界）", () => {
+    expect(budgetOf(withBudget(10_000))!.render()).toContain("空间告急");
+    expect(budgetOf(withBudget(20_000))!.render()).toContain("空间偏紧");
+    expect(budgetOf(withBudget(40_000))!.render()).toContain("空间尚可");
+  });
+
+  it("同档内数字变化**不重注入**（否则每轮都发，节流形同虚设）", () => {
+    const a = budgetOf(withBudget(90_000))!;
+    const b = budgetOf(withBudget(80_000))!; // 都属"充裕"档
+    expect(a.shouldReinject!(a.render(), b.render())).toBe(false);
+  });
+
+  it("跨档才重注入", () => {
+    const plenty = budgetOf(withBudget(90_000))!;
+    const tight = budgetOf(withBudget(20_000))!;
+    expect(plenty.shouldReinject!(plenty.render(), tight.render())).toBe(true);
+  });
+
+  it("剩余量被夹到 0（不会出现负数百分比）", () => {
+    const text = budgetOf(withBudget(-500))!.render();
+    expect(text).toContain("剩余约 0%");
+  });
+});

@@ -17,7 +17,7 @@ import type { PromptFragment } from "../../shared/agentPrompt";
  * （主进程重启过），**按"已存在"处理**。否则会把全部内容重发一遍，正是差异注入要避免的浪费。
  */
 
-export type SectionId = "current_time" | "network_access" | "artifacts";
+export type SectionId = "current_time" | "network_access" | "artifacts" | "context_budget";
 
 export interface WorldSection {
   id: SectionId;
@@ -55,6 +55,14 @@ export interface WorldStateInput {
   searchApiReady: boolean;
   /** 产物能力：本轮可用的 kind 列表。计划模式下 create_file/generate_video 被摘掉，这里要如实反映。 */
   artifactKinds: string[];
+  /**
+   * 剩余上下文预算（对齐 Codex `TokenBudgetRemainingContext` / `ContextWindowTokenStatus`）。
+   * 缺省表示拿不到可信数字——此时**不注入**该 section，而不是注入"未知"。
+   *
+   * 为什么值得告诉模型：长任务里模型不知道自己快没空间了，会持续展开新工作，
+   * 结果被压缩/截断打断在半路。提前告知剩余量，它才会主动收尾。
+   */
+  contextBudget?: { remainingTokens: number; modelLimitTokens: number };
   /** 注入时刻。测试注入固定值，避免断言随真实时间漂移。 */
   now?: Date;
 }
@@ -118,11 +126,66 @@ function artifactsSection(input: WorldStateInput): WorldSection {
 }
 
 /**
+ * 剩余上下文预算（对齐 Codex `TokenBudgetRemainingContext`）。
+ *
+ * 为什么值得注入：长任务里模型不知道自己快没空间了，会持续展开新工作，
+ * 然后被压缩/截断打断在半路——用户看到的是"做一半停了"。提前告知剩余量，
+ * 模型才会主动收尾（先交付已完成的、把大任务拆小）。
+ *
+ * 节流（关键，否则每轮都变、每轮都注入）：只在**跨过档位**时重注入。
+ * 按剩余百分比分档：充裕 / 偏紧 / 紧张 / 告急。同档内变化不打扰模型。
+ */
+function contextBudgetSection(input: WorldStateInput): WorldSection {
+  const budget = input.contextBudget;
+  return {
+    id: "context_budget",
+    marker: "# 上下文余量",
+    render: () => {
+      if (!budget || budget.modelLimitTokens <= 0) return "";
+      const remaining = Math.max(0, budget.remainingTokens);
+      const percent = Math.round((remaining / budget.modelLimitTokens) * 100);
+      // 措辞按紧张程度递进：越少越明确要求收尾。
+      const advice = percent <= 10
+        ? "空间告急：**立刻收尾**——把已经完成的部分交付掉（该出文件就出文件），不要再展开新工作，并如实告诉用户还有哪些没做完。"
+        : percent <= 25
+          ? "空间偏紧：优先把当前这件事做完并交付，不要再开始新的大任务。"
+          : percent <= 50
+            ? "空间尚可：正常推进，但避免一次规划过多步骤。"
+            : "空间充裕：正常推进。";
+      return `# 上下文余量\n本窗口剩余约 ${percent}%（约 ${remaining} token，窗口上限 ${budget.modelLimitTokens}）。${advice}`;
+    },
+    // 只在**跨档**时重注入：同档内的数字波动不值得每轮打扰模型。
+    shouldReinject: (previous, next) => budgetTier(previous) !== budgetTier(next)
+  };
+}
+
+/**
+ * 把渲染文本映射到"建议档位"（0=充裕 1=尚可 2=偏紧 3=告急）。
+ *
+ * 注意必须比档位、不能比原始百分比：42% → 38% 若按数字比就是"变了"，
+ * 于是每轮都重注入，节流形同虚设（初版就是这个错）。
+ * 边界与 advice 的 50/25/10 保持一致，保证"档位没变 ⇒ 建议措辞也没变"。
+ */
+function budgetTier(rendered: string): number {
+  const match = /剩余约\s*(\d+)%/.exec(rendered);
+  if (!match) return -1; // 取不到（空串/格式变了）→ 视为变化，宁可多发一次
+  const percent = Number(match[1]);
+  if (percent <= 10) return 3;
+  if (percent <= 25) return 2;
+  if (percent <= 50) return 1;
+  return 0;
+}
+
+/**
  * 本轮候选 section 集合。顺序即注入顺序（时间在前：它是后续判断的坐标系）。
  * 导出便于测试直接断言单个 section 的正文。
+ *
+ * 余量 section 仅在拿得到可信数字时才加入——拿不到就不注入，不写"未知"（那是噪声）。
  */
 export function buildSections(input: WorldStateInput): WorldSection[] {
-  return [timeSection(input.now ?? new Date()), networkSection(input), artifactsSection(input)];
+  const sections = [timeSection(input.now ?? new Date()), networkSection(input), artifactsSection(input)];
+  if (input.contextBudget && input.contextBudget.modelLimitTokens > 0) sections.push(contextBudgetSection(input));
+  return sections;
 }
 
 /** 用标记包裹正文。标记必须与 `WorldSection.marker` 一致，否则下一轮反查不到。 */

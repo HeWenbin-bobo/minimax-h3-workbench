@@ -16,7 +16,7 @@ import {
 import { AdapterRegistry } from "./backends/adapterRegistry";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import { describeError, isNetworkError } from "../shared/errors";
-import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmDoneEvent, LlmPlanEvent, LlmQuestionEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, SecretName } from "../shared/types";
+import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmArtifactEvent, LlmDoneEvent, LlmPlanEvent, LlmQuestionEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, SecretName } from "../shared/types";
 import { downloadAndInstall } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
@@ -314,6 +314,8 @@ function registerIpc(
   const sendLlmPlan = (event: LlmPlanEvent) => mainWindow?.webContents.send("llm:plan", event);
   // 交互提问（request_user_input）：渲染端弹选择卡片；工具循环此刻正挂起等待回答。
   const sendLlmQuestion = (event: LlmQuestionEvent) => mainWindow?.webContents.send("llm:question", event);
+  // 产出文件（create_file）：只推元数据，内容不回灌消息流（否则每轮重发给模型，白烧 token）。
+  const sendLlmArtifact = (event: LlmArtifactEvent) => mainWindow?.webContents.send("llm:artifact", event);
   // LLM 连接测试（cc-switch 模式）：拉模型列表验证连通性——不发对话（不花钱），
   // 不受对话端点路径差异影响；/models 不通的服务商回退发一条最小对话。
   handle("llm:test", async () => {
@@ -620,9 +622,13 @@ function registerIpc(
         // 同一逻辑——为避免 handler 内重复实现，抽出共享函数 saveArtifactFile。
         createFile: async (params: { kind: "html" | "csv" | "tsv" | "md" | "xlsx"; name: string; content: string }) => {
           const saved = await saveArtifactFile(session, params.name, params.content, params.kind === "csv" || params.kind === "tsv" ? "xlsx" : params.kind);
-          // 通知渲染端：消息末尾追加一个产物标记（渲染端据此挂文件卡片）。
-          chunk({ seq: 0, delta: `\n\n\`\`\`${params.kind === "md" ? "markdown" : params.kind}\n${params.content}\n\`\`\`\n` });
-          return `文件已生成并保存：${saved.name}（${saved.size >= 1024 * 1024 ? `${(saved.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(saved.size / 1024))}KB`}）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。请简短告知用户文件已生成及内容概要。`;
+          // 只推**元数据**，不把内容回灌进消息流。旧做法 chunk 一段围栏代码块，导致：
+          // ① 气泡里卡片与代码块重复显示；② 那段内容进会话历史、每轮重发给模型
+          // （几十 KB 的 3D 页面 ≈ 每轮多烧上万 token，还会触发压缩）。内容已在磁盘上。
+          const renderKind: "html" | "sheet" | "doc" =
+            /\.html?$/i.test(saved.name) ? "html" : /\.xlsx$/i.test(saved.name) ? "sheet" : "doc";
+          sendLlmArtifact({ name: saved.name, path: saved.path, size: saved.size, kind: renderKind, sessionId: session });
+          return `文件已生成并保存：${saved.name}（${saved.size >= 1024 * 1024 ? `${(saved.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(saved.size / 1024))}KB`}）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。**不要**把文件内容重复贴进回复——卡片已经承载了它。请用一两句话说明文件内容概要即可。`;
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。
         updatePlan: async (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => {
@@ -836,6 +842,22 @@ function registerIpc(
   // kind: html/csv/tsv/md 写文本；xlsx 用 SheetJS 把 CSV 文本转成真 Excel 二进制（双击可开）。
   handle("artifact:save", async (_event, payload: { sessionId: string; name: string; content: string; kind: string }) => {
     return saveArtifactFile(payload.sessionId, payload.name, payload.content, payload.kind);
+  });
+  // 读取已落盘产物的文本内容：表格/文档预览用（html 走 h3preview 协议，不需要读文本）。
+  // 路径白名单与协议一致——只允许 userData/artifacts/ 内、且 realpath 后仍在根内的文件。
+  handle("artifact:read", async (_event, filePath: string) => {
+    const resolved = await resolveWithinRoot(path.join(app.getPath("userData"), "artifacts"), String(filePath || ""));
+    if (!resolved) throw new Error("只能读取产物目录内的文件。");
+    // xlsx 是二进制：表格产物落盘时转成了真 Excel（用户要"能双击打开"）。
+    // 预览要的是表格文本，故用同一套 SheetJS 反向转回 CSV——避免"存得下、看不了"。
+    if (/\.xlsx$/i.test(resolved)) {
+      const XLSX = await import("xlsx");
+      const book = XLSX.readFile(resolved);
+      const first = book.SheetNames[0];
+      return first ? XLSX.utils.sheet_to_csv(book.Sheets[first]) : "";
+    }
+    if (!/\.(html?|csv|tsv|md|txt|json)$/i.test(resolved)) throw new Error("该文件类型不支持文本预览。");
+    return readFile(resolved, "utf8");
   });
 }
 

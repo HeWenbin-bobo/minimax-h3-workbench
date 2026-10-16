@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { CompactionEvent, LlmDoneEvent, LlmPlanEvent, LlmQuestionEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, WorkbenchApi } from "../shared/types";
+import type { CompactionEvent, LlmArtifactEvent, LlmDoneEvent, LlmPlanEvent, LlmQuestionEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, WorkbenchApi } from "../shared/types";
 
 const invoke = <T>(channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args) as Promise<T>;
 
@@ -27,6 +27,7 @@ const api: WorkbenchApi = {
   listDeletedTasks: () => invoke("tasks:listDeleted"),
   showItem: (filePath) => invoke("shell:showItem", filePath),
   saveArtifact: (sessionId, name, content, kind) => invoke("artifact:save", { sessionId, name, content, kind }),
+  readArtifactText: (filePath) => invoke("artifact:read", filePath),
   openExternal: (url) => invoke("shell:openExternal", url),
   chatLlm: (messages, webSearch, agent, sessionId, browserSearch, planMode) => invoke("llm:chat", messages, webSearch, Boolean(agent), String(sessionId || ""), Boolean(browserSearch), planMode),
   checkAgentFrameworkUpdate: () => invoke("update:checkFramework"),
@@ -42,6 +43,7 @@ const api: WorkbenchApi = {
   onLlmTool: (listener) => subscribe<LlmToolEvent>("llm:tool", listener),
   onLlmCompaction: (listener) => subscribe<CompactionEvent>("llm:compaction", listener),
   onLlmPlan: (listener) => subscribe<LlmPlanEvent>("llm:plan", listener),
+  onLlmArtifact: (listener) => subscribe<LlmArtifactEvent>("llm:artifact", listener),
   onLlmQuestion: (listener) => subscribe<LlmQuestionEvent>("llm:question", listener),
   answerLlmQuestion: (requestId, answers) => invoke("llm:answer", requestId, answers),
   skipLlmQuestion: (requestId) => invoke("llm:skip-question", requestId),

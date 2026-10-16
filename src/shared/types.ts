@@ -231,6 +231,11 @@ export interface WorkbenchApi {
   showItem(filePath: string): Promise<ApiResponse<boolean>>;
   /** 游乐场产物落盘：存 userData/artifacts/<sessionId>/，kind 决定扩展名与转换（xlsx 走 SheetJS），返回 {name,path,size}。 */
   saveArtifact(sessionId: string, name: string, content: string, kind: "html" | "csv" | "tsv" | "md" | "xlsx"): Promise<ApiResponse<{ name: string; path: string; size: number }>>;
+  /**
+   * 读取已落盘产物的文本内容（表格/文档预览用）。
+   * 只允许 userData/artifacts/ 内的文件——与 h3preview 协议同一套路径白名单。
+   */
+  readArtifactText(filePath: string): Promise<ApiResponse<string>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
   /**
    * 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。agent=true 走 AI SDK 工具循环。
@@ -263,6 +268,8 @@ export interface WorkbenchApi {
   onLlmCompaction(listener: (event: CompactionEvent) => void): () => void;
   /** 智能体更新步骤清单（update_plan）：渲染端在气泡上显示/刷新进度清单。 */
   onLlmPlan(listener: (event: LlmPlanEvent) => void): () => void;
+  /** 智能体产出文件（create_file）：渲染端据此挂产物卡片（内容在磁盘上，不经消息流）。 */
+  onLlmArtifact(listener: (event: LlmArtifactEvent) => void): () => void;
   /** 智能体向用户提选择题（request_user_input）：渲染端弹选择卡片，答案经 answerLlmQuestion 回传。 */
   onLlmQuestion(listener: (event: LlmQuestionEvent) => void): () => void;
   /**
@@ -345,6 +352,26 @@ export interface LlmPlanEvent {
   plan: PlanStep[];
   /** 本次更新的原因，可能缺省。 */
   explanation?: string;
+  sessionId?: string;
+}
+
+/**
+ * 智能体产出文件事件（create_file 工具）。
+ *
+ * 为什么用事件而不是把内容回灌进消息流（旧做法）：旧做法把**整个文件内容**以围栏代码块
+ * 追加进助手消息，带来三个问题——① 气泡里卡片与代码块重复显示一遍；
+ * ② 那段内容会进会话历史，**每轮都重新发给模型**（几十 KB 的 3D 页面 ≈ 每轮多烧上万 token，
+ * 还会触发上下文压缩）；③ 大文件把消息撑得极长。改为只传元数据，内容留在磁盘上。
+ */
+export interface LlmArtifactEvent {
+  /** 落盘文件名（含扩展名）。 */
+  name: string;
+  /** 绝对路径：渲染端预览与「在文件夹中显示」都用它。 */
+  path: string;
+  /** 字节数。 */
+  size: number;
+  /** 渲染端据此选卡片图标与预览方式。 */
+  kind: "html" | "sheet" | "doc";
   sessionId?: string;
 }
 

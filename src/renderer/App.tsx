@@ -488,6 +488,12 @@ interface PlaygroundMessage {
    * 渲染端据此在消息下方渲染选择卡片；用户点完后清空（工具循环那边已经拿到答案继续了）。
    */
   questions?: { requestId: string; questions: LlmQuestion[] };
+  /**
+   * 已落盘的产物（create_file 工具）：主进程推来的是**元数据**，内容在磁盘上。
+   * 不再靠扫描消息正文里的围栏代码块来发现产物——旧做法会把整个文件内容塞进消息，
+   * 导致气泡重复显示 + 内容进历史、每轮重发给模型（白烧 token）。
+   */
+  artifacts?: Array<{ name: string; path: string; size: number; kind: ArtifactKind }>;
 }
 
 const pgSessionsKey = "h3-playground-sessions";
@@ -726,7 +732,17 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         questions: { requestId: event.requestId, questions: event.questions }
       })));
     });
-    return () => { offChunk(); offDone(); offTasks(); offTool(); offCompaction(); offPlan(); offQuestion(); };
+    // 产出文件（create_file）：只拿到元数据，内容在磁盘上。追加到当前气泡的产物列表
+    // （一次回复可能产出多个文件，故用数组而不是单个字段）。
+    const offArtifact = window.h3.onLlmArtifact((event) => {
+      const targetId = event.sessionId;
+      if (!targetId) return;
+      setSessions((all) => patchLast(all, targetId, (msg) => ({
+        ...msg,
+        artifacts: [...(msg.artifacts ?? []), { name: event.name, path: event.path, size: event.size, kind: event.kind }]
+      })));
+    });
+    return () => { offChunk(); offDone(); offTasks(); offTool(); offCompaction(); offPlan(); offQuestion(); offArtifact(); };
   }, []);
   // 粘底自动滚动：仅在用户接近底部时跟随。
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
@@ -1041,6 +1057,18 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
               {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
               <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <PgToolSteps steps={msg.toolSteps} running={Boolean(msg.streaming)} />}{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
+                // 优先用主进程推来的已落盘产物（元数据，内容在磁盘上）。
+                // 回落到扫描正文围栏：兼容历史消息，以及模型没用工具、直接在回复里写文件内容的老路径。
+                if (msg.role === "assistant" && msg.artifacts?.length) {
+                  return msg.artifacts.map((a, i) => <PgArtifactCard
+                    key={`${msg.id}-art-${i}`}
+                    kind={a.kind}
+                    saved={{ name: a.name, path: a.path, size: a.size, kind: a.kind, content: "" }}
+                    sessionId={activeId}
+                    onPreview={setPreview}
+                    onError={onError}
+                  />);
+                }
                 // 产物三探测（html > 表格 > 文档）：流式未结束先不亮，避免半截内容。
                 const artifact = msg.role === "assistant" && !msg.streaming ? extractArtifact(msg.content) : undefined;
                 return artifact && <PgArtifactCard kind={artifact.kind} content={artifact.content} sessionId={activeId} onPreview={setPreview} onError={onError} />;
@@ -1175,15 +1203,18 @@ function extractArtifact(content: string): { kind: ArtifactKind; content: string
 
 interface ArtifactInfo { name: string; path: string; size: number; kind: ArtifactKind; content: string }
 
-/** 产物文件卡片：图标 + 文件名 + 大小 + 预览/打开文件夹（WorkBuddy 形态）。产物懒落盘——首次点「预览」才写文件。 */
-function PgArtifactCard({ kind, content, sessionId, onPreview, onError }: { kind: ArtifactKind; content: string; sessionId: string; onPreview: (artifact: ArtifactInfo) => void; onError: (e: unknown) => void }) {
-  const [artifact, setArtifact] = useState<ArtifactInfo>();
+/** 产物文件卡片：图标 + 文件名 + 大小 + 预览/打开文件夹（WorkBuddy 形态）。
+ * 两种来源：① 主进程 create_file 推来的**已落盘**元数据（saved 有值，直接可用）；
+ * ② 旧路径——从消息正文的围栏代码块扫出来的内容（懒落盘，首次点「预览」才写文件）。 */
+function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }: { kind: ArtifactKind; content?: string; saved?: ArtifactInfo; sessionId: string; onPreview: (artifact: ArtifactInfo) => void; onError: (e: unknown) => void }) {
+  const [artifact, setArtifact] = useState<ArtifactInfo | undefined>(saved);
   const sizeLabel = (bytes: number) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
   // 表格产物存 .xlsx（Excel 双击可开，主进程 SheetJS 转换）；文档存 .md；网页存 .html。
   const ext = kind === "html" ? ".html" : kind === "sheet" ? ".xlsx" : ".md";
   const label = kind === "html" ? "HTML 文件" : kind === "sheet" ? "Excel 表格" : "Markdown 文档 · Word 可打开";
   async function ensureSaved(): Promise<ArtifactInfo | undefined> {
     if (artifact) return artifact;
+    if (content === undefined) return undefined; // 既没落盘元数据也没内容：无从保存
     const name = `artifact-${Date.now()}${ext}`;
     const saveKind = kind === "sheet" ? "xlsx" : kind === "doc" ? "md" : "html";
     const response = await window.h3.saveArtifact(sessionId, name, content, saveKind);
@@ -1201,9 +1232,21 @@ function PgArtifactCard({ kind, content, sessionId, onPreview, onError }: { kind
 }
 
 /** 产物侧栏预览：占位压缩聊天区（非悬浮），左缘拖拽条可调宽度。渲染区按 kind 分支：
- * html→沙箱 iframe（可交互）；sheet→CSV 渲染表格；doc→renderMarkdown 文档排版。 */
+ * html→沙箱 iframe（走协议按路径加载，内容不进渲染端）；sheet→CSV 渲染表格；doc→renderMarkdown 文档排版。
+ * sheet/doc 需要文本内容：metadata 路径下 content 为空，故按需从磁盘读（受主进程路径白名单约束）。 */
 function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: ArtifactInfo; onClose: () => void; width: number; onResize: (width: number) => void }) {
   const [nonce, setNonce] = useState(0);
+  const [diskContent, setDiskContent] = useState<string>();
+  const needsContent = artifact.kind !== "html" && !artifact.content;
+  useEffect(() => {
+    if (!needsContent) return;
+    let cancelled = false;
+    void window.h3.readArtifactText(artifact.path).then((r) => {
+      if (!cancelled && r.data) setDiskContent(r.data);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [artifact.path, needsContent]);
+  const content = artifact.content || diskContent || "";
   const dragRef = useRef<{ startX: number; startWidth: number } | undefined>(undefined);
   function onDragStart(e: React.MouseEvent) {
     e.preventDefault();
@@ -1263,8 +1306,8 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
       onLoad={focusFrame}
       title={artifact.name}
     />}
-    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}><SheetTable csv={artifact.content} /></div>}
-    {artifact.kind === "doc" && <div className="pg-preview-doc" key={nonce}>{renderMarkdown(artifact.content)}</div>}
+    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}>{content ? <SheetTable csv={content} /> : <p className="pg-preview-doc-empty">（正在读取…）</p>}</div>}
+    {artifact.kind === "doc" && <div className="pg-preview-doc" key={nonce}>{content ? renderMarkdown(content) : <p className="pg-preview-doc-empty">（正在读取…）</p>}</div>}
   </aside>;
 }
 

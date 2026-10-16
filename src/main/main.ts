@@ -448,8 +448,14 @@ function registerIpc(
 
     if (trigger === "auto" && !decision.compact) return { messages: effective };
 
-    const summary = await summarizeHistory({ ...settings.llm, apiKey: await settingsStore.getSecret("llmApiKey") }, messages, signal);
-    const compacted = buildCompactedHistory(messages, summary);
+    // 压缩对象是**当前历史**（effective），不是渲染端传来的原始 messages。
+    //
+    // 为什么（实测踩到的坑）：渲染端永不裁剪会话，messages 会无界增长。若压缩原始 messages，
+    // 第 2 次压缩会把**原始全量**再发一遍摘要（探针实测：第 1 次 44531 字符 → 第 2 次 44619 字符，
+    // 不降反增），而不是在上一轮压缩结果上继续——既白烧 token，又可能让摘要请求自身超窗而失败。
+    // 对齐 Codex：它压缩的是 `sess.clone_history()`（当前历史），压缩后即压缩结果。
+    const summary = await summarizeHistory({ ...settings.llm, apiKey: await settingsStore.getSecret("llmApiKey") }, effective, signal);
+    const compacted = buildCompactedHistory(effective, summary);
     budget.compacted = compacted;
     budget.compactedThrough = messages.length;
     budget.window = advanceWindow(budget.window);

@@ -169,7 +169,13 @@ describe("assertSafeResultUrl（SSRF 防护）", () => {
       "https://169.254.169.254/latest/meta-data/",
       "https://[::1]/1.mp4",
       "https://[fd00::1]/1.mp4",
-      "https://0.0.0.0/1.mp4"
+      "https://0.0.0.0/1.mp4",
+      // IPv4 映射的 IPv6：URL 会规范化成 [::ffff:7f00:1] 等十六进制形式，
+      // 旧前缀检查漏判 → 回环/内网被放行（实测 SSRF 绕过）。
+      "https://[::ffff:127.0.0.1]/1.mp4",
+      "https://[::ffff:169.254.169.254]/latest/meta-data/",
+      "https://[::ffff:10.0.0.8]/1.mp4",
+      "https://[0:0:0:0:0:ffff:7f00:1]/1.mp4"
     ]) {
       expect(() => assertSafeResultUrl(url), url).toThrow("内网");
     }

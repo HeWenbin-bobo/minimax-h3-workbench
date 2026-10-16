@@ -18,7 +18,7 @@ export function assertSafeResultUrl(rawUrl: string): URL {
 }
 
 // 仅覆盖直接写 IP 的情形（域名解析到内网需 DNS 层校验，此处超出权限范围）；
-// IPv4 私网/回环/链路本地/组播 + IPv6 回环/唯一本地/链路本地。
+// IPv4 私网/回环/链路本地/组播 + IPv6 回环/唯一本地/链路本地 + IPv4 映射的 IPv6。
 function isPrivateAddress(host: string): boolean {
   const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   if (ipv4) {
@@ -28,6 +28,16 @@ function isPrivateAddress(host: string): boolean {
   }
   if (host.includes(":")) {
     const normalized = host.toLowerCase();
+    // IPv4 映射/兼容的 IPv6（如 ::ffff:127.0.0.1）：WHATWG URL 会把 ::ffff:127.0.0.1 规范化成
+    // 十六进制 [::ffff:7f00:1]，普通前缀检查漏判 → 回环/内网被放行（实测 SSRF 绕过）。
+    // 取末 32 位（末两个 hextet）还原成 IPv4 再走同一套私网判定。
+    const mapped = /::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(normalized);
+    if (mapped) {
+      const high = parseInt(mapped[1], 16);
+      const low = parseInt(mapped[2], 16);
+      const dotted = `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+      return isPrivateAddress(dotted);
+    }
     return normalized === "::" || normalized === "::1"
       || normalized.startsWith("fc") || normalized.startsWith("fd") // 唯一本地地址 fc00::/7
       || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb"); // 链路本地 fe80::/10

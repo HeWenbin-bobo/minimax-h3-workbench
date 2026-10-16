@@ -15,3 +15,6 @@ coverage/
 .omc/
 .claude/
 .e2e/verify-*.mjs
+# 本机一次性取证产物（要长期保留的探针放 tools/probes/ 才会入库）
+_scratch/
+tools/probes/results/

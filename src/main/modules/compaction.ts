@@ -120,7 +120,11 @@ export async function summarizeHistory(
       body: JSON.stringify({
         model: options.model,
         messages: [...messages, { role: "user", content: SUMMARIZATION_PROMPT }],
-        stream: false
+        stream: false,
+        // 输出上限必须自己设（CLAUDE.md 纪律）：不设就用上游默认（实测该中转约 4096 token），
+        // 大上下文的交接摘要可能被静默截断——而截断的摘要 = 丢信息，且用户毫不知情。
+        // 摘要本身不该很长，8000 足够容纳一份完整交接，又给足余量。
+        max_tokens: 8_000
       }),
       signal: signal ?? AbortSignal.timeout(SUMMARIZE_TIMEOUT_MS)
     });

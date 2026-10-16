@@ -10,6 +10,7 @@ release/
 !.env.example
 coverage/
 .e2e/probe-*.mjs
+.e2e/probe-*.js
 .smoke-userdata/
 .omc/
 .claude/

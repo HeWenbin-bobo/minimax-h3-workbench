@@ -451,14 +451,30 @@ function registerIpc(
       // 压缩链路异常绝不阻断对话：如实记录后按原历史继续。
       console.warn("[llm] 上下文压缩失败，按原始历史继续：", describeError(error, "未知错误"));
     }
-    // 历史规范化：丢空白残留、剥掉模型收不下的图片、修掉非法的首条 assistant。
-    // 放在压缩之后——压缩会改写历史，规范化必须作用在**真正要发出去的那份**上。
+    // 进轮时**一次性**读出本轮用到的配置与密钥，冻结成快照；之下所有分支与工具回调只读它。
+    //
+    // 为什么必须冻结（实测能复现的漂移，不是理论问题）：智能体一轮是多步循环，实测可达
+    // 15–25 秒。搜索回调原先在**工具执行那一刻**才 `getSecret("searchApiKey")`——用户在这期间
+    // 改了 Key，同一轮里前后两个工具就会用两个 Key，表现为"一个能搜到、一个搜不到"，无从解释。
+    // 视频后端、模型名同理。对齐 Codex：TurnContext 在轮开始时冻结一次、整轮复用。
+    //
+    // 密钥只存内存快照、绝不打印（CLAUDE.md 红线）。非智能体路径不需要这些
+    // （LlmService 自己读），故按 agent 条件读，不白做一次 safeStorage 解密。
+    const turnSettings = await settingsStore.get();
     const turn = freezeTurn({
-      model: (await settingsStore.get()).llm.model,
+      model: turnSettings.llm.model,
       browserOnly,
       webSearch: Boolean(webSearch),
-      planMode: planMode ?? "none"
+      planMode: planMode ?? "none",
+      baseUrl: agent ? turnSettings.llm.baseUrl : "",
+      systemPrompt: agent ? turnSettings.llm.systemPrompt : "",
+      searchBaseUrl: agent ? turnSettings.searchApi.baseUrl || "" : "",
+      defaultBackend: agent ? turnSettings.defaultBackend : "local",
+      llmApiKey: agent ? await settingsStore.getSecret("llmApiKey") : "",
+      searchApiKey: agent ? await settingsStore.getSecret("searchApiKey") : ""
     });
+    // 历史规范化：丢空白残留、剥掉模型收不下的图片、修掉非法的首条 assistant。
+    // 放在压缩之后——压缩会改写历史，规范化必须作用在**真正要发出去的那份**上。
     const normalized = normalizeHistory(effective, { model: turn.value.model });
     effective = normalized.messages;
     // 剥掉了东西要如实告知（静默改动用户输入不可接受）：直接写进气泡开头。
@@ -489,7 +505,8 @@ function registerIpc(
     // 自动用相同消息回落普通对话（runtime fallback）——避免出现"又是空回复"且对用户透明。
     // agent 不走 LlmService，绕过了它的 busy 检查，故上面已按会话登记取消器并挡住同会话并发。
     void (async () => {
-      const settings = await settingsStore.get();
+      // 本轮配置一律读进轮时冻结的 turn.value，**不再**在分支里重新 settingsStore.get()
+      // 或重新 getSecret()——那样读到的是"此刻"的值，会与轮开始时用的不一致。
       let agentSent = 0;
       let agentTaskCount = 0; // 本轮已建任务数：非 0 时不得整轮重试（否则会重复建任务）
       const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
@@ -500,19 +517,19 @@ function registerIpc(
       // 快照在本轮采样完成后才写回：中途抛错不应把"已注入"记成事实。
       const worldDiff = diffWorldState(
         buildSections({
-          webSearch,
-          browserSearch: browserOnly,
-          searchApiReady: Boolean(settings.searchApi.baseUrl),
-          artifactKinds: planMode === "plan" ? [] : ["html（网页/小工具）", "xlsx（表格，由 csv/tsv 生成）", "md（文档）"]
+          webSearch: turn.value.webSearch,
+          browserSearch: turn.value.browserOnly,
+          searchApiReady: Boolean(turn.value.searchBaseUrl),
+          artifactKinds: turn.value.planMode === "plan" ? [] : ["html（网页/小工具）", "xlsx（表格，由 csv/tsv 生成）", "md（文档）"]
         }),
         sessionWorldState.get(session),
         historyTextOf(effective)
       );
       const worldStateText = worldDiff.text;
       const agentOptions = {
-        baseUrl: settings.llm.baseUrl,
-        apiKey: await settingsStore.getSecret("llmApiKey"),
-        model: settings.llm.model,
+        baseUrl: turn.value.baseUrl,
+        apiKey: turn.value.llmApiKey,
+        model: turn.value.model,
         // 提示词工程 = 智能体表现的最大杠杆（用户实测：同款国产模型接 Claude Code 明显更聪明，
         // 差距就在系统提示词与工具描述的打磨）。三段组装，顺序固定：
         //   ① 通用提示词（shared/agentPrompt.ts 的四层；用户自定义则整体替换）
@@ -520,27 +537,28 @@ function registerIpc(
         //   ③ world state 差异块——**只含本轮变化**，未变的环境事实不重发
         // 最后再套 withPlanMode：本轮规则是强约束，放最末才不被环境事实淹没。
         systemPrompt: withPlanMode(buildSystemPrompt({
-          custom: settings.llm.systemPrompt,
+          custom: turn.value.systemPrompt,
           memoryHint: buildAgentMemoryHint(orchestrator.list()),
           worldState: worldStateText
         }), planMode),
-        searchBaseUrl: settings.searchApi.baseUrl || undefined,
-        searchApiKey: await settingsStore.getSecret("searchApiKey")
+        searchBaseUrl: turn.value.searchBaseUrl || undefined,
+        searchApiKey: turn.value.searchApiKey
       };
       const agentCallbacks = {
         // 与普通对话共用同一条搜索链路：配了搜索 API 就优先用它，未配置则回落免 key 抓取 Bing/搜狗。
         // browserOnly（「浏览器搜索」联网项）时只用 Chromium 渲染，跳过 API 与 HTTP 直抓。
+        // 读的是进轮时冻结的 Key（不是此刻重新解密的）——同一轮里多个搜索必须用同一个 Key。
         webSearch: async (query: string) => searchWeb(query, {
-          apiBaseUrl: settings.searchApi.baseUrl || undefined,
-          apiKey: await settingsStore.getSecret("searchApiKey"),
+          apiBaseUrl: turn.value.searchBaseUrl || undefined,
+          apiKey: turn.value.searchApiKey,
           renderHtml,
-          browserOnly
+          browserOnly: turn.value.browserOnly
         }, controller.signal),
         generateVideo: async (params: { prompt: string; duration: number; count: number }) => {
           const request: GenerationRequest = {
             ...initialAgentVideoRequest,
             // 跟随用户当前默认后端；不写死（写死 rb 会让没配瞬映卡密的用户必然失败）。
-            backend: settings.defaultBackend,
+            backend: turn.value.defaultBackend,
             prompt: params.prompt,
             duration: Math.max(4, Math.min(15, Math.round(params.duration || 4))),
             count: Math.max(1, Math.min(4, Math.round(params.count || 1))),

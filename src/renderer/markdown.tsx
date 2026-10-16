@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
+import { PLAN_BLOCK_CLOSE, PLAN_BLOCK_OPEN } from "../shared/planMode";
 
 // 轻量 Markdown 渲染器：React 元素树输出（无 innerHTML，无 XSS 面）。
-// 覆盖语法：围栏代码块、行内代码、粗体、链接、有序/无序列表、标题；其余按纯文本段落。
+// 覆盖语法：围栏代码块、行内代码、粗体、链接、有序/无序列表、标题、表格、方案块；其余按纯文本段落。
 // 聊天场景足够，不足再扩。
 
 export function renderMarkdown(text: string): ReactNode[] {
@@ -12,6 +13,25 @@ export function renderMarkdown(text: string): ReactNode[] {
 
   while (index < lines.length) {
     const line = lines[index];
+
+    // 方案块 <proposed_plan> … </proposed_plan>（计划模式定稿的显式契约）。
+    // 必须单独处理：不处理的话这两个标签会作为普通段落的字面文本显示出来，
+    // 用户看到一堆尖括号噪声，比不加标记更糟。
+    if (line.trim() === PLAN_BLOCK_OPEN) {
+      const body: string[] = [];
+      index += 1;
+      // 未闭合也当正文收下（流式途中会先出现开标签）：宁可先按方案渲染，
+      // 也不要"开标签后的内容先按普通段落显示、闭合的一刻突然跳成另一种样式"。
+      while (index < lines.length && lines[index].trim() !== PLAN_BLOCK_CLOSE) {
+        body.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1; // 跳过闭标签
+      // 递归渲染正文：块内仍是 markdown（标题/列表照常）。
+      // 内层从 key 0 重新计数是安全的——与外层不同层级，React 只要求同级唯一。
+      nodes.push(<div className="md-plan" key={key++}>{renderMarkdown(body.join("\n"))}</div>);
+      continue;
+    }
 
     // 围栏代码块 ```lang ... ```
     if (line.trimStart().startsWith("```")) {

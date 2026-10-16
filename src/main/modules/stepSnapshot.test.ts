@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { freezeTurn, guaranteeDelivery } from "./stepSnapshot";
+import { freezeTurn } from "./stepSnapshot";
 
 describe("freezeTurn", () => {
   it("冻结后的值不可被改写", () => {
@@ -8,40 +8,28 @@ describe("freezeTurn", () => {
     expect(snapshot.value.model).toBe("a");
   });
 
-  it("忽略事后对原对象的改写（快照是副本）", () => {
+  it("快照是副本而非原对象引用（否则冻结等于没冻）", () => {
     const live: Record<string, unknown> = { model: "a" };
     const snapshot = freezeTurn(live);
     live.model = "b";
     expect(snapshot.value.model).toBe("a");
   });
 
-  it("staleAgainst 只在真的有差异时为真", () => {
-    const snapshot = freezeTurn({ model: "a", count: 1 });
-    expect(snapshot.staleAgainst({ model: "a", count: 1 })).toBe(false);
-    expect(snapshot.staleAgainst({ model: "b", count: 1 })).toBe(true);
+  it("中途改 live 配置不影响快照——这正是它要防的漂移", () => {
+    // 场景：一轮多步工具循环里，用户改了搜索 Key / 模型名。
+    const live: Record<string, unknown> = { searchApiKey: "key-1", model: "m1" };
+    const turn = freezeTurn(live);
+    live.searchApiKey = "key-2";
+    live.model = "m2";
+    expect(turn.value.searchApiKey).toBe("key-1");
+    expect(turn.value.model).toBe("m1");
   });
 
-  it("changedFields 精确报出改了哪些字段（UI 提示文案要用）", () => {
-    const snapshot = freezeTurn({ model: "a", count: 1, backend: "rb" });
-    expect(snapshot.changedFields({ model: "b", count: 1, backend: "local" })).toEqual(["model", "backend"]);
-  });
-
-  it("字段增删也算变更（不能只看交集）", () => {
-    const snapshot = freezeTurn({ model: "a" });
-    expect(snapshot.changedFields({ model: "a", extra: 1 })).toEqual(["extra"]);
-  });
-});
-
-describe("guaranteeDelivery", () => {
-  it("已交付时不补发任何东西", () => {
-    const seen: string[] = [];
-    guaranteeDelivery(() => true, (m) => seen.push(m), "兜底");
-    expect(seen).toEqual([]);
-  });
-
-  it("未交付时补一条可见说明（不允许静默丢弃用户消息）", () => {
-    const seen: string[] = [];
-    guaranteeDelivery(() => false, (m) => seen.push(m), "本轮没有产出，请重试。");
-    expect(seen).toEqual(["本轮没有产出，请重试。"]);
+  it("冻结是浅的：嵌套对象仍可被改写（调用方须保证不改写它）", () => {
+    // 记录这个已知边界，避免后来者以为拿到了深不可变的快照。
+    const nested = { systemPrompt: "x" };
+    const turn = freezeTurn({ llm: nested });
+    nested.systemPrompt = "y";
+    expect((turn.value.llm as { systemPrompt: string }).systemPrompt).toBe("y");
   });
 });

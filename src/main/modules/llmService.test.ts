@@ -104,6 +104,34 @@ describe("chatAgent 工具暴露", () => {
     expect(Object.keys(lastTools())).not.toContain("web_search");
   });
 
+  // 计划模式：副作用工具与"语义冲突"工具都要摘掉。
+  // 对齐 Codex 的 update_plan_enabled == false → without_update_plan_instructions（整段移除）。
+  it("计划模式摘掉 generate_video 与 create_file（副作用工具）", async () => {
+    stubStream(["1. 第一步\n2. 第二步"]);
+    await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true, undefined, undefined, true);
+    const tools = Object.keys(lastTools());
+    expect(tools).not.toContain("generate_video");
+    expect(tools).not.toContain("create_file");
+  });
+
+  it("计划模式摘掉 update_plan（语义与'只出方案'冲突）", async () => {
+    stubStream(["1. 第一步\n2. 第二步"]);
+    await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true, undefined, undefined, true);
+    expect(Object.keys(lastTools())).not.toContain("update_plan");
+  });
+
+  it("计划模式保留只读工具（open_page 看不到就写不出靠谱的计划）", async () => {
+    stubStream(["1. 第一步\n2. 第二步"]);
+    await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true, undefined, undefined, true);
+    expect(Object.keys(lastTools())).toContain("open_page");
+  });
+
+  it("非计划模式仍下发 update_plan（它只在计划模式被摘）", async () => {
+    stubStream(["好"]);
+    await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true, undefined, undefined, false);
+    expect(Object.keys(lastTools())).toContain("update_plan");
+  });
+
   it("文本分块按序推送给渲染端，并统计文本长度", async () => {
     stubStream(["你", "好"]);
     const sent: string[] = [];

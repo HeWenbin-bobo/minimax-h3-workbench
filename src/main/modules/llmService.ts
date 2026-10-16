@@ -403,6 +403,11 @@ export async function chatAgent(
       // update_plan（对齐 Codex `plan_spec.rs` 的 update_plan）：把任务拆解**写出来**。
       // 不是计划模式——计划模式是"这一轮不动手"，本工具是"动手期间让用户看得见进展"。
       // 工具化的理由同 create_file：靠提示词要求"先说步骤"模型会跳过，给它一个工具才会用。
+      //
+      // **计划模式下一并摘掉**（对齐 Codex 的 `update_plan_enabled == false` →
+      // `without_update_plan_instructions`：整段移除，而不是留一句"本轮别用"）。
+      // 它本身无害，但语义与"本轮只出方案"冲突——留着会让模型去更新清单而不是写方案。
+      ...(planMode ? {} : {
       update_plan: tool({
         description: `更新当前任务的步骤清单，让用户看到你打算怎么做、现在走到哪一步。
 
@@ -425,6 +430,7 @@ export async function chatAgent(
             return `步骤清单更新失败：${describeError(error, "未知错误")}（不影响任务继续，请直接用文字说明进度）`;
           }
         }
+      })
       }),
       // request_user_input（对齐 Codex `request_user_input_spec.rs`）：把选择题做成工具，
       // 而不是让模型在回复里手写 A/B/C 等用户打字——手写选项用户得自己复述，容易理解错。

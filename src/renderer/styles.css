@@ -477,6 +477,21 @@ button { cursor: pointer; }
    那个规则特异性更高，不写足就会让块内代码又变成行内样式。 */
 .md-code, .pg-msg.assistant .pg-bubble .md-code { background: var(--code-bg); color: var(--code-text); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; overflow-x: auto; margin: 8px 0; font-size: 11px; line-height: 1.6; }
 .pg-msg.assistant .pg-bubble .md-code code { background: transparent; color: inherit; padding: 0; border-radius: 0; font-size: inherit; }
+/* 方案块（<proposed_plan>）：计划模式定稿后由 markdown 渲染器包成这个类。
+   要有可见的"这是一份待确认的方案"的边界感——否则它与普通段落长得一样，
+   模型按契约加了标记、用户却看不出区别，等于白做。
+   用左侧品牌色条 + 浅底，不用整体阴影：对话区里多个块叠阴影会很吵。 */
+.md-plan, .pg-msg.assistant .pg-bubble .md-plan {
+  margin: 10px 0;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--pink);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--brand-wash-strong);
+}
+/* 块内首尾元素去掉多余外边距，否则浅底上下会撑出空白。 */
+.md-plan > :first-child { margin-top: 0; }
+.md-plan > :last-child { margin-bottom: 0; }
 /* Markdown 表格：模型常用表格输出结构化结果（如热搜榜单），无样式时挤成一坨纯文本。 */
 .pg-msg.assistant .pg-bubble table { border-collapse: collapse; margin: 8px 0; font-size: 11px; width: auto; max-width: 100%; display: block; overflow-x: auto; }
 .pg-msg.assistant .pg-bubble th, .pg-msg.assistant .pg-bubble td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; white-space: nowrap; }

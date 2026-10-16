@@ -75,6 +75,15 @@ describe("diffWorldState 差异注入", () => {
     expect(result.snapshot.find((entry) => entry.id === "current_time")?.content).toContain("10:30");
   });
 
+  it("跨天必须重注入（否则模型一直拿着昨天的日期，还被告知以此为准）", () => {
+    const first = diffWorldState(buildSections(baseInput), undefined, "");
+    const nextDay = new Date("2026-03-15T09:05:00");
+    const { text } = diffWorldState(buildSections({ ...baseInput, now: nextDay }), first.snapshot, first.text);
+    expect(text).toContain("# 当前时间");
+    expect(text).toContain("已变化");
+    expect(text).toContain("3月15日");
+  });
+
   it("上一轮有、这一轮消失的 section 发 REMOVAL 通知", () => {
     const previous: WorldStateSnapshot = [
       { id: "current_time", content: "旧时间" },

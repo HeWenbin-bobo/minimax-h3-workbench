@@ -66,6 +66,11 @@ function formatClock(date: Date): string {
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${weekday} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+/** 从渲染文本里取出日期部分（"2026年3月14日"）。用于判断是否跨天。 */
+function datePartOf(rendered: string): string {
+  return /(\d{4}年\d{1,2}月\d{1,2}日)/.exec(rendered)?.[1] ?? rendered.slice(0, 12);
+}
+
 /**
  * 当前时间。模型不知道今天是哪天——问"最新的 iPhone 是哪款"时它会凭训练截止日臆造，
  * 报出一个几年前的型号（Codex 为此专门做了 time_reminder 通道）。
@@ -75,8 +80,15 @@ function timeSection(now: Date): WorldSection {
     id: "current_time",
     marker: "# 当前时间",
     render: () => `# 当前时间\n${formatClock(now)}（北京时间）。涉及"最新/今年/上个月"的时效问题请以此为准。`,
-    // 节流：分钟级变化不值得重注入，否则每轮都判"变了"、每轮都发。
-    shouldReinject: () => false
+    // 节流规则：**跨天必重注入，同一天内不重注入**。
+    //
+    // 对齐 Codex `time_reminder.rs` 的 `next_reinject_after`——它按时间阈值重注入，
+    // 而不是"注入一次后永不再发"。此前写成恒 false 是个真 bug：会话跨过午夜后，
+    // 模型会一直拿着昨天的日期，而提示词还明确告诉它"时效问题以此为准"——
+    // 比不给时间更糟（给了错的时间还让它相信）。
+    //
+    // 只比日期不比分钟：分钟级变化每轮都会触发，等于把差异注入退化回"每轮全发"。
+    shouldReinject: (previous, next) => datePartOf(previous) !== datePartOf(next)
   };
 }
 

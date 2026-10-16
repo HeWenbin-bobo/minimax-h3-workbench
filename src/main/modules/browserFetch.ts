@@ -49,9 +49,16 @@ async function renderOnce(url: string, timeoutMs: number): Promise<string> {
         error ? reject(error) : resolve();
       };
       const onLoad = () => done();
-      const onFail = (_event: unknown, code: number, description: string) => done(new Error(`浏览器加载失败：${description}（${code}）`));
+      // 只认**主框架**失败。子框架（iframe）加载失败不该连坐整页——真实网页（搜索结果页、
+      // 开放平台文档）几乎都内嵌第三方 iframe（广告/统计/播放器），它们失败是常态。
+      // 旧实现不看 isMainFrame，任何一个子框架报错就 reject 整个 renderHtml：
+      // 主框架明明加载好了，却报"浏览器加载失败"（实测 probe-render-subframe 复现）。
+      // 注意用 on 而非 once：子框架失败不落定，若用 once 会被第一个子框架事件消耗掉，
+      // 之后真·主框架失败就漏判了。done() 里统一 removeListener。
+      const onFail = (_event: unknown, code: number, description: string, _url: string, isMainFrame: boolean) =>
+        isMainFrame ? done(new Error(`浏览器加载失败：${description}（${code}）`)) : undefined;
       win.webContents.once("did-finish-load", onLoad);
-      win.webContents.once("did-fail-load", onFail);
+      win.webContents.on("did-fail-load", onFail);
       // 失败会走 did-fail-load，这里吞掉 loadURL 自身的 rejection，避免未处理拒绝告警。
       void win.loadURL(url).catch(() => undefined);
     });

@@ -46,13 +46,17 @@ metadata:
 8. `609f814` 产物预览读取失败时静默卡在"（正在读取…）"——把错误显示到面板（正是它掩盖了 #7 的 readFile 报错）。
 9. `f4e2492` 子框架(iframe)加载失败连坐整页 → 浏览器渲染在正常页面上误报失败（`did-fail-load` 未判 isMainFrame）。
 10. `8b68990` settings.update 局部更新 llm/searchApi 把兄弟字段打回默认值（只 ssh 做了嵌套合并）。
-11. `7aad02d`（test）补 `injectWorldState` 单测。
-12. `af61536` + `991147a` + `b2fb2d6`（docs）把结论写入仓库记忆与考古文档。
+11. `af23774`（安全）SSRF 防护漏判 IPv4 映射的 IPv6：`https://[::ffff:127.0.0.1]/` 被放行
+    - URL 会规范化成 `[::ffff:7f00:1]`，旧前缀检查（fc/fd/fe8…）漏判。取末 32 位还原成 IPv4 再判。
+12. `8b8d8bd` 流式期间往上翻看历史被每个 chunk 拽回底部（注释写着"仅在接近底部时跟随"但没实现）。
+13. `7aad02d`（test）补 `injectWorldState` 单测。
+14. `af61536` + `991147a` + `b2fb2d6` + `5c8d08d`（docs）把结论写入仓库记忆与考古文档。
 
 **验证**：单测 265 项 / typecheck / build 全绿；新探针 probe-worldstate-turns /
 probe-agent-overflow / probe-compact-source / probe-time-channel / probe-time-fullprompt（6 通道 A/B）/
 probe-search-channel / probe-artifact-ext / probe-sheet-quoted / probe-xlsx-quoted /
-probe-preview-error / probe-render-subframe / probe-render-bing / probe-settings-partial；
+probe-preview-error / probe-render-subframe / probe-render-bing / probe-settings-partial /
+probe-scroll-stick；
 回归 probe-compaction 22/22、probe-plan-mode / probe-user-input / probe-codex-ui / .e2e/probe-preview 全过；
 E2E test-01..10 全过（逐个跑，避免 CDP 端口争用）。
 

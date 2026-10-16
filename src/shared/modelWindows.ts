@@ -20,6 +20,11 @@ const WINDOW_TABLE: Array<{ prefix: string; window: number }> = [
   { prefix: "abab", window: 192_000 },
   { prefix: "glm-4.6", window: 200_000 },
   { prefix: "glm-", window: 128_000 },
+  // dk- 是中转常用的 deepseek 短前缀。实测（api.jihuarst.top 的 /models）
+  // 该站同时提供 dk-v4.1-flash 与 deepseek-v4.1-flash，是同一模型的别名。
+  // 不收录的后果正是本文件开头警告的"估大"：dk- 会落到默认 128k，
+  // 而真实窗口 64k → 压缩在 102k 才触发，可请求 64k 就被上游拒了（用户先看到报错）。
+  { prefix: "dk-", window: 64_000 },
   { prefix: "deepseek", window: 64_000 },
   { prefix: "qwen", window: 128_000 },
   { prefix: "kimi", window: 128_000 },

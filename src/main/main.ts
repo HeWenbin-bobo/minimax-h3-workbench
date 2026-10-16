@@ -36,6 +36,7 @@ import { normalizeHistory } from "./modules/historyNormalize";
 import { freezeTurn } from "./modules/stepSnapshot";
 import { CONTENT_FILTER_GUIDANCE, contentFilterNotice, isContentFilterError, retryDelayMs, retryNotice } from "./modules/errorRecovery";
 import { buildSystemPrompt } from "../shared/agentPrompt";
+import { parseCsvRow } from "../shared/csv";
 import {
   activeContextTokens,
   advanceWindow,
@@ -885,7 +886,7 @@ function registerIpc(
     // xlsx 是二进制：表格产物落盘时转成了真 Excel（用户要"能双击打开"）。
     // 预览要的是表格文本，故用同一套 SheetJS 反向转回 CSV——避免"存得下、看不了"。
     if (/\.xlsx$/i.test(resolved)) {
-      const XLSX = await import("xlsx");
+      const XLSX = await loadXlsx();
       const book = XLSX.readFile(resolved);
       const first = book.SheetNames[0];
       return first ? XLSX.utils.sheet_to_csv(book.Sheets[first]) : "";
@@ -915,7 +916,7 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   const filePath = path.join(dir, safeName);
   if (kind === "xlsx") {
     // SheetJS：CSV 文本 → 工作簿 → xlsx 二进制。用户点名要"能保存成 .xlsx"，纯 CSV 落盘达不到。
-    const XLSX = await import("xlsx");
+    const XLSX = await loadXlsx();
     const book = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(parseCsvRows(content)), "Sheet1");
     XLSX.writeFile(book, filePath);
@@ -926,9 +927,25 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   return { name: safeName, path: filePath, size: Buffer.byteLength(content, "utf8") };
 }
 
-/** CSV 文本 → string[][]：按行切分再按逗号/制表符切格。模型输出极少含引号转义，简单切分够用。 */
+/** CSV 文本 → string[][]：按行切分再逐行用共享解析器切格（正确处理引号字段）。
+ * 旧实现用 `line.split(/,|\t/)` 朴素切分——模型若对含逗号的字段加引号（合法 CSV），
+ * 该字段会被错切成多列，xlsx 里的数据从落盘那一刻就是错的。 */
 function parseCsvRows(content: string): string[][] {
-  return content.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.split(/,|\t/).map((cell) => cell.trim()));
+  return content.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => parseCsvRow(line));
+}
+
+/**
+ * 加载 SheetJS（xlsx）。
+ *
+ * **必须取 default**：`await import("xlsx")` 返回的命名空间里，cjs-module-lexer 只识别出
+ * `read/write/writeFile/utils`，**没有 `readFile`**——而 `readFile` 只在 `default`（= module.exports）上。
+ * 旧代码直接用命名空间调 `XLSX.readFile`，于是**每个 xlsx 产物的预览都报 "XLSX.readFile is not a function"**
+ * （保存路径用的是 `writeFile`，恰好在命名空间上，所以"存得下、看不了"，实测 probe-xlsx-quoted 抓到）。
+ * 统一走这里取 default，读写都拿到完整 API。
+ */
+async function loadXlsx(): Promise<typeof import("xlsx")> {
+  const mod = (await import("xlsx")) as unknown as { default?: typeof import("xlsx") } & typeof import("xlsx");
+  return (mod.default ?? mod) as typeof import("xlsx");
 }
 
 // h3media / showItem 白名单的补充放行集合：本应用自己产出过的结果路径。// 用户改过输出目录后，历史结果仍留在旧目录；只认当前目录会让历史视频全部变成打不开的死链。

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMessage, ContextStatus, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LlmQuestion, LlmStreamEvent, LocalModelStatus, PlanStep, ResourceLink, UpdateInfo } from "../shared/types";
 import { LLM_PROVIDERS, MAX_PROMPT_LENGTH } from "../shared/types";
+import { parseCsvRow } from "../shared/csv";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
 import { describeError } from "../shared/errors";
 import { looksLikePlan, type PlanMode } from "../shared/planMode";
@@ -1311,9 +1312,11 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
   </aside>;
 }
 
-/** CSV/TSV 文本 → 表格渲染（首行表头）。渲染端简单 split，不引解析库。 */
+/** CSV/TSV 文本 → 表格渲染（首行表头）。渲染端简单 split，不引解析库。
+ * 表格字段含逗号时，SheetJS 的 sheet_to_csv 会输出引号包裹的 CSV（如 `a,"b,c",d`），
+ * 朴素 split 会被错切为多列。用 parseCsvRow 正确处理引号与转义。 */
 function SheetTable({ csv }: { csv: string }) {
-  const rows = csv.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.split(/,\t?|\t/).map((cell) => cell.trim()));
+  const rows = csv.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => parseCsvRow(line));
   if (rows.length === 0) return <p className="pg-preview-doc-empty">（空表格）</p>;
   const [header, ...body] = rows;
   return <table className="pg-sheet-table">

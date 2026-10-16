@@ -8,16 +8,16 @@ metadata:
   modified: 2026-10-16T18:27:38.891Z
 ---
 
-**状态（2026-10-17）：工作区干净，`feature/agent-iteration` 已领先 `main` 3 笔（未推送）。**
+**状态（2026-10-17）：工作区干净，`feature/agent-iteration` 已领先 `main` 5 笔（未推送）。**
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
-- 分支共 **43 笔提交**（`v0.2.0..HEAD` 实测）。
-- HEAD = `69a26d7`。
-- **本轮 3 笔修复未推送**（等用户确认）。
+- 分支共 **45 笔提交**（`v0.2.0..HEAD` 实测）。
+- HEAD = `312e7f2`。
+- **本轮 5 笔（4 修复 + 1 文档）未推送**（等用户确认）。
 
-## 本轮（探索模式）3 笔修复：world state 载体不匹配（v0.2.1..HEAD）
+## 本轮（探索模式）修复：world state 载体不匹配 + 摘要上限（v0.2.1..HEAD）
 
-同一个根因的三个面——**移植 Codex 时"载体"对不上，读代码看不出来、实测请求体才现形**：
+同一个根因的多个面——**移植 Codex 时"载体"对不上，读代码看不出来、实测请求体才现形**：
 
 1. `84e8a45` world state 第 2 轮起全部丢失 + 智能体不认上下文超窗
    - `diffWorldState` 照搬 Codex 的"没变就不发"，但那套成立的前提是片段进**持久历史**；
@@ -31,11 +31,13 @@ metadata:
    - 真实 key A/B：环境事实拼进 system prompt 时模型**直接无视**（问日期答"我无法得知"），
      6 种 system 通道全失败；作为 user 片段则 100% 生效。Codex 本就是作为对话片段注入的。
    - 修后真实 key 端到端：模型答"2026 年 10 月 17 日，周六"（与系统时钟一致）。
+4. `312e7f2` 摘要请求未设输出上限（大上下文摘要可能被静默截断）——补 `max_tokens: 8000`。
+5. `af61536`（docs）把上述结论写入记忆与考古文档。
 
 **验证**：单测 255 项 / typecheck / build 全绿；新探针 probe-worldstate-turns /
-probe-agent-overflow / probe-compact-source / probe-time-channel / probe-time-fullprompt；
-回归 probe-compaction 22/22、probe-plan-mode / probe-user-input / probe-codex-ui 全过；
-E2E test-01..10 全过（test-03 单独跑 5/5）。
+probe-agent-overflow / probe-compact-source / probe-time-channel / probe-time-fullprompt
+（6 通道 A/B + 答非所问风险 K/L 对照）；回归 probe-compaction 22/22、
+probe-plan-mode / probe-user-input / probe-codex-ui 全过；E2E test-01..10 全过（单独跑，避免端口争用）。
 
 ## v0.2.1 之后的 5 笔（v0.2.1..84e8a45 之前）
 

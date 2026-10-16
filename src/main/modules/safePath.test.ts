@@ -22,26 +22,34 @@ afterAll(async () => {
 });
 
 /**
- * 造一个"指向 target 的链接"。
+ * 造一个指向 target 的链接，返回**链接路径**与**它是不是目录链接**。
  *
  * Windows 上普通用户**建不了文件软链**（EPERM，需开发者模式），但**目录 junction 可以**——
  * 初版只用文件软链，结果那几条断言在本机被静默跳过、成了假绿（最核心的越界检查根本没跑）。
- * 故：POSIX 用文件软链；Windows 退化为"指向目录的 junction"，同样能构造越界路径。
- * 返回实际可用的链接路径；两种都不可用时返回 null（调用方须显式失败而非跳过）。
+ * 故：POSIX 用文件软链；Windows 退化为"指向目录的 junction"。
+ *
+ * 必须显式返回 `isDirLink`，不能靠调用方猜：初版让调用方用 `linkPath.endsWith(".html")`
+ * 判断，而链接名是 `link-in`（不含 .html）→ Linux 上把文件名错误地拼到了**文件软链**后面，
+ * 得到不存在的 `link-in/inside.html`，断言因此失败（CI 抓到；本机 Windows 走 junction 分支没暴露）。
  */
-async function makeLink(targetFile: string, linkPath: string): Promise<string | null> {
+async function makeLink(targetFile: string, linkPath: string): Promise<{ link: string; isDirLink: boolean } | null> {
   // 先试文件软链（POSIX 常规路径）
   try {
     await symlink(targetFile, linkPath);
-    return linkPath;
+    return { link: linkPath, isDirLink: false };
   } catch { /* 落到下面的 junction */ }
-  // Windows：junction 指向目标所在目录，再由调用方拼上文件名
+  // Windows：junction 指向目标所在目录，调用方需再拼上文件名
   try {
     await symlink(path.dirname(targetFile), linkPath, "junction");
-    return linkPath;
+    return { link: linkPath, isDirLink: true };
   } catch {
     return null;
   }
+}
+
+/** 按链接类型还原出"应被校验的真实文件路径"。 */
+function candidateOf(made: { link: string; isDirLink: boolean }, fileName: string): string {
+  return made.isDirLink ? path.join(made.link, fileName) : made.link;
 }
 
 describe("resolveWithinRoot", () => {
@@ -77,18 +85,15 @@ describe("resolveWithinRoot", () => {
     const linkPath = path.join(root, "link-out");
     const made = await makeLink(path.join(outside, "secret.html"), linkPath);
     expect(made).not.toBeNull(); // 造不出链接就显式失败，不再静默跳过
-    // 文件软链：linkPath 即文件；junction：linkPath/secret.html 才是文件
-    const candidate = made!.endsWith(".html") ? made! : path.join(linkPath, "secret.html");
     // 字符串层面它"在 root 下"，但真实落点在外部 → 必须为 null
-    expect(await resolveWithinRoot(root, candidate)).toBeNull();
+    expect(await resolveWithinRoot(root, candidateOf(made!, "secret.html"))).toBeNull();
   });
 
   it("指向根内的链接放行（不能把所有链接一刀切禁掉）", async () => {
     const linkPath = path.join(root, "link-in");
     const made = await makeLink(path.join(root, "inside.html"), linkPath);
     expect(made).not.toBeNull();
-    const candidate = made!.endsWith(".html") ? made! : path.join(linkPath, "inside.html");
-    expect(await resolveWithinRoot(root, candidate)).not.toBeNull();
+    expect(await resolveWithinRoot(root, candidateOf(made!, "inside.html"))).not.toBeNull();
   });
 
   it("root 自身是链接时仍正常工作（两侧都要 realpath 的原因）", async () => {

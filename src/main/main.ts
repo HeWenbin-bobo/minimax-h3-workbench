@@ -28,7 +28,7 @@ import { checkForUpdates, checkFrameworkUpdate } from "./modules/updateChecker";
 import { renderHtml, clearBrowserFetchCache } from "./modules/browserFetch";
 import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
-import { buildSections, diffWorldState, historyTextOf, type WorldStateSnapshot } from "./modules/worldState";
+import { buildSections, diffWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
@@ -256,8 +256,8 @@ function registerIpc(
   };
   /**
    * world state 快照：按会话隔离，只存内存。
-   * 重启后丢基线不是 bug——diffWorldState 会退化为"按历史里的标记判断是否已注入过"，
-   * 最坏情况是多花一次 token 重发一遍环境事实，不会漏注入（安全降级）。
+   * 它只用于**节流正文刷新**（时间同天 / 余量同档时保持 system 前缀稳定），不决定要不要注入。
+   * 重启后丢快照不是 bug——下一轮一律按"新正文"渲染，最多多花一次 token。
    */
   const sessionWorldState = new Map<string, WorldStateSnapshot>();
   /**
@@ -478,6 +478,22 @@ function registerIpc(
     if (sessionAborters.has(session) || service.busy) throw new Error("该会话的上一轮回复还在进行中，请先停止或等待完成。");
     const chunk = (event: LlmStreamEvent) => sendChunk({ ...event, sessionId: session });
     const done = (event: LlmDoneEvent) => sendDone({ ...event, sessionId: session });
+    /**
+     * 上游报"上下文超窗"（对齐 Codex 的 `ContextWindowExceeded` 触发源）时的统一处理：
+     * 本地窗口表把窗口估小了 → 记录 forceCompact，下一轮 maybeCompact 会无条件压缩。
+     *
+     * 必须两条路径共用（普通对话 / 智能体）：此前只在普通对话里认，默认开启的智能体模式
+     * 撞上超窗时既不记录也不压缩，会反复撞同一堵墙（用户看到的是"怎么发都不行"）。
+     * @returns 是否确为超窗（true 表示调用方应停止本轮、不要再回落普通对话）。
+     */
+    const noteContextOverflow = (error: unknown): boolean => {
+      if (controller.signal.aborted || !looksLikeContextOverflow(describeError(error, ""))) return false;
+      // 本地模型表把窗口估小了——记下来，并在气泡里说清"下一轮会自动压缩"，
+      // 而不是把上游的英文报错原样糊给用户。
+      sessionBudgets.set(session, { ...budgetFor(session), window: markWindowExceeded(budgetFor(session).window) });
+      chunk({ seq: 1, delta: "（本轮上下文超出模型可接受的长度。已记录，下一条消息会自动压缩历史后再发送；也可点输入框右侧的「上下文」按钮立即压缩。）\n\n" });
+      return true;
+    };
     // 上下文压缩前置：超阈值才动手，未超时原样透传（零回归）。
     // 放在这里而不是各分支内部，是为了普通对话与智能体共用同一套记账——两条路径吃的是同一份历史。
     const controller = new AbortController();
@@ -519,20 +535,12 @@ function registerIpc(
     if (normalized.notes.length > 0) chunk({ seq: 0, delta: `${normalized.notes.join("\n")}\n\n` });
     if (!agent) {
       // 普通对话同样要能吃下"上游报超窗"这一信号（LlmService 用状态码+错误体摘要构造 message）。
-      const onChatError = (error: unknown) => {
-        if (!controller.signal.aborted && looksLikeContextOverflow(describeError(error, ""))) {
-          // 本地模型表把窗口估小了——记下来，并在气泡里说清"下一轮会自动压缩"，
-          // 而不是把上游的英文报错原样糊给用户。
-          sessionBudgets.set(session, { ...budgetFor(session), window: markWindowExceeded(budgetFor(session).window) });
-          chunk({ seq: 1, delta: "（本轮上下文超出模型可接受的长度。已记录，下一条消息会自动压缩历史后再发送；也可点输入框右侧的「上下文」按钮立即压缩。）\n\n" });
-        }
-      };
       void service.chat(effective, webSearch || browserOnly, chunk, browserOnly)
         .then(() => done({ ok: true }))
         .catch((error: unknown) => {
           // 用户主动停止（abort）不算错误：正常收尾，不显示红色报错。
           const aborted = error instanceof DOMException && error.name === "AbortError";
-          if (!aborted) onChatError(error);
+          if (!aborted) noteContextOverflow(error);
           done({ ok: aborted, message: aborted ? undefined : describeError(error, "对话失败") });
         })
         .finally(() => { sessionAborters.delete(session); });
@@ -549,7 +557,14 @@ function registerIpc(
       let agentTaskCount = 0; // 本轮已建任务数：非 0 时不得整轮重试（否则会重复建任务）
       const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
       const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
-      // world state 差异注入：只把**本轮有变化**的环境事实追加进提示词。
+      // world state：每轮都注入**完整**的环境事实（时间/联网/产物/余量）。
+      //
+      // 为什么是"每轮完整注入"而不是"只发差异"（实测踩到的坑）：这些事实拼进的是
+      // **system prompt**，而 system prompt 每轮由 buildSystemPrompt 从头重建、不累积。
+      // 若照搬 Codex 的"没变就不发"，模型从第 2 轮起就再也看不到任何环境事实
+      // （实测捕获请求体：第 1 轮 system 含全部标记，第 2 轮一个都没有）——等于把
+      // 时间/联网/产物能力/上下文余量全部作废。差异只用于**节流正文刷新**（见 worldState.ts）。
+      //
       // 开关必须传真实生效值——提示词说"你可以联网"但工具表里已摘掉 web_search，
       // 模型会调一个不存在的工具、然后为"我调不了"道歉（CLAUDE.md 记过同类事故）。
       // 快照在本轮采样完成后才写回：中途抛错不应把"已注入"记成事实。
@@ -567,8 +582,7 @@ function registerIpc(
           artifactKinds: turn.value.planMode === "plan" ? [] : ["html（网页/小工具）", "xlsx（表格，由 csv/tsv 生成）", "md（文档）"],
           contextBudget: { remainingTokens: Math.max(0, modelLimit - activeTokens), modelLimitTokens: modelLimit }
         }),
-        sessionWorldState.get(session),
-        historyTextOf(effective)
+        sessionWorldState.get(session)
       );
       const worldStateText = worldDiff.text;
       const agentOptions = {
@@ -688,6 +702,10 @@ function registerIpc(
         } catch (error) {
           if (controller.signal.aborted) { done({ ok: true }); return; }
           agentError = error;
+          // 上游报"上下文超窗"：与普通对话同一套处理（记录 forceCompact，下一轮无条件压缩）。
+          // 必须在这里就停：重试同一段超长历史必然同样被拒，回落普通对话也会同样超窗——
+          // 提前拦下，避免用户看到"发了半天全是同一堵墙"。追加提示即使已有输出也安全（不重发正文）。
+          if (noteContextOverflow(error)) { done({ ok: true }); return; }
           // 内容被安全策略拒绝：原样重试同一个 prompt 必然同样被拒，得先注入改写指引。
           // 注入在历史末尾（作为一条普通 user 消息），下一轮重试就会带上它。
           if (isContentFilterError(error) && attempts < 3 && agentSent === 0) {

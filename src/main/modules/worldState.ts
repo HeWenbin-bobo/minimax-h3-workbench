@@ -1,36 +1,32 @@
 import type { PromptFragment } from "../../shared/agentPrompt";
 
 /**
- * 世界状态**差异注入**（移植 OpenAI Codex `core/src/context/world_state/mod.rs`）。
+ * 世界状态注入（移植 OpenAI Codex `core/src/context/world_state/mod.rs` 的 section 模型）。
  *
- * 问题：有些事实每轮都成立（今天几号、能不能联网、能产出什么文件），把它们塞进静态提示词
- * 会重复发送、浪费 token；但它们**会变**（用户关掉了联网、跨天了），不重注入模型就拿着过期事实做事。
+ * 问题：有些事实每轮都成立（今天几号、能不能联网、能产出什么文件），但它们**会变**
+ * （用户关掉了联网、跨天了、上下文快满了），模型必须拿到**当前**事实才不犯错。
  *
- * Codex 的解法是"只注入差异"：每个 section 渲染成两半——
- * 人类可读的 `render()`，以及用于在历史里反查该 section 是否已存在的标记 `marker`。
- * 每轮拿当前状态与快照比：
- * - 变了 → 注入新内容 + REPLACEMENT 提示（"以下取代先前的同一小节"）
- * - 消失 → 注入 REMOVAL 提示（"不再适用，不要再用"）
- * - 没变 → 什么都不发
+ * **关键差异（这是移植时踩到的坑，已修正）**：Codex 的 world state 片段是追加进
+ * **持久历史**的——历史会累积，所以"没变就不发"能省 token，且旧片段仍在历史里可见。
+ * 但本应用的载体是**每轮由 buildSystemPrompt 重新拼的 system prompt**：上一轮的正文不会保留。
+ * 若沿用 Codex 的"没变就不发"，模型从第 2 轮起就再也看不到任何环境事实
+ * （实测请求体捕获到：第 1 轮 system 含全部标记，第 2 轮一个都没有）。
  *
- * `PreviousSectionState::Unknown` 的处理：如果历史里能认出该 section 的标记，但进程内没有快照
- * （主进程重启过），**按"已存在"处理**。否则会把全部内容重发一遍，正是差异注入要避免的浪费。
+ * 所以这里的规则是：**每个 section 每轮都必须渲染进 system prompt**。
+ * 节流（`shouldReinject`）只决定"正文要不要刷新"，不决定"要不要出现"：
+ * 被节流时沿用上一轮的正文（保持 system 前缀稳定、利于上游前缀缓存），到该刷新时再换新值。
  */
 
 export type SectionId = "current_time" | "network_access" | "artifacts" | "context_budget";
 
 export interface WorldSection {
   id: SectionId;
-  /** 注入给模型的正文（不含包裹——包裹由 withFragment 负责）。 */
+  /** 注入给模型的正文（自带 `# 标题` 小节头）。 */
   render: () => string;
   /**
-   * 该 section 在历史里出现时携带的标记（对齐 Codex `fragment.marker`）。
-   * 与 render 分开：正文会随事实变化，标记必须稳定，否则下一轮反查找不到。
-   */
-  marker: string;
-  /**
-   * 内容变了也未必值得立刻重注入（节流）。返回 false 表示"这次变化先不发"
-   * （对齐 Codex `time_reminder.rs` 的 `next_reinject_after`）。
+   * 内容变了也未必值得立刻刷新正文（节流）。返回 false 表示"这次变化先不刷新，沿用旧正文"
+   * （对齐 Codex `time_reminder.rs` 的 `next_reinject_after`）。**注意：只影响正文是否刷新，
+   * 不影响该 section 是否出现——每个 section 每轮都必须在场（载体是每轮重建的 system prompt）。**
    */
   shouldReinject?: (previous: string, next: string) => boolean;
 }
@@ -41,7 +37,7 @@ export interface SectionSnapshot {
   content: string;
 }
 
-/** 每个会话一份快照。主进程内存态：重启后丢基线，退化为"按历史标记判断"（安全降级，只多花一次 token）。 */
+/** 每个会话一份快照。主进程内存态：重启后丢基线，下一轮一律按新正文渲染（最多多花一次 token）。 */
 export type WorldStateSnapshot = SectionSnapshot[];
 
 export interface WorldStateInput {
@@ -86,16 +82,12 @@ function datePartOf(rendered: string): string {
 function timeSection(now: Date): WorldSection {
   return {
     id: "current_time",
-    marker: "# 当前时间",
     render: () => `# 当前时间\n${formatClock(now)}（北京时间）。涉及"最新/今年/上个月"的时效问题请以此为准。`,
-    // 节流规则：**跨天必重注入，同一天内不重注入**。
+    // 节流规则：**跨天必刷新正文，同一天内沿用旧正文**。
     //
-    // 对齐 Codex `time_reminder.rs` 的 `next_reinject_after`——它按时间阈值重注入，
-    // 而不是"注入一次后永不再发"。此前写成恒 false 是个真 bug：会话跨过午夜后，
-    // 模型会一直拿着昨天的日期，而提示词还明确告诉它"时效问题以此为准"——
-    // 比不给时间更糟（给了错的时间还让它相信）。
-    //
-    // 只比日期不比分钟：分钟级变化每轮都会触发，等于把差异注入退化回"每轮全发"。
+    // 对齐 Codex `time_reminder.rs` 的 `next_reinject_after`——它按时间阈值重注入。
+    // 注意：节流只决定正文要不要刷新，**不决定要不要出现**（每轮都必须在场，见文件头）。
+    // 只比日期不比分钟：分钟级变化每轮都会触发，等于把节流形同虚设。
     shouldReinject: (previous, next) => datePartOf(previous) !== datePartOf(next)
   };
 }
@@ -109,7 +101,6 @@ function networkSection(input: WorldStateInput): WorldSection {
     : `**本轮不可用**（用户关闭了「联网」与「浏览器搜索」）。不要调用 web_search；涉及实时信息时如实说明你无法联网核实，不要凭记忆编造具体数字或日期。`;
   return {
     id: "network_access",
-    marker: "# 联网状态",
     render: () => `# 联网状态\n${body}`
   };
 }
@@ -120,7 +111,6 @@ function artifactsSection(input: WorldStateInput): WorldSection {
     : `**本轮不可用**（当前为计划模式：只出方案、不产出文件）。`;
   return {
     id: "artifacts",
-    marker: "# 产物能力",
     render: () => `# 产物能力\n${body}`
   };
 }
@@ -132,14 +122,13 @@ function artifactsSection(input: WorldStateInput): WorldSection {
  * 然后被压缩/截断打断在半路——用户看到的是"做一半停了"。提前告知剩余量，
  * 模型才会主动收尾（先交付已完成的、把大任务拆小）。
  *
- * 节流（关键，否则每轮都变、每轮都注入）：只在**跨过档位**时重注入。
- * 按剩余百分比分档：充裕 / 偏紧 / 紧张 / 告急。同档内变化不打扰模型。
+ * 节流（关键，否则每轮正文都变、扰动 system 前缀）：只在**跨过档位**时刷新正文。
+ * 按剩余百分比分档：充裕 / 偏紧 / 紧张 / 告急。同档内沿用旧正文（但 section 仍在场）。
  */
 function contextBudgetSection(input: WorldStateInput): WorldSection {
   const budget = input.contextBudget;
   return {
     id: "context_budget",
-    marker: "# 上下文余量",
     render: () => {
       if (!budget || budget.modelLimitTokens <= 0) return "";
       const remaining = Math.max(0, budget.remainingTokens);
@@ -188,68 +177,52 @@ export function buildSections(input: WorldStateInput): WorldSection[] {
   return sections;
 }
 
-/** 用标记包裹正文。标记必须与 `WorldSection.marker` 一致，否则下一轮反查不到。 */
-export function withFragment(section: WorldSection): string {
-  return `${section.marker}\n${section.render()}`;
-}
-
 export interface WorldStateDiff {
-  /** 要追加到 system prompt 的增量块。无变化时为空串。 */
+  /** 本轮的**完整**环境事实块（每个 section 都在），直接拼进 system prompt。 */
   text: string;
   /** 本轮结束后的快照，调用方负责存回。 */
   snapshot: WorldStateSnapshot;
 }
 
 /**
- * 计算本轮要注入的增量。
+ * 渲染本轮要注入 system prompt 的完整环境事实块。
  *
- * @param previous 上一个快照。undefined 表示进程内没有基线（重启后）。
- * @param historyText 历史消息拼接文本，用于无快照时反查 section 是否已出现过
- *                    （对齐 Codex 的 `PreviousSectionState::Unknown`）。
+ * 与 Codex 的关键差异（务必记住）：Codex 把片段追加进**持久历史**，故"没变就不发"安全；
+ * 我们的载体是**每轮重建的 system prompt**，不发就等于永久丢失。所以这里**每个 section 每轮都渲染**，
+ * 差异只体现在"正文要不要刷新"上：
+ * - 首次 / 变化且未被节流 → 用新正文
+ * - 变化但被节流（时间同天、余量同档）→ 沿用上一轮正文，保持 system 前缀稳定（利于上游前缀缓存）
+ *
+ * @param previous 上一轮快照。undefined 表示进程内无基线（重启/首轮），此时一律用新正文。
  */
 export function diffWorldState(
   sections: WorldSection[],
-  previous: WorldStateSnapshot | undefined,
-  historyText: string
+  previous: WorldStateSnapshot | undefined
 ): WorldStateDiff {
-  const notices: string[] = [];
+  const blocks: string[] = [];
   const snapshot: WorldStateSnapshot = [];
 
   for (const section of sections) {
     const content = section.render();
-    snapshot.push({ id: section.id, content });
-
     const prior = previous?.find((entry) => entry.id === section.id);
-
-    if (prior) {
-      if (prior.content === content) continue; // 没变：不发（差异注入的全部意义）
-      // 变了，但该 section 声明了不重注入（如时间节流）：保留旧内容当基线，不打扰模型。
-      if (section.shouldReinject && !section.shouldReinject(prior.content, content)) {
-        snapshot[snapshot.length - 1] = { id: section.id, content: prior.content };
-        continue;
-      }
-      // 变了 → 替换通知。Codex 用显式的 REPLACEMENT 措辞，否则模型会把新旧两份都当真。
-      notices.push(`（${section.marker}已变化，以下内容取代此前的同一小节）\n${withFragment(section)}`);
+    // 节流：变了但声明"先别刷新"（时间同天 / 余量同档）→ 沿用旧正文。
+    // 沿用而非跳过：正文必须在场，只是保持稳定，避免每轮扰动 system 前缀。
+    if (prior && prior.content !== content && section.shouldReinject && !section.shouldReinject(prior.content, content)) {
+      snapshot.push({ id: section.id, content: prior.content });
+      blocks.push(prior.content);
       continue;
     }
-
-    // 无快照：进程重启过。若历史里已能认出该标记，按"已存在"处理——当作基线已发送过，本轮不重发。
-    if (historyText.includes(section.marker)) continue;
-    notices.push(withFragment(section));
+    snapshot.push({ id: section.id, content });
+    blocks.push(content);
   }
 
-  // 消失的 section：上一轮有、这一轮不在候选集里。
+  // 消失的 section：上一轮有、这一轮不在候选集里。显式作废，避免模型凭上一轮印象继续用。
   if (previous) {
     for (const entry of previous) {
       if (sections.some((section) => section.id === entry.id)) continue;
-      notices.push(`（${entry.id} 已不再适用，先前关于它的说明作废）`);
+      blocks.push(`（${entry.id} 已不再适用，先前关于它的说明作废）`);
     }
   }
 
-  return { text: notices.join("\n\n"), snapshot };
-}
-
-/** 历史消息拼成反查文本。两侧都查：交接摘要（role=user）也可能带着上一窗口的标记。 */
-export function historyTextOf(messages: Array<{ role: string; content: string }>): string {
-  return messages.map((message) => message.content ?? "").join("\n");
+  return { text: blocks.join("\n\n"), snapshot };
 }

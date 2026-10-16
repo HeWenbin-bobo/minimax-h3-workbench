@@ -26,7 +26,7 @@ describe("contextWindowFor", () => {
     expect(contextWindowFor("DEEPSEEK-CHAT")).toBe(64_000);
   });
 
-  // 实测（api.jihuarst.top 的 /models）该站同时提供 dk-v4.1-flash 与 deepseek-v4.1-flash，
+  // 实测（该中转的 /models）该站同时提供 dk-v4.1-flash 与 deepseek-v4.1-flash，
   // 是同一模型的别名。漏了 dk- 会"估大"：压缩触发太晚，请求先被上游拒绝。
   it("dk- 是 deepseek 的中转别名，必须同窗口（防「估大」）", () => {
     expect(contextWindowFor("dk-v4.1-flash")).toBe(64_000);

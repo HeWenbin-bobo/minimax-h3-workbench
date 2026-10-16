@@ -37,7 +37,7 @@ export class MiniMaxAdapter implements GenerationAdapter {
     try {
       const response = await fetch(`${this.baseUrl}/v2/query/video_generation/nonexistent`, {
         headers: { Authorization: `Bearer ${this.options.apiKey}` },
-        signal: signal ?? AbortSignal.timeout(8_000)
+        signal: requestSignal(signal, 8_000)
       });
       const authenticated = response.status !== 401;
       return {
@@ -82,7 +82,7 @@ export class MiniMaxAdapter implements GenerationAdapter {
         duration: request.duration,
         ratio: request.mode === "image" || request.firstFramePath || request.lastFramePath ? "adaptive" : request.ratio
       }),
-      signal
+      signal: requestSignal(signal, 30_000)
     });
     const created = (await response.json()) as { task_id?: string; error?: { type?: string; message?: string } };
     if (!response.ok || !created.task_id) throw new Error(created.error?.message || `MiniMax 提交失败：${response.status}`);
@@ -135,7 +135,7 @@ export class MiniMaxAdapter implements GenerationAdapter {
       if (Date.now() - startedAt > timeoutMs) throw new Error("云端任务超过 1 小时未完成，已停止轮询。请到 MiniMax 控制台确认任务状态。");
       const response = await fetch(`${this.baseUrl}/v2/query/video_generation/${encodeURIComponent(taskId)}`, {
         headers: { Authorization: `Bearer ${this.options.apiKey}` },
-        signal
+        signal: requestSignal(signal, 20_000)
       });
       const payload = (await response.json()) as {
         task?: {
@@ -172,7 +172,7 @@ export class MiniMaxAdapter implements GenerationAdapter {
     // 否则被劫持的响应可让本应用替它访问内网、并把内网内容当作"生成结果"落盘。
     const safeUrl = assertSafeResultUrl(url);
     // redirect:"manual"：禁止自动跟随重定向，否则可用 302 绕过上面的校验指向内网。
-    const response = await fetch(safeUrl, { signal, redirect: "manual" });
+    const response = await fetch(safeUrl, { signal: requestSignal(signal, 300_000), redirect: "manual" });
     if (!response.ok) throw new Error(`生成结果下载失败：${response.status}`);
     await mkdir(this.options.outputDirectory, { recursive: true });
     const target = path.join(this.options.outputDirectory, `${taskId}.mp4`);
@@ -206,4 +206,13 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
       reject(new DOMException("任务已取消", "AbortError"));
     }, { once: true });
   });
+}
+
+/**
+ * 单次请求超时（与调用方取消信号合并）。CLAUDE.md 纪律：外部调用必须自己加超时，
+ * 不让 fetch 裸等——否则上游挂住会把整条降级链拖死。没有调用方信号时只带超时。
+ */
+function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }

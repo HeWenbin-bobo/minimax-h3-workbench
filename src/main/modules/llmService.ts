@@ -98,7 +98,13 @@ export class LlmService {
           "Content-Type": "application/json",
           ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {})
         },
-        body: JSON.stringify({ model: this.options.model, messages: payload, stream: false })
+        body: JSON.stringify({
+          model: this.options.model,
+          messages: payload,
+          stream: false,
+          // 与流式路径同一理由：不设就用上游默认（实测约 4096 token），长回答会被静默截断。
+          max_tokens: 64_000
+        })
       });
       if (!response.ok) return undefined;
       const full = (await response.json().catch(() => ({}))) as {

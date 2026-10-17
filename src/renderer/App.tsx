@@ -1288,8 +1288,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     // 空对话最多只保留一个：新建时顺手清掉已有的空会话（用户没打过字就点了"新对话"的情况）。
     setSessions((all) => [session, ...all.filter((s) => s.messages.length > 0)]);
     setActiveId(session.id);
+    // **与 switchSession 同一套清理**：输入框、附件、计划开关都是组件级 state。
+    // 「新对话」不改清的话，在 A 里写了一半的文字/选好的图片会跟着进入全新会话——
+    // 用户看到的是空白对话，点发送却把上一段草稿发了出去（跨会话串台）。
     setInput("");
     setAttachments([]);
+    setPlanNext(false);
   }
 
   async function pickAttachment() {

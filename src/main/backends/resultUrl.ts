@@ -9,12 +9,36 @@ export function assertSafeResultUrl(rawUrl: string): URL {
     throw new Error("生成结果下载地址无效。");
   }
   if (url.protocol !== "https:") throw new Error("生成结果下载地址必须为 HTTPS。");
+  assertPublicHost(url);
+  return url;
+}
+
+/**
+ * `open_page` 用的校验：允许 http/https，但同样拒绝回环/私网/链路本地/元数据地址。
+ *
+ * 为什么需要：`open_page` 的 URL 由**模型**生成（还可能被它刚抓到的网页内容提示注入诱导），
+ * 而浏览器窗口是以主进程身份发请求的——不拦的话模型可以让我方去访问
+ * `http://127.0.0.1:8188`（ComfyUI 控制面）、`http://169.254.169.254/`（云元数据）等内网资源，
+ * 再把响应原文交回对话。这与结果下载那条 SSRF 是同一类问题，只是多允许了 http。
+ */
+export function assertPublicHttpUrl(rawUrl: string): URL {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("网页地址无效。");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("只允许打开 http/https 网页。");
+  assertPublicHost(url);
+  return url;
+}
+
+function assertPublicHost(url: URL): void {
   const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal") || host.endsWith(".local")) {
-    throw new Error("生成结果下载地址指向内网，已拒绝。");
+    throw new Error("该地址指向内网，已拒绝访问。");
   }
-  if (isPrivateAddress(host)) throw new Error("生成结果下载地址指向内网，已拒绝。");
-  return url;
+  if (isPrivateAddress(host)) throw new Error("该地址指向内网，已拒绝访问。");
 }
 
 // 仅覆盖直接写 IP 的情形（域名解析到内网需 DNS 层校验，此处超出权限范围）。

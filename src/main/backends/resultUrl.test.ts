@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertSafeResultUrl } from "./resultUrl";
+import { assertPublicHttpUrl, assertSafeResultUrl } from "./resultUrl";
 
 describe("assertSafeResultUrl", () => {
   it("放行公网 HTTPS 结果地址", () => {
@@ -77,5 +77,45 @@ describe("assertSafeResultUrl", () => {
     ]) {
       expect(() => assertSafeResultUrl(url), url).not.toThrow();
     }
+  });
+});
+
+// open_page 用的校验：允许 http/https，但内网地址一律拒绝。
+// 该工具的 URL 由模型生成（还可能被刚抓到的网页提示注入诱导），浏览器窗口以主进程身份发请求。
+describe("assertPublicHttpUrl", () => {
+  it("放行公网 http 与 https", () => {
+    expect(assertPublicHttpUrl("http://example.com/a").hostname).toBe("example.com");
+    expect(assertPublicHttpUrl("https://example.com/a").hostname).toBe("example.com");
+  });
+
+  it("拒绝非 http/https 协议", () => {
+    for (const url of ["file:///etc/passwd", "ftp://example.com/a", "javascript:alert(1)", "data:text/html,x"]) {
+      expect(() => assertPublicHttpUrl(url), url).toThrow(/只允许打开/);
+    }
+  });
+
+  it("拒绝回环、私网、链路本地与云元数据地址", () => {
+    for (const url of [
+      "http://127.0.0.1:8188/object_info",
+      "http://localhost:8188/",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://10.0.0.5/",
+      "http://192.168.1.1/",
+      "http://100.64.0.1/",
+      "http://[::1]/",
+      "http://[::ffff:7f00:1]/"
+    ]) {
+      expect(() => assertPublicHttpUrl(url), url).toThrow(/内网/);
+    }
+  });
+
+  it("拒绝 .internal / .local 域名", () => {
+    for (const url of ["http://metadata.google.internal/", "http://printer.local/"]) {
+      expect(() => assertPublicHttpUrl(url), url).toThrow(/内网/);
+    }
+  });
+
+  it("无效 URL 报中文错误", () => {
+    expect(() => assertPublicHttpUrl("not a url")).toThrow(/无效/);
   });
 });

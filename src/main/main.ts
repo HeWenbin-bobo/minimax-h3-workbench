@@ -32,6 +32,7 @@ import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapsho
 import { QuestionBridge } from "./modules/questionBridge";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
+import { assertPublicHttpUrl } from "./backends/resultUrl";
 import { normalizeHistory } from "./modules/historyNormalize";
 import { freezeTurn } from "./modules/stepSnapshot";
 import { CONTENT_FILTER_GUIDANCE, contentFilterNotice, isContentFilterError, retryDelayMs, retryNotice } from "./modules/errorRecovery";
@@ -701,11 +702,14 @@ function registerIpc(
           return `已创建 ${response.length} 个视频生成任务：后端=${backendKindLabel(request.backend)}，时长=${request.duration} 秒，数量=${request.count} 路，画面描述="${params.prompt}"。任务卡片已实时显示在本会话气泡下方，完成后可直接预览与下载。请向用户简短确认这些任务参数（一两句话即可，不要重复长描述）。`;
         },
         // open_page（让模型能真正"打开浏览器"）：复用 browserFetch 的 Chromium 渲染。
-        // 安全边界：只允许 http/https，渲染走独立 session 分区（browserFetch 内部保证），
-        // 返回前截断到 8 万字符——超长 HTML 会撑爆模型上下文（百度首页渲染后 >1MB）。
+        // 安全边界：只允许 http/https，**且必须拒绝内网地址**——URL 由模型生成（还可能被它刚抓到的
+        // 网页内容提示注入诱导），而隐藏窗口是以主进程身份发请求的。不拦的话可以让我方去访问
+        // http://127.0.0.1:8188（ComfyUI 控制面）或 http://169.254.169.254/（云元数据），
+        // 再把响应原文交回对话。与结果下载那条 SSRF 同一类问题，故共用同一套私网判定。
+        // 渲染走独立 session 分区（browserFetch 内部保证），返回前截断到 8 万字符——
+        // 超长 HTML 会撑爆模型上下文（百度首页渲染后 >1MB）。
         openPage: async (url: string) => {
-          const parsed = new URL(url);
-          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("只允许打开 http/https 网页。");
+          const parsed = assertPublicHttpUrl(url);
           const html = await renderHtml(parsed.toString(), 45_000);
           return html.length > 80_000 ? `${html.slice(0, 80_000)}\n\n（页面过长已截断）` : html;
         },

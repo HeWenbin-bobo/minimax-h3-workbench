@@ -385,6 +385,16 @@ function registerIpc(
   // 早期是单例 + 全局并发守卫，导致"一个会话在回复时其它会话完全不能发消息"；改为按会话隔离后天然支持并发。
   let llm: LlmService | undefined; // 共享实例：仅用于 llm:test / llm:models 这类无状态探测
   const sessionServices = new Map<string, LlmService>();
+  /**
+   * 会话实例的配置代次。`invalidateLlmSessions()` 会 +1。
+   *
+   * 光靠 `busy` 判断复不复用是不够的：正在回复的实例被保留下来后，
+   * 那一轮结束时它仍留在表里——下一次发消息会**直接复用它**，
+   * 用的还是改动前的 model / baseUrl / Key，用户改完设置发现"没生效"。
+   * 带上代次后，陈旧实例在释放时不再被复用（`serviceForSession` 按代次重建）。
+   */
+  let serviceGeneration = 0;
+  const sessionServicesGeneration = new Map<string, number>();
   const sessionAborters = new Map<string, AbortController>();
   /** 上下文预算：按会话隔离；随会话生命周期管理（见 llm:chat 与 llm:abort）。 */
   const sessionBudgets = new Map<string, SessionContextBudget>();
@@ -425,7 +435,9 @@ function registerIpc(
   // 会话级服务实例：同一会话内复用（LlmService.busy 只挡"同一会话"的并发），Key/地址变更后由 invalidate 清理重建。
   const serviceForSession = async (sessionId: string): Promise<LlmService> => {
     const existing = sessionServices.get(sessionId);
-    if (existing) return existing;
+    // 只复用**同一代次**的实例：配置改过之后，旧实例即便还在（那一轮还没结束）
+    // 也不能拿来发新消息，否则改动对用户就是"没生效"。
+    if (existing && sessionServicesGeneration.get(sessionId) === serviceGeneration) return existing;
     const settings = await settingsStore.get();
     const service = new LlmService({
       baseUrl: settings.llm.baseUrl,
@@ -437,17 +449,25 @@ function registerIpc(
       searchRenderHtml: (url, signal) => renderHtml(url, undefined, signal)
     });
     sessionServices.set(sessionId, service);
+    sessionServicesGeneration.set(sessionId, serviceGeneration);
     return service;
   };
   const invalidateLlmSessions = () => {
     llm = undefined;
+    // 代次 +1：让下面保留下来的"在途实例"在下一次发消息时**不再被复用**。
+    // 只靠 `busy` 判断会留下隐患——那一轮结束后实例还在表里，下一次直接拿到旧配置
+    // （model / baseUrl / Key 都是改之前的），用户改完设置发现"没生效"。
+    serviceGeneration += 1;
     // **正在跑的会话实例不能丢**：普通对话的「停止」走的是 `sessionServices.get(id)?.abort()`
     // （`sessionAborters` 只覆盖智能体路径）。用户在回复过程中去「连接设置」点一次保存
     // 就会触发这里——`clear()` 之后那个实例再也找不回来，点「停止」毫无反应，
     // 只能等这一轮自己结束（长回答可达数分钟）。
     // 正在进行的实例保留到本轮结束（其 `.finally` 会自行清理），其余的照常丢弃。
     for (const [sessionId, service] of sessionServices) {
-      if (!service.busy) sessionServices.delete(sessionId);
+      if (!service.busy) {
+        sessionServices.delete(sessionId);
+        sessionServicesGeneration.delete(sessionId);
+      }
     }
     // 换模型/换上游后，旧窗口的大小与基线全部作废——下一次对话从零重新锚定。
     sessionBudgets.clear();

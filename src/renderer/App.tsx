@@ -1338,11 +1338,18 @@ function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }:
     if (content === undefined) return undefined; // 既没落盘元数据也没内容：无从保存
     const name = `artifact-${Date.now()}${ext}`;
     const saveKind = kind === "sheet" ? "xlsx" : kind === "doc" ? "md" : "html";
-    const response = await window.h3.saveArtifact(sessionId, name, content, saveKind);
-    if (!response.data) { onError(response.message); return undefined; }
-    const info = { ...response.data, kind, content };
-    setArtifact(info);
-    return info;
+    // IPC 也可能**抛异常**（不只是返回 ok:false）。不兜住的话点「预览」毫无反应、
+    // 也没有任何提示（与 send()/executePlan() 同一类问题）。
+    try {
+      const response = await window.h3.saveArtifact(sessionId, name, content, saveKind);
+      if (!response.data) { onError(response.message); return undefined; }
+      const info = { ...response.data, kind, content };
+      setArtifact(info);
+      return info;
+    } catch (error) {
+      onError(error);
+      return undefined;
+    }
   }
   return <div className="pg-artifact-card">
     <span className="pg-artifact-icon">{kind === "sheet" ? "📊" : kind === "doc" ? "📝" : "📄"}</span>

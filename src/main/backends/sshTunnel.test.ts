@@ -9,12 +9,19 @@ class FakeClient extends EventEmitter {
   static instances: FakeClient[] = [];
   connected = false;
   ended = false;
+  /** 置为 Error 时 `connect()` 立刻 emit 该错误（模拟握手失败）。 */
+  static failWith?: Error;
   constructor() {
     super();
     FakeClient.instances.push(this);
   }
   connect() {
     this.connected = true;
+    if (FakeClient.failWith) {
+      const error = FakeClient.failWith;
+      queueMicrotask(() => this.emit("error", error));
+      return this;
+    }
     queueMicrotask(() => this.emit("ready"));
     return this;
   }
@@ -99,5 +106,29 @@ describe("SshTunnel 断线处理", () => {
   it("未配置主机时给出中文提示", async () => {
     const tunnel = new SshTunnel({ ...config, host: "" }, "pw");
     await expect(tunnel.start()).rejects.toThrow(/请填写 SSH 主机和用户名/);
+  });
+
+  // 握手失败是可预期路径（主机填错、网络不通）。旧实现把失败的 client 留在字段上，
+  // 而它的 `once("error", reject)` 已被那次失败消耗掉——之后同一实例再 emit error
+  // 就是一个无监听器的 emit（EventEmitter 会同步抛出 → 主进程退出）。
+  // 这里锁定两件事：失败后状态干净、后续 start() 能重建，且遗留实例再报错不会崩。
+  it("握手失败后清理 client，且遗留实例再 emit error 不抛未捕获异常", async () => {
+    FakeClient.failWith = new Error("connect ECONNREFUSED");
+    try {
+      const tunnel = new SshTunnel(config, "pw");
+      await expect(tunnel.start()).rejects.toThrow(/ECONNREFUSED/);
+      const failed = FakeClient.instances[0];
+      expect(failed.ended).toBe(true); // 半开连接被主动断开
+      // 字段已清空 → 下一次 start() 会建**新的** client，而不是复用失败实例。
+      FakeClient.failWith = undefined;
+      const { url } = await tunnel.start();
+      expect(FakeClient.instances).toHaveLength(2);
+      expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      // 遗留实例迟到的 error 不应打崩进程（失败分支必须留常驻监听器）。
+      expect(() => failed.emit("error", new Error("迟到的错误"))).not.toThrow();
+      tunnel.close();
+    } finally {
+      FakeClient.failWith = undefined;
+    }
   });
 });

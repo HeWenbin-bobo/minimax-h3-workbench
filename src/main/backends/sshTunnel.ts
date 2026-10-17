@@ -23,29 +23,59 @@ export class SshTunnel {
       return { url: `http://127.0.0.1:${this.localPort}`, fingerprint: this.observedFingerprint };
     }
     if (!this.config.host || !this.config.username) throw new Error("请填写 SSH 主机和用户名。 ");
-    this.client = new Client();
-    const privateKey = this.config.privateKeyPath ? await readFile(this.config.privateKeyPath, "utf8") : undefined;
-    const connectConfig: ConnectConfig = {
-      host: this.config.host,
-      port: this.config.port,
-      username: this.config.username,
-      privateKey,
-      password: privateKey ? undefined : this.password || undefined,
-      readyTimeout: 15_000,
-      hostHash: "sha256",
-      hostVerifier: (fingerprint: string) => {
-        this.observedFingerprint = fingerprint;
-        return !this.config.hostFingerprint || this.config.hostFingerprint === fingerprint;
-      }
-    };
-    await new Promise<void>((resolve, reject) => {
-      this.client!.once("ready", resolve).once("error", reject).connect(connectConfig);
-    });
+    // **握手失败必须把 client 清掉**。
+    //
+    // 旧实现在这里就 `this.client = new Client()`，而 `once("error", reject)` 在握手失败时
+    // 会被这次错误**消耗掉**。于是失败后字段上留下一个"既没连上、也没有 error 监听器"的 client：
+    // ① 下一次 start() 会看到 `this.client` 非空（但 server/localPort 为空，故不会误返回旧端口），
+    //    于是把旧 client 覆盖掉——旧实例的后续事件没人收，但也不会崩；
+    // ② 更糟的是**上次遗留的 client 仍可能在重连超时后 emit error**，
+    //    而 EventEmitter 在没有监听器时会把 emit 变成同步抛出 → 主进程直接退出。
+    // 连接失败本身是可预期路径（主机填错、网络不通），不该带有崩溃风险。
+    // 这里先把引用存到局部变量，失败时统一 close 并清空字段。
+    const client = new Client();
+    this.client = client;
+    try {
+      const privateKey = this.config.privateKeyPath ? await readFile(this.config.privateKeyPath, "utf8") : undefined;
+      const connectConfig: ConnectConfig = {
+        host: this.config.host,
+        port: this.config.port,
+        username: this.config.username,
+        privateKey,
+        password: privateKey ? undefined : this.password || undefined,
+        readyTimeout: 15_000,
+        hostHash: "sha256",
+        hostVerifier: (fingerprint: string) => {
+          this.observedFingerprint = fingerprint;
+          return !this.config.hostFingerprint || this.config.hostFingerprint === fingerprint;
+        }
+      };
+      await new Promise<void>((resolve, reject) => {
+        // 失败分支也要**常驻**一个 error 监听器：握手失败后这个 client 仍可能再 emit error
+        // （SSH 层可能先把 ECONNREFUSED 报成 error，再报 close/error），
+        // 而 `once` 已被消耗 → 第二次就是未捕获异常。
+        const onError = (error: Error) => { reject(error); };
+        client.once("ready", resolve);
+        client.on("error", onError);
+        try {
+          client.connect(connectConfig);
+        } catch (error) {
+          client.off("error", onError);
+          reject(error);
+        }
+      });
+    } catch (error) {
+      // 失败收尾：断开半开连接、摘掉监听器并清空字段，让下一次 start() 从干净状态重来。
+      client.end();
+      this.client = undefined;
+      throw error;
+    }
     // ready 之后必须**常驻**一个 error 监听器。
     //
-    // 上面的 once("error", reject) 在握手成功后仍挂在 client 上，会吞掉第一次错误；
-    // 但从第二次起就没有监听器了——EventEmitter 抛未捕获异常，**整个主进程直接崩掉**
-    // （实测：SSH 连接中途断开时 ssh2 会 emit 'error'）。
+    // 握手期挂的 `onError` 已经在上面（它只会 reject 一个已 resolve 的 Promise，无副作用），
+    // 而连接中途断开时 ssh2 会 emit 'error'——没有常驻监听器的话，
+    // EventEmitter 会把 emit 变成同步抛出，**整个主进程直接崩掉**。
+    // 实测复现过：SSH 连接中途断开即命中。
     this.client.on("error", () => this.drop());
     this.client.on("close", () => this.drop());
     this.server = net.createServer((socket) => {

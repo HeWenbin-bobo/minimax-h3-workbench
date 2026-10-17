@@ -62,7 +62,10 @@ export async function searchWeb(query: string, options: WebSearchOptions, signal
   // 渲染不可用（未注入 / 全部失败）时退到纯 HTTP：更快，但结果质量可能降级。
   // browserOnly 模式不退——用户点名浏览器搜索，宁可直接报错也不给降级结果。
   if (options.browserOnly) {
-    throw new Error(`浏览器搜索未取到结果（${failures.join("；")}）。可在「连接设置 → 联网搜索」配置搜索 API 获得稳定结果。`);
+    // 未注入渲染回调时 `failures` 是空的，旧文案会拼成「浏览器搜索未取到结果（）」——
+    // 括号里什么都没有，用户看不出是"没配置"还是"网页打不开"。
+    const reason = failures.length > 0 ? `（${failures.join("；")}）` : "（浏览器渲染不可用）";
+    throw new Error(`浏览器搜索未取到结果${reason}。可在「连接设置 → 联网搜索」配置搜索 API 获得稳定结果。`);
   }
   const sources: Array<[string, (q: string, s?: AbortSignal) => Promise<SearchResult[]>]> = [
     ["Bing", scrapeBing],

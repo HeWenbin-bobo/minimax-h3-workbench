@@ -192,3 +192,32 @@ describe("validateRequest 类型兜底", () => {
     await expect(submitWith({})).resolves.toHaveLength(1);
   });
 });
+
+// `count: 0` 曾因 `request.count || 4` 被当成"没给"，于是生成 4 路——
+// 云端按次计费时等于替用户多扣 4 次。显式给 0 应夹到 1（"最少"），没给才用默认 4。
+describe("submit 的数量夹取", () => {
+  function makeRequest(count?: number) {
+    return {
+      mode: "text" as const, backend: "local" as const, prompt: "测试", duration: 4,
+      ratio: "16:9" as const, resolution: "768P" as const, width: 1280, height: 720,
+      baseSeed: 1, ...(count === undefined ? {} : { count })
+    };
+  }
+
+  it("count = 0 夹到 1（不是默认 4）", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    await expect(orchestrator.submit(makeRequest(0))).resolves.toHaveLength(1);
+  });
+
+  it("未给 count 时按默认 4", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    await expect(orchestrator.submit(makeRequest())).resolves.toHaveLength(4);
+  });
+
+  it("超过 4 夹到 4，负数夹到 1", async () => {
+    const a = makeOrchestrator([]);
+    await expect(a.orchestrator.submit(makeRequest(9))).resolves.toHaveLength(4);
+    const b = makeOrchestrator([]);
+    await expect(b.orchestrator.submit(makeRequest(-3))).resolves.toHaveLength(1);
+  });
+});

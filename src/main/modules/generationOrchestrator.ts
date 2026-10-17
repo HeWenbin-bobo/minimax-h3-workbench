@@ -140,7 +140,10 @@ export class GenerationOrchestrator {
     validateRequest(request);
     const parentId = randomUUID();
     const now = new Date().toISOString();
-    const count = Math.max(1, Math.min(4, Math.round(request.count || 4)));
+    // 只在**没给**时才用默认 4。旧写法 `request.count || 4` 把显式的 0 也当成"没给"，
+    // 于是 `count: 0` 会变成 4 路——云端按次计费时等于替用户多扣 4 次。
+    // 给 0 的调用方（IPC 可达、智能体工具也会传）本意是"最少"，夹到 1 才对。
+    const count = Math.max(1, Math.min(4, Math.round(request.count ?? 4)));
     const created = Array.from({ length: count }, (_, index): GenerationTask => ({
       id: randomUUID(),
       parentId,

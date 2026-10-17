@@ -587,6 +587,10 @@ function registerIpc(
     // browserSearch=true 是「浏览器搜索」联网项：只用应用自带 Chromium 渲染抓取。
     // 与 webSearch 同开时浏览器渲染优先（实测渲染结果质量最稳）；只关掉浏览器搜索时才用 API/HTTP 链路。
     const browserOnly = Boolean(browserSearch);
+    // 入参来自 IPC：history 必须是数组、每条 content 必须是字符串。
+    // 下游 `normalizeHistory` 会 `.trim()`、`estimateTokens` 会 `.match()`，
+    // 脏类型会以英文 TypeError 透到界面（"text.trim is not a function"）。
+    const safeHistory = safeMessages(messages);
     const session = typeof sessionId === "string" && sessionId ? sessionId : `anon-${Math.random().toString(36).slice(2)}`;
     const service = await serviceForSession(session);
     // 同一会话不允许并发（会往同一个气泡里写两股流）；不同会话各自独立，可同时生成。
@@ -613,9 +617,9 @@ function registerIpc(
     // 放在这里而不是各分支内部，是为了普通对话与智能体共用同一套记账——两条路径吃的是同一份历史。
     const controller = new AbortController();
     sessionAborters.set(session, controller);
-    let effective = messages;
+    let effective = safeHistory;
     try {
-      effective = (await maybeCompact(session, messages, "auto", controller.signal)).messages;
+      effective = (await maybeCompact(session, safeHistory, "auto", controller.signal)).messages;
     } catch (error) {
       // 压缩链路异常绝不阻断对话：如实记录后按原历史继续。
       console.warn("[llm] 上下文压缩失败，按原始历史继续：", describeError(error, "未知错误"));

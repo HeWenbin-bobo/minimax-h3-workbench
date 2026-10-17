@@ -8,6 +8,8 @@ export class SshTunnel {
   private server?: Server;
   private localPort?: number;
   private observedFingerprint = "";
+  /** 本地已接受的连接：隧道断开时要把它们一起销毁，否则调用方会卡在一个不转发任何数据的死连接上。 */
+  private readonly sockets = new Set<net.Socket>();
 
   constructor(private readonly config: AppSettings["ssh"], private readonly password: string) {}
 
@@ -34,7 +36,16 @@ export class SshTunnel {
     await new Promise<void>((resolve, reject) => {
       this.client!.once("ready", resolve).once("error", reject).connect(connectConfig);
     });
+    // ready 之后必须**常驻**一个 error 监听器。
+    //
+    // 上面的 once("error", reject) 在握手成功后仍挂在 client 上，会吞掉第一次错误；
+    // 但从第二次起就没有监听器了——EventEmitter 抛未捕获异常，**整个主进程直接崩掉**
+    // （实测：SSH 连接中途断开时 ssh2 会 emit 'error'）。
+    this.client.on("error", () => this.drop());
+    this.client.on("close", () => this.drop());
     this.server = net.createServer((socket) => {
+      this.sockets.add(socket);
+      socket.on("close", () => this.sockets.delete(socket));
       this.client!.forwardOut(
         socket.remoteAddress || "127.0.0.1",
         socket.remotePort || 0,
@@ -42,6 +53,7 @@ export class SshTunnel {
         this.config.remoteComfyPort,
         (error, stream) => {
           if (error) return socket.destroy(error);
+          stream.on("error", () => socket.destroy());
           socket.pipe(stream).pipe(socket);
         }
       );
@@ -88,6 +100,20 @@ export class SshTunnel {
         stream.on("error", (streamError: Error) => finish(streamError));
       });
     });
+  }
+
+  /**
+   * 隧道已断：清掉本地监听与所有挂着的连接。
+   *
+   * 不清理的后果：`start()` 开头会看到 client/server/localPort 都还在，直接返回那个
+   * **已经死掉的**本地端口；ComfyAdapter 随后连上去只会拿到 ECONNREFUSED，
+   * 用户看到的是"连接被拒绝"，而真实原因是 SSH 掉线——无从对症。
+   */
+  private drop(): void {
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
+    // close() 会同步把三个字段清空；这里复用同一套收尾，避免两处状态不一致。
+    this.close();
   }
 
   close(): void {

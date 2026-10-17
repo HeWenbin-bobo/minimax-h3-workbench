@@ -377,6 +377,9 @@ button { cursor: pointer; }
 .result-grid.single video, .result-grid.single .task-placeholder { height: 420px; }
 .task-card { position: relative; overflow: hidden; min-height: 270px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; display: flex; flex-direction: column; box-shadow: var(--shadow); }
 .task-card video { width: 100%; height: 205px; background: #11141a; object-fit: contain; }
+/* 视频文件不可用时的说明条：播放器（含浏览器自带的媒体错误图标）仍然保留，
+   这里只在它下面补一行可执行的提示，不改变卡片的整体结构。 */
+.task-media-hint { margin: 0; padding: 8px 15px; font-size: 10px; line-height: 1.6; color: var(--danger); background: var(--danger-wash); border-top: 1px solid var(--danger-border); }
 .task-placeholder { position: relative; flex: 1; min-height: 200px; display: grid; place-items: center; background: radial-gradient(circle at 75% 20%, rgba(122, 39, 255, 0.24), transparent 38%), radial-gradient(circle at 20% 90%, rgba(255, 39, 111, 0.18), transparent 35%), #141821; }
 .task-placeholder span { font-size: 48px; font-weight: 900; color: rgba(255, 255, 255, 0.1); }
 .task-placeholder i { position: absolute; top: 31%; font-style: normal; color: var(--subtle); font-size: 11px; }

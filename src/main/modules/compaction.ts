@@ -98,6 +98,12 @@ export function buildCompactedHistory(
 /** 摘要请求超时。压缩本身可能很慢（要把整段历史读进去），给足 90 秒。 */
 const SUMMARIZE_TIMEOUT_MS = 90_000;
 
+/** 超时与调用方取消信号合并（同 comfyAdapter.requestSignal 的理由，见下面的调用处注释）。 */
+function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 /**
  * 调模型生成交接摘要。非流式——压缩是后台动作，不需要逐字展示。
  *
@@ -134,7 +140,10 @@ export async function summarizeHistory(
         // 摘要本身不该很长，8000 足够容纳一份完整交接，又给足余量。
         max_tokens: 8_000
       }),
-      signal: signal ?? AbortSignal.timeout(SUMMARIZE_TIMEOUT_MS)
+      // 超时必须与调用方信号**合并**，不能写 `signal ?? AbortSignal.timeout(...)`：
+      // 调用方传的是用户取消信号（只有点「停止」才 abort，本身永不到期），
+      // 有它就没有超时 → 摘要请求挂住时整轮对话永久卡死（CLAUDE.md 明令外部调用必须自带超时）。
+      signal: requestSignal(signal, SUMMARIZE_TIMEOUT_MS)
     });
     if (!response.ok) return "";
     const payload = (await response.json().catch(() => ({}))) as {

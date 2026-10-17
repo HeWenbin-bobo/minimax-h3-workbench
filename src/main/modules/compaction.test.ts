@@ -1,11 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../../shared/types";
 import {
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   buildCompactedHistory,
   isSummaryMessage,
   SUMMARY_PREFIX,
-  SUMMARIZATION_PROMPT
+  SUMMARIZATION_PROMPT,
+  summarizeHistory
 } from "./compaction";
 
 const user = (content: string): ChatMessage => ({ role: "user", content });
@@ -103,5 +104,30 @@ describe("buildCompactedHistory 摘要兜底", () => {
   it("只有空白的摘要同样走占位", () => {
     const result = buildCompactedHistory([user("甲")], "   \n  ");
     expect(result.at(-1)?.content).toContain("无可用摘要");
+  });
+});
+
+describe("summarizeHistory 超时纪律", () => {
+  // 回归护栏：旧写法 `signal ?? AbortSignal.timeout(...)` 在调用方传了取消信号时
+  // **完全没有超时**——而编排层传的正是用户取消信号（本身永不到期），摘要请求挂住
+  // 就会把整轮对话永久卡死。这里断言传下去的不是调用方那个裸信号。
+  it("调用方传了取消信号时，仍然叠加了超时（信号被合并而非直接透传）", async () => {
+    const caller = new AbortController();
+    let seen: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      seen = init.signal as AbortSignal;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "摘要" } }] }), { status: 200 });
+    }));
+
+    const text = await summarizeHistory(
+      { baseUrl: "https://llm.test/v1", apiKey: "k", model: "m", provider: "custom", systemPrompt: "" } as never,
+      [user("历史")],
+      caller.signal
+    );
+
+    expect(text).toBe("摘要");
+    expect(seen).toBeDefined();
+    expect(seen).not.toBe(caller.signal);
+    vi.unstubAllGlobals();
   });
 });

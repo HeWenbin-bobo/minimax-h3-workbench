@@ -109,7 +109,9 @@ export class ComfyAdapter implements GenerationAdapter {
   }
 
   private async assertModelsReady(mode: GenerationRequest["mode"], signal?: AbortSignal): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/object_info`, { signal: signal ?? AbortSignal.timeout(12_000) });
+    // 必须用 requestSignal 合并超时，不能写 `signal ?? AbortSignal.timeout()`：
+    // 编排层传的正是用户取消信号（永不到期），有它就没有超时 → ComfyUI 卡住时这里无限挂住。
+    const response = await fetch(`${this.baseUrl}/object_info`, { signal: requestSignal(signal, 12_000) });
     if (!response.ok) throw new Error(`无法读取 ComfyUI 模型清单：HTTP ${response.status}`);
     const nodes = (await response.json()) as JsonObject;
     const readiness = inspectH3Readiness(nodes);

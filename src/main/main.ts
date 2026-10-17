@@ -211,11 +211,10 @@ app.whenReady().then(async () => {
   });
 
   // 回收站过期清理：删除超过 7 天的任务，连同输出文件一并清除。
-  // 白名单口径与 tasks:purge 一致：当前输出目录 **或** 任务记录里记着的本应用结果路径
-  // （用户改过输出目录后，历史视频留在旧目录——只认当前目录会留下永久孤儿文件）。
+  // 删文件的口径与 tasks:purge 一致：信任根是「当前输出目录 + 用户配置过的历史输出目录」，
+  // 且逐个做 realpath 包含性校验（见 deleteRoots / unlinkIfInside）。
   void orchestrator.purgeExpired(async (filePath) => {
     const settings = await settingsStore.get();
-    // 与 tasks:purge 同一套信任根与 realpath 校验（见 deleteRoots / unlinkIfInside）。
     await unlinkIfInside(deleteRoots(settings), filePath);
   });
   registerIpc(settingsStore, adapters, orchestrator);

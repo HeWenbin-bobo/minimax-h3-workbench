@@ -9,6 +9,7 @@
  */
 
 import type { ChatMessage } from "../../shared/types";
+import { sliceSafe } from "../../shared/text";
 import { estimateTokens, TOKENS_PER_IMAGE } from "./contextBudget";
 import type { LlmServiceOptions } from "./llmService";
 import { resolveChatPath } from "./llmService";
@@ -51,7 +52,8 @@ function truncateToTokens(text: string, maxTokens: number): string {
   if (total <= maxTokens) return text;
   const ratio = maxTokens / total;
   const cut = Math.max(1, Math.floor(text.length * ratio));
-  return `${text.slice(0, cut)}…（已截断）`;
+  // 用 sliceSafe：这段摘要会被发回模型，切在 emoji/生僻字的代理对中间会留下 `�`。
+  return `${sliceSafe(text, cut)}…（已截断）`;
 }
 
 /**

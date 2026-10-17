@@ -99,6 +99,9 @@ export function parseCsvRow(line: string, delimiter = ","): string[] {
     if (ch === delimiter) { out.push(cur.trim()); cur = ""; continue; }
     cur += ch;
   }
-  if (cur.length > 0 || out.length > 0) out.push(cur.trim());
+  // 行非空就至少有**一个**字段。旧写法 `cur.length > 0 || out.length > 0` 在
+  // 整行只有一个空引号字段时两者都为空（`""` 被引号逻辑吃掉，cur 仍是空串），
+  // 于是返回 `[]` —— 一行被当成 0 列，与 `a,"",d` 里同一种字段的行为不一致。
+  if (line.length > 0 || out.length > 0) out.push(cur.trim());
   return out;
 }

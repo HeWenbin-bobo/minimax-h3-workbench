@@ -62,3 +62,19 @@ describe("parseCsvRows / splitCsvLines 跨行字段", () => {
     expect(parseCsvRows("A,B\n\n\n1,2\n")).toEqual([["A", "B"], ["1", "2"]]);
   });
 });
+
+// 行非空就至少有一个字段。旧写法在"整行只有一个空引号字段"时返回 []，
+// 让这一行被当成 0 列（与 `a,"",d` 里同一种字段的行为不一致）。
+describe("parseCsvRow 单空引号字段", () => {
+  it(`"" 解析为一个空字段`, () => {
+    expect(parseCsvRow(`""`)).toEqual([""]);
+  });
+
+  it("空行仍返回空数组（真的一列都没有）", () => {
+    expect(parseCsvRow("")).toEqual([]);
+  });
+
+  it("与 a,\"\",d 里的空字段行为一致", () => {
+    expect(parseCsvRow(`a,"",d`)).toEqual(["a", "", "d"]);
+  });
+});

@@ -332,7 +332,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
           {!isRb && request.mode === "text" && <div className="frame-row"><FilePicker label="首帧（可选）" path={request.firstFramePath} onClick={() => choose("image", "firstFramePath")} /><FilePicker label="尾帧（可选）" path={request.lastFramePath} onClick={() => choose("image", "lastFramePath")} /></div>}
           {!isRb && request.mode === "image" && <FilePicker label="参考图片" path={request.sourceImagePath} onClick={() => choose("image", "sourceImagePath")} />}
           {!isRb && request.mode === "video" && <FilePicker label="参考视频" path={request.sourceVideoPath} onClick={() => choose("video", "sourceVideoPath")} />}
-          {isRb && rbPreset === "reference" && <FilePicker label="参考图片（可选，最多 8 张）" path={request.sourceImagePath} onClick={() => choose("image", "sourceImagePath")} />}
+          {isRb && rbPreset === "reference" && <FilePicker label="参考图片（可选，1 张）" path={request.sourceImagePath} onClick={() => choose("image", "sourceImagePath")} />}
           {isRb && rbPreset === "reference" && <FilePicker label="参考视频（可选）" path={request.sourceVideoPath} onClick={() => choose("video", "sourceVideoPath")} />}
           {isRb && rbPreset === "tail_frame" && <div className="frame-row"><FilePicker label="首帧" path={request.firstFramePath} onClick={() => choose("image", "firstFramePath")} /><FilePicker label="尾帧" path={request.lastFramePath} onClick={() => choose("image", "lastFramePath")} /></div>}
         </>}

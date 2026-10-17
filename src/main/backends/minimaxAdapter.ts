@@ -110,7 +110,10 @@ export class MiniMaxAdapter implements GenerationAdapter {
       }),
       signal: requestSignal(signal, 30_000)
     });
-    const created = (await response.json()) as { task_id?: string; error?: { type?: string; message?: string } };
+    // 网关/反代在 5xx 时可能返回 HTML 错误页：裸 `response.json()` 会抛英文
+    // `Unexpected token '<'`，用户看到的是与"提交失败"无关的技术噪声。
+    // 统一走 readJson（失败返回 {}），由下面的 ok/task_id 判定给出中文结论。
+    const created = (await readJson(response)) as { task_id?: string; error?: { type?: string; message?: string } };
     if (!response.ok || !created.task_id) throw new Error(created.error?.message || `MiniMax 提交失败：${response.status}`);
     onProviderId?.(created.task_id); // 提交成功立即回传：中途取消时云端任务也能被终止（按次计费）。
     const result = await this.wait(created.task_id, onProgress, signal);
@@ -255,6 +258,17 @@ export class MiniMaxAdapter implements GenerationAdapter {
     await writeFile(target, Buffer.from(await response.arrayBuffer()));
     return target;
   }
+}
+
+/**
+ * 读 JSON，失败返回 {}。
+ *
+ * 网关/反代在 5xx 时可能返回 HTML 错误页，裸 `response.json()` 会抛英文
+ * `Unexpected token '<'`——用户看到的是与"提交失败"无关的技术噪声。
+ * 返回空对象后由调用方按 `response.ok` / 字段缺失给出中文结论。
+ */
+async function readJson(response: Response): Promise<unknown> {
+  return response.json().catch(() => ({}));
 }
 
 async function dataUri(filePath: string): Promise<string> {

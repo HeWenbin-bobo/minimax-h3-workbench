@@ -27,7 +27,7 @@ import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
 import { checkForUpdates, checkFrameworkUpdate } from "./modules/updateChecker";
-import { renderHtml, clearBrowserFetchCache } from "./modules/browserFetch";
+import { renderHtml, renderPageText, clearBrowserFetchCache } from "./modules/browserFetch";
 import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
@@ -780,12 +780,14 @@ function registerIpc(
         // 网页内容提示注入诱导），而隐藏窗口是以主进程身份发请求的。不拦的话可以让我方去访问
         // http://127.0.0.1:8188（ComfyUI 控制面）或 http://169.254.169.254/（云元数据），
         // 再把响应原文交回对话。与结果下载那条 SSRF 同一类问题，故共用同一套私网判定。
-        // 渲染走独立 session 分区（browserFetch 内部保证），返回前截断到 8 万字符——
-        // 超长 HTML 会撑爆模型上下文（百度首页渲染后 >1MB）。
+        //
+        // **取可见文本而不是整页 HTML**（实测 probe openpage-text-vs-html）：
+        // 一个 120081 字符的页面里正文只有 35 字符，其余全是内联 script/style；
+        // 截到 8 万字符后关键事实已被脚本挤掉，模型拿到的是一堆代码噪声。
         openPage: async (url: string) => {
           const parsed = assertPublicHttpUrl(url);
-          const html = await renderHtml(parsed.toString(), 45_000);
-          return html.length > 80_000 ? `${html.slice(0, 80_000)}\n\n（页面过长已截断）` : html;
+          const text = await renderPageText(parsed.toString(), 45_000);
+          return text.length > 80_000 ? `${text.slice(0, 80_000)}\n\n（页面过长已截断）` : text;
         },
         // create_file（文件产物工具）：模型对工具调用的信任远高于文字约定（实测：只靠提示词约定
         // 围栏代码块时模型会自我怀疑"没有文件写入工具"而道歉）。落盘直接复用 artifact:save 的

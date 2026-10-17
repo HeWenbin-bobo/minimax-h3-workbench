@@ -40,13 +40,31 @@ let chain: Promise<void> = Promise.resolve();
 
 /** 用隐藏窗口加载 url 并返回渲染后的 HTML。串行执行；超时/加载失败会抛中文错误。 */
 export function renderHtml(url: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
-  const task = chain.then(() => renderOnce(url, timeoutMs));
+  return enqueue(() => renderOnce(url, timeoutMs, "html"));
+}
+
+/**
+ * 用隐藏窗口加载 url 并返回**可见文本**（`document.body.innerText`）。
+ *
+ * 为什么不复用 `renderHtml` 的整页 HTML：实测（probe openpage-text-vs-html）
+ * 一个 120081 字符的页面里，正文只有 35 字符——其余全是内联 script/style。
+ * `open_page` 把结果截到 8 万字符后，关键事实（示例里的价格）**已被脚本挤掉**，
+ * 模型拿到一堆代码噪声还信心十足地作答。真实站点（Bing 结果页、文档站）比例相近。
+ *
+ * 搜索解析（parseBing/parseSogou）必须看 HTML 结构，所以两条路分开、各取所需。
+ */
+export function renderPageText(url: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
+  return enqueue(() => renderOnce(url, timeoutMs, "text"));
+}
+
+function enqueue<T>(operation: () => Promise<T>): Promise<T> {
+  const task = chain.then(operation);
   // 队列本身不能被单次失败污染，否则后续调用全部连坐失败。
   chain = task.then(() => undefined, () => undefined);
   return task;
 }
 
-async function renderOnce(url: string, timeoutMs: number): Promise<string> {
+async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text"): Promise<string> {
   const ses = session.fromPartition(PARTITION);
   const win = new BrowserWindow({
     show: false,
@@ -122,7 +140,12 @@ async function renderOnce(url: string, timeoutMs: number): Promise<string> {
       // 失败会走 did-fail-load，这里吞掉 loadURL 自身的 rejection，避免未处理拒绝告警。
       void win.loadURL(url).catch(() => undefined);
     });
-    return (await win.webContents.executeJavaScript("document.documentElement.outerHTML", true)) as string;
+    // 按调用方需要取两种视图：搜索解析要 HTML 结构，open_page 要可读正文。
+    // `open_page` 用 HTML 的实测后果见 renderPageText 的注释（正文被脚本挤掉）。
+    const expression = mode === "text"
+      ? "document.body ? document.body.innerText : ''"
+      : "document.documentElement.outerHTML";
+    return (await win.webContents.executeJavaScript(expression, true)) as string;
   } finally {
     if (!win.isDestroyed()) win.destroy();
   }

@@ -93,6 +93,23 @@ export function normalizeSettings(raw: Partial<AppSettings>, defaults: AppSettin
   };
 }
 
+/**
+ * 解密一个已保存的密钥。
+ *
+ * safeStorage 在"密文存在但解不开"时抛英文错误
+ * （"Error while decrypting the ciphertext provided to safeStorage.decryptString.
+ * Ciphertext does not appear to be encrypted."）。换机器、`Local State` 丢失、
+ * 系统账号变更都会走到这里，而这条英文对用户毫无指向性——界面只会显示
+ * "生成失败"，没人知道该重新填一次 Key。这里翻译成可执行的中文。
+ */
+function decryptSecret(encrypted: string): string {
+  try {
+    return safeStorage.decryptString(Buffer.from(encrypted, "base64"));
+  } catch {
+    throw new Error("已保存的密钥无法解密（可能更换了电脑或系统账户）。请到「连接设置」重新填写并保存。");
+  }
+}
+
 export class SettingsStore {
   private readonly filePath = path.join(app.getPath("userData"), "settings.json");
   private readonly secretPath = path.join(app.getPath("userData"), "secrets.json");
@@ -145,12 +162,22 @@ export class SettingsStore {
     const secrets = await this.readSecrets();
     const encrypted = secrets[name];
     if (!encrypted) return "";
-    return safeStorage.decryptString(Buffer.from(encrypted, "base64"));
+    return decryptSecret(encrypted);
   }
 
   async hasSecret(name: SecretName): Promise<boolean> {
     const secrets = await this.readSecrets();
-    return Boolean(secrets[name]);
+    // 不能只看"密文存在"：换机器 / Local State 丢失 / 系统账号变更后，
+    // 密文仍在但已解不开（safeStorage 抛 "Ciphertext does not appear to be encrypted"）。
+    // 那时 hasSecret 报 true 会让界面显示"已保存"，实际每次调用都失败（实测探针 decrypt-failure）。
+    const encrypted = secrets[name];
+    if (!encrypted) return false;
+    try {
+      decryptSecret(encrypted);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async readSecrets(): Promise<Record<string, string>> {

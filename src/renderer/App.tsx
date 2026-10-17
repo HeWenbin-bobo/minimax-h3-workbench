@@ -1303,7 +1303,10 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
       setLoaded(true);
     }).catch((e) => { if (!cancelled) { setReadError(describeError(e, "读取产物内容失败。")); setLoaded(true); } });
     return () => { cancelled = true; };
-  }, [artifact.path, needsContent]);
+    // 依赖里带 nonce：点「↻ 重新加载」时要**真的重新读盘**。
+    // 此前 nonce 只用于重挂载 DOM，表格/文档读到的是 state 里的旧内容——按钮点了像没反应
+    // （只有 html 分支因为 iframe 重新加载才真的刷新）。
+  }, [artifact.path, needsContent, nonce]);
   const content = artifact.content || diskContent || "";
   const dragRef = useRef<{ startX: number; startWidth: number } | undefined>(undefined);
   function onDragStart(e: React.MouseEvent) {

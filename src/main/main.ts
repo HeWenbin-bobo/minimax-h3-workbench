@@ -89,7 +89,12 @@ app.whenReady().then(async () => {
   const orchestrator = new GenerationOrchestrator(
     new TaskStore(),
     adapters,
-    (task) => mainWindow?.webContents.send("task:update", task)
+    (task) => {
+      // 与 sendToWindow 同一理由：窗口销毁后 send 会抛 "Object has been destroyed"。
+      const target = mainWindow;
+      if (!target || target.isDestroyed() || target.webContents.isDestroyed()) return;
+      target.webContents.send("task:update", task);
+    }
   );
   await orchestrator.initialize();
   // h3media 只允许读取输出目录内的生成结果，防止渲染进程借协议读任意本地文件。
@@ -325,18 +330,28 @@ function registerIpc(
     // world state 同理：换了模型就是换了一个"没见过这些环境事实"的对话方，必须重注入一遍。
     sessionWorldState.clear();
   };
-  const sendChunk = (event: LlmStreamEvent) => mainWindow?.webContents.send("llm:chunk", event);
-  const sendDone = (event: LlmDoneEvent) => mainWindow?.webContents.send("llm:done", event);
+  // 统一的窗口推送。**必须判 isDestroyed**：`mainWindow?.webContents.send(...)`
+  // 在窗口销毁后仍会走到 webContents 上并抛 "Object has been destroyed"
+  //（实测 probe-destroyed-window：持有 webContents 引用 send 成功、经 window 取则抛错）。
+  // macOS 关窗后应用常驻、Windows 侧也可能在任务收尾时窗口已关，不兜住就会
+  // 从发送路径抛进主进程（流式/任务回调里无人 catch）。
+  const sendToWindow = (channel: string, payload: unknown) => {
+    const target = mainWindow;
+    if (!target || target.isDestroyed() || target.webContents.isDestroyed()) return;
+    target.webContents.send(channel, payload);
+  };
+  const sendChunk = (event: LlmStreamEvent) => sendToWindow("llm:chunk", event);
+  const sendDone = (event: LlmDoneEvent) => sendToWindow("llm:done", event);
   // 智能体工具调用开始：渲染端在气泡上实时显示"正在搜索/正在生成视频"（多步工具期间可达 15–25 秒黑屏）。
-  const sendLlmTool = (event: LlmToolEvent) => mainWindow?.webContents.send("llm:tool", event);
+  const sendLlmTool = (event: LlmToolEvent) => sendToWindow("llm:tool", event);
   // 智能体工具建好任务后推送任务 id：游乐场把卡片挂到对应会话气泡上。
-  const sendLlmTasks = (event: LlmTasksEvent) => mainWindow?.webContents.send("llm:tasks", event);
+  const sendLlmTasks = (event: LlmTasksEvent) => sendToWindow("llm:tasks", event);
   // 步骤清单更新（update_plan）：渲染端在气泡上显示进度。
-  const sendLlmPlan = (event: LlmPlanEvent) => mainWindow?.webContents.send("llm:plan", event);
+  const sendLlmPlan = (event: LlmPlanEvent) => sendToWindow("llm:plan", event);
   // 交互提问（request_user_input）：渲染端弹选择卡片；工具循环此刻正挂起等待回答。
-  const sendLlmQuestion = (event: LlmQuestionEvent) => mainWindow?.webContents.send("llm:question", event);
+  const sendLlmQuestion = (event: LlmQuestionEvent) => sendToWindow("llm:question", event);
   // 产出文件（create_file）：只推元数据，内容不回灌消息流（否则每轮重发给模型，白烧 token）。
-  const sendLlmArtifact = (event: LlmArtifactEvent) => mainWindow?.webContents.send("llm:artifact", event);
+  const sendLlmArtifact = (event: LlmArtifactEvent) => sendToWindow("llm:artifact", event);
   // LLM 连接测试（cc-switch 模式）：拉模型列表验证连通性——不发对话（不花钱），
   // 不受对话端点路径差异影响；/models 不通的服务商回退发一条最小对话。
   handle("llm:test", async () => {
@@ -495,7 +510,7 @@ function registerIpc(
       // 摘要为空说明压缩请求失败——如实告知，别让用户以为上下文被完整保留了。
       reason: summary ? (trigger === "manual" ? "手动压缩" : decision.reason === "hard-window" ? "上下文已达模型上限" : "上下文接近上限") : "压缩失败（摘要不可用）"
     };
-    mainWindow?.webContents.send("llm:compaction", { ...info, sessionId: session });
+    sendToWindow("llm:compaction", { ...info, sessionId: session });
     return { messages: compacted, info };
   }
 

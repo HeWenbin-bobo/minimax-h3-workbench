@@ -856,9 +856,17 @@ function registerIpc(
     // 附件大小上限：图片 15MB、文本 2MB——base64 进内存且随 IPC 传输，超大文件会卡死渲染端。
     const info = await stat(filePath).catch(() => undefined);
     if (!info?.isFile()) throw new Error("附件不存在或不是文件。");
-    if ([".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(extension)) {
+    // 图片扩展名必须与 dialog:file 的选择器**保持一致**：选择器允许 heic/heif
+    //（iPhone 默认格式），但这里漏了它们 → 用户选了照片却得到 kind:"other"
+    //（只发文件名、不发图）。实测 probe-heic 复现。
+    if ([".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".heif"].includes(extension)) {
       if (info.size > 15 * 1024 * 1024) throw new Error("图片附件超过 15MB 上限，请压缩后再上传。");
-      const mime = extension === ".png" ? "image/png" : extension === ".webp" ? "image/webp" : extension === ".gif" ? "image/gif" : "image/jpeg";
+      const mime = extension === ".png" ? "image/png"
+        : extension === ".webp" ? "image/webp"
+          : extension === ".gif" ? "image/gif"
+            : extension === ".heic" ? "image/heic"
+              : extension === ".heif" ? "image/heif"
+                : "image/jpeg";
       return { kind: "image", name, dataUrl: `data:${mime};base64,${(await readFile(filePath)).toString("base64")}` };
     }
     if ([".txt", ".md", ".json", ".csv", ".srt", ".vtt", ".log"].includes(extension)) {

@@ -931,7 +931,9 @@ function registerIpc(
     const budget = budgetFor(session);
     const modelLimit = contextWindowFor(settings.llm.model);
     // 与真正发给模型的那份保持同一口径（压缩后就是压缩结果 + 新增）。
-    const active = activeContextTokens(effectiveFor(session, messages ?? []), budget.sample);
+    // 入参来自 IPC：`messages ?? []` 只挡 null/undefined，传对象/字符串时
+    // 下游 `reduce` 会抛 "messages.reduce is not a function"（英文错误透到界面）。
+    const active = activeContextTokens(effectiveFor(session, safeMessages(messages)), budget.sample);
     const decision = shouldCompact({ activeInputTokens: active, state: budget.window, modelLimitTokens: modelLimit });
     return {
       percent: Math.max(0, decision.percent),
@@ -948,7 +950,7 @@ function registerIpc(
     const session = typeof sessionId === "string" && sessionId ? sessionId : "anon";
     const controller = new AbortController();
     try {
-      const { info } = await maybeCompact(session, messages ?? [], "manual", controller.signal);
+      const { info } = await maybeCompact(session, safeMessages(messages), "manual", controller.signal);
       return info ?? { before: 0, after: 0, windowNumber: 0, reason: "未触发压缩" };
     } catch (error) {
       throw new Error(describeError(error, "压缩失败"));
@@ -1184,6 +1186,25 @@ function knownOutputPaths(orchestrator: GenerationOrchestrator): Set<string> {
 function normalizeForCompare(filePath: string): string {
   const resolved = path.resolve(filePath);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * IPC 入参的历史消息数组归一。
+ *
+ * `messages ?? []` 只挡 null/undefined：渲染端（或被构造的调用）传对象/字符串时，
+ * 下游 `estimateMessagesTokens` 的 `reduce` 会抛 "messages.reduce is not a function"，
+ * 这条英文错误会原样进到界面。同时把每条消息的 content 归一为字符串——
+ * `estimateTokens` 内部 `.match()`、`normalizeHistory` 内部 `.trim()` 都要求字符串。
+ */
+function safeMessages(messages: unknown): ChatMessage[] {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .filter((message): message is ChatMessage => Boolean(message) && typeof message === "object")
+    .map((message) => ({
+      ...message,
+      content: typeof message.content === "string" ? message.content : "",
+      images: Array.isArray(message.images) ? message.images.filter((url): url is string => typeof url === "string") : undefined
+    }));
 }
 
 function handle<TArgs extends unknown[], TResult>(

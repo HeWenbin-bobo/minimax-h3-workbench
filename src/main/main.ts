@@ -1516,6 +1516,12 @@ function safeMessages(messages: unknown): ChatMessage[] {
     .filter((message): message is ChatMessage => Boolean(message) && typeof message === "object")
     .map((message) => ({
       ...message,
+      // `role` 也必须收敛：类型注释写着 `ChatRole`，但数组来自 IPC / 落盘历史，
+      // 完全可能混进 "tool" / "developer" / 数字 / undefined（手改 localStorage、
+      // 旧版本写脏、未来某处写入 bug）。上游对非法 role 一律 400，
+      // 而这条历史会**每轮都发**——用户看到的是"这个会话再也发不出消息"，
+      // 且错误文案与自己做的事毫无关系。未知 role 按 user 处理（内容仍在，语义最近）。
+      role: message.role === "assistant" || message.role === "system" ? message.role : "user",
       content: typeof message.content === "string" ? message.content : "",
       images: Array.isArray(message.images) ? message.images.filter((url): url is string => typeof url === "string") : undefined
     }));

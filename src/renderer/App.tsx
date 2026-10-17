@@ -463,18 +463,32 @@ function ResourcesPage({ resources, settings, onSettingsChange, onError }: { res
   }, [root]);
 
   async function pickRoot() {
-    const response = await window.h3.selectDirectory();
-    if (!response.data) return;
-    const next = { ...settings, comfyuiRoot: response.data };
-    onSettingsChange(next);
-    await window.h3.updateSettings({ comfyuiRoot: response.data });
-    await checkRoot();
+    // 选择目录、保存设置、重新检查三步都可能抛异常；不兜住的话「选择目录」点了没反应，
+    // 且 settings 已被本地改掉而磁盘没写成（状态与磁盘不一致）。
+    try {
+      const response = await window.h3.selectDirectory();
+      if (!response.data) return;
+      const next = { ...settings, comfyuiRoot: response.data };
+      onSettingsChange(next);
+      const saved = await window.h3.updateSettings({ comfyuiRoot: response.data });
+      if (!saved.ok) { onError(saved.message || "保存目录失败"); return; }
+      await checkRoot();
+    } catch (error) {
+      onError(error);
+    }
   }
   async function checkRoot() {
     setChecking(true);
-    const response = await window.h3.checkLocalModels();
-    setChecking(false);
-    if (response.data) setModelStatus(response.data); else setModelStatus([]);
+    // 同 detect()/test()：IPC reject 时 setChecking(false) 不执行 → 按钮永久卡在「检查中…」。
+    try {
+      const response = await window.h3.checkLocalModels();
+      if (response.data) setModelStatus(response.data); else setModelStatus([]);
+    } catch (error) {
+      onError(error);
+      setModelStatus([]);
+    } finally {
+      setChecking(false);
+    }
   }
   // 打开外链可能被主进程拒绝（只允许 HTTPS）或失败；不兜住的话按钮点了毫无反应。
   async function open(url: string) {

@@ -156,3 +156,63 @@ function objectInfo(files: { diffusion: string[]; textEncoders: string[]; vaes: 
 function json(value: unknown): Response {
   return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
 }
+
+// 任务已完成但没有媒体产物时必须立刻失败，而不是轮询到 30 分钟超时。
+// 实测场景：工作流跑完了、outputs 为空（输出节点没接保存/预览节点）。
+// 旧实现只认 status_str === "error"，这种"成功但没东西"会被当成"还在跑"。
+describe("ComfyAdapter 完成但无产物", () => {
+  it("status=success 且 outputs 为空时立即报错（不干等超时）", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/object_info")) return json(objectInfo({
+        diffusion: [
+          "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+        ],
+        textEncoders: ["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"],
+        vaes: ["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_audio_vae_fp32.safetensors"]
+      }));
+      if (url.endsWith("/prompt")) return json({ prompt_id: "p1" });
+      if (url.includes("/history/")) {
+        return json({ p1: { outputs: {}, status: { status_str: "success", completed: true } } });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const startedAt = Date.now();
+    await expect(adapter().generate(request, task, () => undefined)).rejects.toThrow(/没有产出视频/);
+    // 不能是"轮询到超时"的路径：超时是 30 分钟，这里必须秒回。
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  // 轮询间隔是 3 秒真实等待，这里只走一轮（1 次 delay），并给足超时。
+  it("status 未完成（仍在跑）时不报错，继续轮询", async () => {
+    let historyHits = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/object_info")) return json(objectInfo({
+        diffusion: [
+          "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+        ],
+        textEncoders: ["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"],
+        vaes: ["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_audio_vae_fp32.safetensors"]
+      }));
+      if (url.endsWith("/prompt")) return json({ prompt_id: "p1" });
+      if (url.includes("/history/")) {
+        historyHits += 1;
+        // 第一次"还在跑"，第二次给结果——只经历一次 3 秒轮询间隔
+        if (historyHits < 2) return json({ p1: { outputs: {}, status: { status_str: "running" } } });
+        return json({ p1: { outputs: { save: [{ filename: "out.mp4", type: "output" }] }, status: { status_str: "success" } } });
+      }
+      if (url.includes("/view?")) return new Response(new Uint8Array([0, 1, 2]), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await adapter().generate(request, task, () => undefined);
+    expect(result.outputPath).toContain("task-1.mp4");
+    expect(historyHits).toBe(2);
+  }, 15_000);
+});

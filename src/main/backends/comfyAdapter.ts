@@ -169,10 +169,20 @@ export class ComfyAdapter implements GenerationAdapter {
       const response = await fetch(`${this.baseUrl}/history/${encodeURIComponent(promptId)}`, { signal: requestSignal(signal, 20_000) });
       if (response.ok) {
         const history = (await response.json()) as Record<string, unknown>;
-        const entry = history[promptId] as { outputs?: unknown; status?: { status_str?: string; messages?: unknown[] } } | undefined;
+        const entry = history[promptId] as {
+          outputs?: unknown;
+          status?: { status_str?: string; completed?: boolean; messages?: unknown[] };
+        } | undefined;
         if (entry?.status?.status_str === "error") throw new Error(`ComfyUI 任务失败：${JSON.stringify(entry.status.messages ?? [])}`);
         const output = findMedia(entry?.outputs);
         if (output) return output;
+        // 已完成但没有媒体产物：**立刻报错**，不要继续轮询到 30 分钟超时。
+        // 实测场景：工作流跑完了、outputs 为空（节点没接 SaveVideo、或模型输出被丢弃）。
+        // 旧实现只认 `status_str === "error"`，这种"成功但没东西"的状态会被当成"还在跑"，
+        // 于是一直轮询到 30 分钟才报超时——用户白等半小时，还以为是机器慢。
+        if (entry && (entry.status?.completed === true || entry.status?.status_str === "success")) {
+          throw new Error("ComfyUI 任务已完成，但没有产出视频。请检查工作流的输出节点是否接到了保存/预览节点。");
+        }
       }
       progress = Math.min(90, progress + 2);
       onProgress("running", progress, "模型正在采样和解码");

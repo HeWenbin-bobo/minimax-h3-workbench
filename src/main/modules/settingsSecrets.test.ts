@@ -89,3 +89,28 @@ describe("setSecret 入参校验", () => {
     await expect(store.getSecret("searchApiKey")).resolves.toBe("sk-x");
   });
 });
+
+// secrets.json 在磁盘上，属外部数据（可被手改、也可能被旧版本写脏）。
+// 某键不是字符串时，`Buffer.from(123, "base64")` 抛英文 ERR_INVALID_ARG_TYPE、
+// `decryptString({})` 抛另一种英文错误 —— 两条都会透到"测试连接失败"里。
+describe("密钥文件脏值容错", () => {
+  it("键值非字符串时按「没有该密钥」处理，不抛英文错误", async () => {
+    await writeFile(secretFile(), JSON.stringify({
+      llmApiKey: 123,
+      searchApiKey: { evil: true },
+      minimaxApiKey: null
+    }), "utf8");
+    const store = new SettingsStore();
+    await expect(store.getSecret("llmApiKey")).resolves.toBe("");
+    await expect(store.getSecret("searchApiKey")).resolves.toBe("");
+    await expect(store.hasSecret("minimaxApiKey")).resolves.toBe(false);
+  });
+
+  it("文件不是对象（数组 / 字符串 / null）时当作没有密钥", async () => {
+    for (const bad of ["[]", "\"x\"", "null", "42"]) {
+      await writeFile(secretFile(), bad, "utf8");
+      const store = new SettingsStore();
+      await expect(store.getSecret("llmApiKey")).resolves.toBe("");
+    }
+  });
+});

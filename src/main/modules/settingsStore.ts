@@ -230,9 +230,25 @@ export class SettingsStore {
     }
   }
 
+  /**
+   * 读取密钥文件。
+   *
+   * **逐键过滤成字符串**：secrets.json 在磁盘上，属于外部数据（可被手改、
+   * 也可能被旧版本/异常写入脏值）。某键是数字/对象时，
+   * `Buffer.from(123, "base64")` 会抛英文 `ERR_INVALID_ARG_TYPE`；
+   * `decryptString({})` 抛的是另一种英文错误——两条都会以"技术噪声"形式
+   * 透到「生成失败 / 测试连接失败」的提示里，用户完全无法对症。
+   * 非字符串一律当作"这个键没有值"，走既有的空串路径。
+   */
   private async readSecrets(): Promise<Record<string, string>> {
     try {
-      return JSON.parse(await readFile(this.secretPath, "utf8")) as Record<string, string>;
+      const raw = JSON.parse(await readFile(this.secretPath, "utf8")) as unknown;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+      const out: Record<string, string> = {};
+      for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+        if (typeof value === "string" && value) out[key] = value;
+      }
+      return out;
     } catch {
       return {};
     }

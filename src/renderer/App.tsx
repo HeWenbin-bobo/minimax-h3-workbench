@@ -769,6 +769,10 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
     // 缺失或脏值统一归一成当前时刻（至少排在合理位置，而不是崩溃）。
     createdAt: typeof session.createdAt === "string" && session.createdAt ? session.createdAt : new Date().toISOString(),
     updatedAt: typeof session.updatedAt === "string" && session.updatedAt ? session.updatedAt : undefined,
+    // `category` 参与分组排序（`a.localeCompare(b)`）与过滤比较，
+    // 非字符串会让分组排序抛 "a.localeCompare is not a function"（实测：
+    // 数字分类排在字母分类之前时会命中）。空串沿用"未分类"语义。
+    category: typeof session.category === "string" && session.category ? session.category : undefined,
     // toolSteps 与 streaming 同理是瞬态：流式途中关闭应用会残留，读取时强制剥离。
     // 旧数据迁移：扁平 taskIds → 单组 taskGroups（旧消息没有分组结构）。
     messages: (Array.isArray(session.messages) ? session.messages : []).filter(Boolean).map((msg) => {

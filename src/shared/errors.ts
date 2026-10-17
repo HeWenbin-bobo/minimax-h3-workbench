@@ -19,6 +19,27 @@ const NETWORK_CODES: Record<string, string> = {
   UND_ERR_SOCKET: "连接被提前关闭"
 };
 
+/**
+ * 文件系统 errno → 中文。
+ *
+ * 保存产物、写设置、删回收站文件都会碰到这些；不翻译的话用户看到的是
+ * "ENOSPC: no space left on device, write" 这种裸英文（实测），
+ * 违反「错误提示一律中文」，而且不知道该怎么办。
+ */
+const FS_CODES: Record<string, string> = {
+  ENOSPC: "磁盘空间不足",
+  EACCES: "没有访问权限（可能被杀毒软件或其他程序占用）",
+  EPERM: "操作不被允许（权限不足）",
+  EBUSY: "文件正被其他程序占用",
+  EISDIR: "目标是一个目录，不是文件",
+  ENOTDIR: "路径中有一段不是目录",
+  ENOENT: "文件或目录不存在",
+  EROFS: "所在磁盘为只读",
+  ENAMETOOLONG: "文件路径过长",
+  EMFILE: "同时打开的文件过多，请重启应用",
+  EXDEV: "跨磁盘操作不被支持"
+};
+
 const HINT = "请检查地址、端口与服务是否已启动。";
 
 // 流式中途被对端断开时，undici 抛的 cause 是"英文短句"而不是 errno（实测中途 reset 的 cause.message = "terminated"，
@@ -65,6 +86,11 @@ export function describeError(error: unknown, fallback: string): string {
   if (candidate && (NETWORK_CODES[candidate] || /connect|socket|network|reset|refused|reach|timeout|timed out/i.test(error.message))) {
     return `网络连接失败：${NETWORK_CODES[candidate] ?? `网络错误 ${candidate}`}。${HINT}`;
   }
+  // 文件系统 errno：保存产物 / 写设置 / 删回收站文件都会碰到。
+  // 先查顶层 error.code（Node 的 fs 错误通常是 code 而非 cause），再查 message 里的 errno 令牌。
+  const fsCode = [ (error as { code?: unknown }).code, candidate ]
+    .find((value): value is string => typeof value === "string" && Boolean(FS_CODES[value]));
+  if (fsCode) return `${FS_CODES[fsCode]}：${error.message.replace(/^E[A-Z]+:\s*/, "").trim() || FS_CODES[fsCode]}`;
   // 中途断开时 AI SDK 只给 "Failed to process successful response"，真正的信号在 cause.message（terminated）里，
   // 上面 causeCode 分支没命中时兜底按网络语境翻译，避免透出英文占位。
   if (NETWORK_HINT_RE.test(error.message) || NETWORK_HINT_RE.test(cause.message ?? "")) {

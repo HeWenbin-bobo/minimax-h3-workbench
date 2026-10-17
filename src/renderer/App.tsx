@@ -54,6 +54,17 @@ export function App() {
       setUpdateInfo(response.data);
       if (response.data.updateAvailable) setNotice({ text: `发现新版本 v${response.data.latestVersion}，点击左下角“下载更新”即可安装。` });
     }).catch(() => undefined);
+    // 智能体框架（Vercel AI SDK）随安装包分发，版本独立于应用本体——
+    // 应用不更新时也该提示框架有新版本。此前主进程与 preload 都已就绪，
+    // 唯独渲染端零调用：功能存在却永远不显示（"建了模块 ≠ 接线了"）。
+    window.h3.checkAgentFrameworkUpdate().then((response) => {
+      if (!response.data?.updateAvailable) return;
+      // 应用本身有新版时优先提示那个（一次性覆盖用户视野的提示只留一条）；
+      // 框架更新会跟随应用升级一并生效，不必抢同一时刻的 toast。
+      setNotice((current) => current ?? {
+        text: `智能体框架有新版本 v${response.data!.latestVersion}（当前 v${response.data!.bundledVersion}），更新应用时将一并升级。`
+      });
+    }).catch(() => undefined);
     return () => { offTask(); };
   }, []);
 

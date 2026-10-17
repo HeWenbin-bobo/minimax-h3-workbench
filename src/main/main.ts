@@ -716,6 +716,12 @@ function registerIpc(
     // 放在压缩之后——压缩会改写历史，规范化必须作用在**真正要发出去的那份**上。
     const normalized = normalizeHistory(effective, { model: turn.value.model });
     effective = normalized.messages;
+    // `normalizeHistory` 可能把整段历史清空（全是 assistant 残留或空白消息时，实测返回 []）。
+    // 空历史发出去上游只会回一条无意义的错误（"no messages"），用户看到的是"空回复"。
+    // 保底：至少在末尾补一条占位 user 消息，让这一轮有内容可回。
+    if (effective.length === 0) {
+      effective = [{ role: "user", content: "（本轮没有可发送的对话内容，请提示用户重新输入。）" }];
+    }
     // 剥掉了东西要如实告知（静默改动用户输入不可接受）：直接写进气泡开头。
     if (normalized.notes.length > 0) chunk({ seq: 0, delta: `${normalized.notes.join("\n")}\n\n` });
     if (!agent) {

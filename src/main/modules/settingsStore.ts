@@ -2,6 +2,7 @@ import { app, safeStorage } from "electron";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AppSettings, SecretName } from "../../shared/types";
+import { SECRET_NAMES } from "../../shared/types";
 
 const defaultSettings = (): AppSettings => ({
   localComfyUrl: "http://127.0.0.1:8188",
@@ -175,6 +176,13 @@ export class SettingsStore {
 
   async setSecret(name: SecretName, value: string): Promise<void> {
     if (!safeStorage.isEncryptionAvailable()) throw new Error("系统安全存储不可用，拒绝保存明文密钥。 ");
+    // 两个参数都来自 IPC，类型没有保证：
+    // - `encryptString(123)` 抛英文 TypeError（实测 "Error processing argument at index 0,
+    //   conversion failure"），直接透到界面
+    // - `name` 非白名单值时会把密钥写到一个下游永远读不到的键上（表现为"保存了但没生效"），
+    //   且 `__proto__` 这类键在普通对象赋值上是**静默无效**的（实测写入后 Object.keys 为空）
+    if (typeof name !== "string" || !SECRET_NAMES.includes(name)) throw new Error("密钥类型无效。");
+    if (typeof value !== "string") throw new Error("密钥内容必须是文本。");
     // 与 update 共用同一条队列：密钥写入同样是读-改-写，并发会丢键/写坏 tmp。
     return this.serialize(async () => {
       const secrets = await this.readSecrets();

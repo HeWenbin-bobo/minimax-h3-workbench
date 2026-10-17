@@ -1,5 +1,7 @@
 export type BackendKind = "local" | "ssh" | "minimax" | "rb";
 export type SecretName = "minimaxApiKey" | "sshPassword" | "rbCardCode" | "llmApiKey" | "searchApiKey";
+/** 运行时可用的 SecretName 白名单。IPC 入口用它校验，避免把密钥写到下游读不到的键上。 */
+export const SECRET_NAMES: readonly SecretName[] = ["minimaxApiKey", "sshPassword", "rbCardCode", "llmApiKey", "searchApiKey"];
 export type GenerationMode = "text" | "image" | "video";
 
 /** 视频描述长度上限。工作台计数器、文本域 maxlength 与主进程校验共用同一来源，避免标称值与实际约束不一致。 */

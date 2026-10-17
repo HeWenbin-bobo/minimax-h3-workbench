@@ -62,3 +62,30 @@ describe("SettingsStore 密钥解密失败", () => {
     expect((error as Error).message).not.toMatch(/ciphertext|decrypt/i);
   });
 });
+
+// 两个参数都来自 IPC：
+// - `encryptString(123)` 抛英文 TypeError（实测 "Error processing argument at index 0"）
+// - `name` 非白名单时会写到下游永远读不到的键上（"保存了但没生效"）
+describe("setSecret 入参校验", () => {
+  it("非字符串 value 报中文错误（不抛 encryptString 的英文 TypeError）", async () => {
+    const store = new SettingsStore();
+    for (const bad of [123, null, undefined, {}, ["a"]]) {
+      const error = await store.setSecret("llmApiKey", bad as never).catch((e: Error) => e);
+      expect((error as Error).message).toBe("密钥内容必须是文本。");
+    }
+  });
+
+  it("非白名单 name 被拒绝（不会静默写进无效键）", async () => {
+    const store = new SettingsStore();
+    for (const bad of ["evilKey", "__proto__", "", 123, null]) {
+      const error = await store.setSecret(bad as never, "v").catch((e: Error) => e);
+      expect((error as Error).message).toBe("密钥类型无效。");
+    }
+  });
+
+  it("合法 name + 字符串 value 正常保存", async () => {
+    const store = new SettingsStore();
+    await expect(store.setSecret("searchApiKey", "sk-x")).resolves.toBeUndefined();
+    await expect(store.getSecret("searchApiKey")).resolves.toBe("sk-x");
+  });
+});

@@ -1078,6 +1078,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       const payload = await window.h3.readAttachment(response.data);
       if (!payload.data) { onError(new Error(payload.message || "读取附件失败")); return; }
       if (payload.data.kind === "other") { onNotice(`已添加附件 ${payload.data.name}（此类型仅作为文件名提示发送）`); }
+      // 截断必须告诉用户：主进程只取前 10 万字符，不提示的话用户以为整份文件都进了对话。
+      if (payload.data.truncated) { onNotice(`${payload.data.name} 内容较长，只发送了前 10 万字符（超出部分未包含）。`); }
       setAttachments((all) => [...all, { name: payload.data!.name, dataUrl: payload.data!.dataUrl, text: payload.data!.text }]);
     } catch (error) {
       onError(error);

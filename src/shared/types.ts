@@ -302,6 +302,8 @@ export interface AttachmentPayload {
   name: string;
   dataUrl?: string;
   text?: string;
+  /** 文本附件是否被截断（原文件超过上限）。界面据此明确提示，而不是静默少给内容。 */
+  truncated?: boolean;
 }
 
 /** LLM 流式分块事件。 */

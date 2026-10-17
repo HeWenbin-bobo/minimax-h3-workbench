@@ -918,7 +918,11 @@ function registerIpc(
     }
     if ([".txt", ".md", ".json", ".csv", ".srt", ".vtt", ".log"].includes(extension)) {
       if (info.size > 2 * 1024 * 1024) throw new Error("文本附件超过 2MB 上限，请只粘贴相关片段。");
-      return { kind: "text", name, text: (await readFile(filePath, "utf8")).slice(0, 100_000) };
+      const raw = await readFile(filePath, "utf8");
+      // 截断必须**如实上报**：原实现静默 `.slice(0, 100_000)`，用户以为整份文件都发给了模型，
+      // 模型也只看到前一段——文件更长时两边都不知道（违反「出错/取舍必须让人看见」）。
+      const text = raw.slice(0, 100_000);
+      return { kind: "text", name, text, truncated: raw.length > text.length };
     }
     return { kind: "other", name };
   });

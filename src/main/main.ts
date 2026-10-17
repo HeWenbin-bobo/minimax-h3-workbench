@@ -284,7 +284,9 @@ function createWindow(): BrowserWindow {
   // 因此：只把 https 链接交给系统浏览器（与 shell:openExternal 同一道协议限制），其余一律拒绝。
   window.webContents.setWindowOpenHandler(({ url }) => {
     try {
-      if (new URL(url).protocol === "https:") void shell.openExternal(url);
+      // 必须 catch 到链末：`shell.openExternal` 在系统没有注册 https 处理器时会 reject，
+      // 而这里没有调用方能接住 —— 裸 `void promise` 会变成未处理的 rejection。
+      if (new URL(url).protocol === "https:") void shell.openExternal(url).catch(() => undefined);
     } catch {
       // 非法 URL：什么都不做，等同于 deny。
     }

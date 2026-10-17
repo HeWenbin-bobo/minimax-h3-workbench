@@ -29,9 +29,18 @@ export class TaskStore {
         // 在读取边界修一次，比在每个下游各判一次便宜且不易漏。
         const prompt = typeof task.prompt === "string" ? task.prompt : "";
         const progress = Number.isFinite(task.progress) ? task.progress : 0;
-        if (prompt !== task.prompt || progress !== task.progress) {
+        // message 同理：任务卡片会 `task.message?.slice(0, 60)`——可选链只挡 null/undefined，
+        // 数字照样抛 "task.message.slice is not a function"。
+        const message = typeof task.message === "string" ? task.message : undefined;
+        // request.prompt 也会被重试路径 `prompt.trim()` 读取。
+        const normalizedRequest = task.request && typeof task.request.prompt === "string"
+          ? task.request
+          : typeof task.request === "object" && task.request
+            ? { ...task.request, prompt: "" }
+            : task.request;
+        if (prompt !== task.prompt || progress !== task.progress || message !== task.message || normalizedRequest !== task.request) {
           changed = true;
-          task = { ...task, prompt, progress };
+          task = { ...task, prompt, progress, message, request: normalizedRequest };
         }
         if (terminal.has(task.status)) return task;
         changed = true;

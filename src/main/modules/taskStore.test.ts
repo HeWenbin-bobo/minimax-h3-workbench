@@ -105,3 +105,26 @@ describe("TaskStore.load 字段类型归一", () => {
     expect(onDisk[0].prompt).toBe("");
   });
 });
+
+// message 也必须归一：任务卡片会 `task.message?.slice(0, 60)`，
+// 可选链只挡 null/undefined —— 数字照样抛 "task.message.slice is not a function"。
+describe("TaskStore.load message 归一", () => {
+  it("message 非字符串时归一为 undefined（不留数字/对象）", async () => {
+    await writeFile(taskFile(), JSON.stringify([makeTask({ message: 123 })]), "utf8");
+    const tasks = await new TaskStore().load();
+    expect(tasks[0].message).toBeUndefined();
+  });
+
+  it("message 为正常字符串时原样保留", async () => {
+    await writeFile(taskFile(), JSON.stringify([makeTask({ message: "生成完成" })]), "utf8");
+    const tasks = await new TaskStore().load();
+    expect(tasks[0].message).toBe("生成完成");
+  });
+
+  it("request.prompt 非字符串时归一为空串（重试路径会 trim）", async () => {
+    const badRequest = { ...makeTask().request, prompt: 123 };
+    await writeFile(taskFile(), JSON.stringify([makeTask({ request: badRequest })]), "utf8");
+    const tasks = await new TaskStore().load();
+    expect(tasks[0].request?.prompt).toBe("");
+  });
+});

@@ -42,6 +42,23 @@ export class TaskStore {
           changed = true;
           task = { ...task, prompt, progress, message, request: normalizedRequest };
         }
+        // `parentId` 缺失时**每个**任务的 parentId 都是 undefined，
+        // 而删除/恢复/分类都按 parentId 找"同组"——删一条会把所有缺 parentId 的
+        // 无辜任务一起删掉（实测：`filter(t => t.parentId === target.parentId)` 命中全部）。
+        // 缺失时回落到自身 id，保证"组"至少是它自己。
+        if (typeof task.parentId !== "string" || !task.parentId) {
+          changed = true;
+          task = { ...task, parentId: task.id };
+        }
+        // 排序依据：`list()` / `listDeleted()` 都调 `createdAt.localeCompare`，
+        // 非字符串会抛 "b.createdAt.localeCompare is not a function"，整个任务列表打不开。
+        // `updatedAt` 同样参与卡片展示与回收站保留期计算。
+        const createdAt = typeof task.createdAt === "string" && task.createdAt ? task.createdAt : new Date(0).toISOString();
+        const updatedAt = typeof task.updatedAt === "string" && task.updatedAt ? task.updatedAt : createdAt;
+        if (createdAt !== task.createdAt || updatedAt !== task.updatedAt) {
+          changed = true;
+          task = { ...task, createdAt, updatedAt };
+        }
         if (terminal.has(task.status)) return task;
         changed = true;
         return {

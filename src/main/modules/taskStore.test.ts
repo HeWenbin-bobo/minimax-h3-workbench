@@ -128,3 +128,38 @@ describe("TaskStore.load message 归一", () => {
     expect(tasks[0].request?.prompt).toBe("");
   });
 });
+
+// parentId 缺失会让"整组"语义把所有缺 parentId 的无辜任务一起删掉；
+// createdAt 非字符串会让 list() 的排序直接抛错（整个任务列表打不开）。
+describe("TaskStore.load parentId / 时间字段归一", () => {
+  it("parentId 缺失时回落到自身 id（不把无关任务串成一组）", async () => {
+    await writeFile(taskFile(), JSON.stringify([
+      makeTask({ id: "a", parentId: undefined }),
+      makeTask({ id: "b", parentId: undefined })
+    ]), "utf8");
+    const tasks = await new TaskStore().load();
+    const byId = new Map(tasks.map((task) => [task.id, task]));
+    expect(byId.get("a")?.parentId).toBe("a");
+    expect(byId.get("b")?.parentId).toBe("b");
+    expect(byId.get("a")?.parentId).not.toBe(byId.get("b")?.parentId);
+  });
+
+  it("createdAt 非字符串时归一为可比较的时间串（list 排序不抛错）", async () => {
+    await writeFile(taskFile(), JSON.stringify([
+      makeTask({ id: "a", createdAt: 123 }),
+      makeTask({ id: "b", createdAt: "2026-10-01T00:00:00.000Z" })
+    ]), "utf8");
+    const tasks = await new TaskStore().load();
+    for (const task of tasks) expect(typeof task.createdAt).toBe("string");
+    // 复刻 list() 的排序，确认不抛
+    expect(() => [...tasks].sort((x, y) => y.createdAt.localeCompare(x.createdAt))).not.toThrow();
+  });
+
+  it("updatedAt 缺失时回落到 createdAt", async () => {
+    await writeFile(taskFile(), JSON.stringify([
+      makeTask({ id: "a", updatedAt: undefined, createdAt: "2026-10-02T03:04:05.000Z" })
+    ]), "utf8");
+    const tasks = await new TaskStore().load();
+    expect(tasks[0].updatedAt).toBe("2026-10-02T03:04:05.000Z");
+  });
+});

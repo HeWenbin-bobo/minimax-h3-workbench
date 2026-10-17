@@ -56,6 +56,7 @@ import {
 import { buildCompactedHistory, summarizeHistory } from "./modules/compaction";
 import { withPlanMode } from "../shared/planMode";
 import { contextWindowFor } from "../shared/modelWindows";
+import { sliceSafe } from "../shared/text";
 
 /**
  * 每个会话的上下文预算状态（按 sessionId 隔离，对齐 Codex 的 per-thread window）。
@@ -872,7 +873,9 @@ function registerIpc(
           if (!text) {
             return `已打开该网页，但页面上没有可提取的正文（可能是纯图片/画布/PDF 页面）。可以改用 web_search 搜索相关信息，或换一个以文字为主的链接。`;
           }
-          return text.length > 80_000 ? `${text.slice(0, 80_000)}\n\n（页面过长已截断）` : text;
+          // 用 sliceSafe：裸 slice 会切开 emoji 的代理对（实测 "a😀" 重复时切在 80000
+          // 正好落在高代理项上），留下一个渲染成 � 的坏字符并回传给模型。
+          return text.length > 80_000 ? `${sliceSafe(text, 80_000)}\n\n（页面过长已截断）` : text;
         },
         // create_file（文件产物工具）：模型对工具调用的信任远高于文字约定（实测：只靠提示词约定
         // 围栏代码块时模型会自我怀疑"没有文件写入工具"而道歉）。落盘直接复用 artifact:save 的
@@ -1093,7 +1096,8 @@ function registerIpc(
       const raw = await readFile(filePath, "utf8");
       // 截断必须**如实上报**：原实现静默 `.slice(0, 100_000)`，用户以为整份文件都发给了模型，
       // 模型也只看到前一段——文件更长时两边都不知道（违反「出错/取舍必须让人看见」）。
-      const text = raw.slice(0, 100_000);
+      // 同样用 sliceSafe：这段正文会发回模型，不能留孤立代理项。
+      const text = sliceSafe(raw, 100_000);
       return { kind: "text", name, text, truncated: raw.length > text.length };
     }
     return { kind: "other", name };

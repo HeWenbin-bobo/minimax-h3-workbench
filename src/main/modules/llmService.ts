@@ -660,7 +660,15 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
 
 // 解析 SSE 流：按行拆 data: 载荷，提取 choices[0].delta.content；残行跨 chunk 缓存。
 // 返回是否收到过任何内容——零内容时调用方报错（空回复检测）。
-export async function consumeSse(body: ReadableStream<Uint8Array>, send: ChunkSender): Promise<boolean> {
+//
+// **必须带空闲超时**：`reader.read()` 在上游卡住（连接半开、网关挂起、模型停在那不吐字）
+// 时会永远不返回。智能体路径（chatAgent）有 `timeout.chunkMs` 兜着，普通对话这条没有——
+// 用户看到的是光标一直闪、点「停止」前一秒和十秒都没区别。120 秒沿用智能体的分块间隔标准。
+export async function consumeSse(
+  body: ReadableStream<Uint8Array>,
+  send: ChunkSender,
+  idleTimeoutMs = 120_000
+): Promise<boolean> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -688,7 +696,22 @@ export async function consumeSse(body: ReadableStream<Uint8Array>, send: ChunkSe
   };
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      // 给每次读取加空闲超时：`reader.read()` 在上游卡住时永不返回。
+      // 超时后主动 cancel 流并抛中文错误，让调用方按"连接中断"处理并释放 busy。
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const idle = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`服务商超过 ${Math.round(idleTimeoutMs / 1000)} 秒没有继续返回内容，连接可能已中断。`)),
+          idleTimeoutMs
+        );
+      });
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await Promise.race([reader.read(), idle]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      const { done, value } = chunk;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");

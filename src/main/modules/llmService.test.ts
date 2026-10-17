@@ -262,3 +262,27 @@ describe("buildPayload 搜索空结果的告知", () => {
     expect(content).not.toContain("未返回任何结果");
   });
 });
+
+// 上游半开/卡住时 `reader.read()` 永不返回。智能体路径有 timeout.chunkMs 兜着，
+// 普通对话这条没有 → 光标一直闪、点停止前毫无反馈。这里锁住空闲超时行为。
+describe("consumeSse 空闲超时", () => {
+  it("上游迟迟不吐数据时按超时抛中文错误", async () => {
+    const stuck = new ReadableStream<Uint8Array>({
+      start() { /* 永不 enqueue、也永不 close：模拟连接半开 */ }
+    });
+    const error = await consumeSse(stuck, () => {}, 50).catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("没有继续返回内容");
+  });
+
+  it("正常结束的流不受超时影响", async () => {
+    const received: string[] = [];
+    const ok = await consumeSse(
+      streamOf([`data: ${JSON.stringify({ choices: [{ delta: { content: "好" } }] })}\n\n`, "data: [DONE]\n\n"]),
+      (event) => received.push(event.delta),
+      5_000
+    );
+    expect(ok).toBe(true);
+    expect(received).toEqual(["好"]);
+  });
+});

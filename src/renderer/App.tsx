@@ -614,11 +614,15 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 上下文占用：分母是「模型窗口 × 80%」= 压缩触发点。按当前会话的历史轮询（主进程持有记账状态）。
   const [contextStatus, setContextStatus] = useState<ContextStatus>();
   const [compacting, setCompacting] = useState(false);
+  // 轮询闭包必须读**最新**历史：effect 只依赖消息**条数**，而流式期间条数不变、内容在涨。
+  // 若闭包捕获旧的 active，回复结束后 chip 仍显示开头的占用（实测：真实 59% 时 chip 停在 0%）。
+  const threadRef = useRef<ChatMessage[]>([]);
+  threadRef.current = active ? active.messages.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })) : [];
   useEffect(() => {
     if (!activeId) return;
     let cancelled = false;
     const probe = () => {
-      const history = activeThreadMessages();
+      const history = threadRef.current;
       if (!history.length) return;
       void window.h3.getContextStatus(history, activeId).then((response) => { if (!cancelled) setContextStatus(response.data); }).catch(() => {});
     };
@@ -626,7 +630,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     // 20 秒轮询：占用是低频变化的量，没必要每渲染一次都问主进程。
     const timer = setInterval(probe, 20_000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [activeId, active?.messages.length]);
+  // 回复结束（generating 由 true→false）时补一次探测：流式期间条数没变，effect 不会重跑，
+  // 不补的话 chip 要等最多 20 秒才追上真实占用。
+  }, [activeId, generating]);
 
   // 落盘上限 50：内存态一并裁剪，否则 UI 显示得出来、重启后却凭空少几个（用户可感知的静默丢失）。
   // 按"最近使用"裁剪，且绝不丢弃正在生成回复的会话——否则一段正在跑的对话会被静默砍掉。

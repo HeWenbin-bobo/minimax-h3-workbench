@@ -8,6 +8,7 @@
  * `webContents.debugger`（Electron 暴露的原始 CDP），无需新增依赖。
  */
 import { BrowserWindow, session } from "electron";
+import { assertPublicHttpUrl } from "../backends/resultUrl";
 
 // 专用分区：渲染搜索页不与应用主窗口共享 Cookie/存储，避免互相污染。
 const PARTITION = "persist:h3-browser-fetch";
@@ -69,6 +70,8 @@ async function renderOnce(url: string, timeoutMs: number): Promise<string> {
         clearTimeout(timer);
         win.webContents.removeListener("did-finish-load", onLoad);
         win.webContents.removeListener("did-fail-load", onFail);
+        win.webContents.removeListener("will-redirect", onRedirect);
+        win.webContents.removeListener("will-navigate", onNavigate);
         error ? reject(error) : resolve();
       };
       const onLoad = () => done();
@@ -80,8 +83,33 @@ async function renderOnce(url: string, timeoutMs: number): Promise<string> {
       // 之后真·主框架失败就漏判了。done() 里统一 removeListener。
       const onFail = (_event: unknown, code: number, description: string, _url: string, isMainFrame: boolean) =>
         isMainFrame ? done(new Error(`浏览器加载失败：${description}（${code}）`)) : undefined;
+      /**
+       * 重定向/后续导航守卫（SSRF 的第二跳）。
+       *
+       * `assertPublicHttpUrl` 只校验**首个** URL，而 Chromium 会自动跟随 3xx。
+       * 实测（probe openpage-redirect-ssrf）：公网入口 302 到 `http://127.0.0.1:<port>/object_info`
+       * 后，内网内容被完整读回。搜索抓取（Bing/搜狗）虽然目标是固定的公网域名，
+       * 但结果页本身也可能被劫持后跳内网，所以这道闸门对两条链路都必要。
+       */
+      const guardNavigation = (target: string): boolean => {
+        try {
+          assertPublicHttpUrl(target);
+          return true;
+        } catch (error) {
+          done(error instanceof Error ? error : new Error("该地址指向内网，已拒绝访问。"));
+          return false;
+        }
+      };
+      const onRedirect = (event: { preventDefault: () => void }, target: string) => {
+        if (!guardNavigation(target)) event.preventDefault();
+      };
+      const onNavigate = (event: { preventDefault: () => void }, target: string) => {
+        if (!guardNavigation(target)) event.preventDefault();
+      };
       win.webContents.once("did-finish-load", onLoad);
       win.webContents.on("did-fail-load", onFail);
+      win.webContents.on("will-redirect", onRedirect);
+      win.webContents.on("will-navigate", onNavigate);
       // 失败会走 did-fail-load，这里吞掉 loadURL 自身的 rejection，避免未处理拒绝告警。
       void win.loadURL(url).catch(() => undefined);
     });

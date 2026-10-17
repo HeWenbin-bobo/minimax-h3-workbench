@@ -814,8 +814,23 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
       // 非字符串（手改、旧版本写脏）会抛 "text.trim is not a function" 这类英文技术错误，
       // 用户完全无法对症。在这里兜住，比在每个下游都判类型便宜得多。
       const content = typeof rest.content === "string" ? rest.content : String(rest.content ?? "");
-      const normalized = rest.taskGroups ?? (rest.taskIds?.length ? [rest.taskIds] : undefined);
-      const migrated = { ...rest, content, taskGroups: normalized, taskIds: undefined };
+      // 数组字段必须真的是数组：渲染端对它们一律直接 `.map()` / `.filter()`，
+      // 非数组（手改、旧版本写脏、或未来某处写入 bug）会抛
+      // "xxx.map is not a function" —— 整个会话列表打不开。
+      const asArray = <T,>(value: unknown): T[] | undefined =>
+        Array.isArray(value) ? (value as T[]) : undefined;
+      const normalized = asArray<string[]>(rest.taskGroups)?.filter((group) => Array.isArray(group) && group.length > 0)?.map((group) => group.filter((id) => typeof id === "string"))
+        ?? (rest.taskIds?.length ? [rest.taskIds] : undefined);
+      const migrated = {
+        ...rest,
+        content,
+        taskGroups: normalized,
+        taskIds: undefined,
+        // images 也直接进 <img src> 与发给模型的多模态载荷，非字符串项要剔掉。
+        images: asArray<string>(rest.images)?.filter((url) => typeof url === "string"),
+        planSteps: asArray<PlanStep>(rest.planSteps),
+        artifacts: asArray<NonNullable<PlaygroundMessage["artifacts"]>[number]>(rest.artifacts)
+      };
       return migrated.streaming ? { ...migrated, streaming: false, toolSteps: undefined } : migrated;
     })
   }));

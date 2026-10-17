@@ -244,3 +244,53 @@ describe("normalizeStoredSessions deletedAt 归一", () => {
     expect(result[0].deletedAt).toBe(iso);
   });
 });
+
+// 消息上的数组字段（images / taskGroups / planSteps / artifacts）在渲染端一律直接
+// `.map()` / `.filter()`。非数组会让整个会话列表打不开（"xxx.map is not a function"）。
+describe("normalizeStoredSessions 数组字段归一", () => {
+  it("images 非数组时丢弃，不留给 <img src> 与多模态载荷", () => {
+    const result = normalizeStoredSessions([{ id: "a", messages: [{ role: "user", content: "x", images: "a.jpg" }] }]);
+    expect(result[0].messages[0].images).toBeUndefined();
+  });
+
+  it("images 数组里的非字符串项被剔除", () => {
+    const result = normalizeStoredSessions([{ id: "a", messages: [{ role: "user", content: "x", images: ["a.jpg", 42, null] }] }]);
+    expect(result[0].messages[0].images).toEqual(["a.jpg"]);
+  });
+
+  it("taskGroups 非数组时丢弃（旧的 taskIds 迁移仍生效）", () => {
+    const bad = normalizeStoredSessions([{ id: "a", messages: [{ role: "assistant", content: "x", taskGroups: "g1" }] }]);
+    expect(bad[0].messages[0].taskGroups).toBeUndefined();
+    const migrated = normalizeStoredSessions([{ id: "a", messages: [{ role: "assistant", content: "x", taskIds: ["t1"] }] }]);
+    expect(migrated[0].messages[0].taskGroups).toEqual([["t1"]]);
+  });
+
+  it("taskGroups 里混入非数组/空组会被过滤", () => {
+    const result = normalizeStoredSessions([{ id: "a", messages: [{ role: "assistant", content: "x", taskGroups: [["t1"], "bad", [], [2, "t2"]] }] }]);
+    expect(result[0].messages[0].taskGroups).toEqual([["t1"], ["t2"]]);
+  });
+
+  it("planSteps / artifacts 非数组时丢弃", () => {
+    const result = normalizeStoredSessions([{ id: "a", messages: [{ role: "assistant", content: "x", planSteps: "p", artifacts: {} }] }]);
+    expect(result[0].messages[0].planSteps).toBeUndefined();
+    expect(result[0].messages[0].artifacts).toBeUndefined();
+  });
+
+  it("正常数组原样保留", () => {
+    const result = normalizeStoredSessions([{
+      id: "a",
+      messages: [{
+        role: "assistant", content: "x",
+        images: ["a.jpg"],
+        taskGroups: [["t1"]],
+        planSteps: [{ step: "s", status: "completed" }],
+        artifacts: [{ name: "a.md", path: "/p/a.md", size: 1, kind: "doc" }]
+      }]
+    }]);
+    const msg = result[0].messages[0];
+    expect(msg.images).toEqual(["a.jpg"]);
+    expect(msg.taskGroups).toEqual([["t1"]]);
+    expect(msg.planSteps).toHaveLength(1);
+    expect(msg.artifacts).toHaveLength(1);
+  });
+});

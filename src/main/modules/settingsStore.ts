@@ -60,28 +60,35 @@ export class SettingsStore {
   }
 
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
-    const current = await this.get();
-    // 嵌套对象一律**局部合并**：patch 只带 llm.model 时，不能把 llm.baseUrl/provider/systemPrompt
-    // 打回默认值。此前只对 ssh 做了合并，llm/searchApi 是整体替换——同样的坑（实测
-    // probe-settings-partial 复现：只更新 llm.model → baseUrl 被清成官方默认）。
-    const next = {
-      ...current,
-      ...patch,
-      llm: patch.llm ? { ...current.llm, ...patch.llm } : current.llm,
-      searchApi: patch.searchApi ? { ...current.searchApi, ...patch.searchApi } : current.searchApi,
-      ssh: patch.ssh ? { ...current.ssh, ...patch.ssh } : current.ssh
-    };
-    await this.atomicWrite(this.filePath, next);
-    // 回读而非直接返回 next：get() 会做归一化（非法 defaultBackend 落到 local、未知字段被丢弃），
-    // 直接返回 next 会让"保存后立刻读回"拿到与磁盘不同的值，渲染端据此渲染就会用到脏状态。
-    return this.get();
+    // 读-改-写必须整体串行：并发时会互相覆盖 patch，且两路同时写 settings.json.tmp
+    // 会让后完成的 rename 报 ENOENT（实测 20/20 轮都失败）。
+    return this.serialize(async () => {
+      const current = await this.get();
+      // 嵌套对象一律**局部合并**：patch 只带 llm.model 时，不能把 llm.baseUrl/provider/systemPrompt
+      // 打回默认值。此前只对 ssh 做了合并，llm/searchApi 是整体替换——同样的坑（实测
+      // probe-settings-partial 复现：只更新 llm.model → baseUrl 被清成官方默认）。
+      const next = {
+        ...current,
+        ...patch,
+        llm: patch.llm ? { ...current.llm, ...patch.llm } : current.llm,
+        searchApi: patch.searchApi ? { ...current.searchApi, ...patch.searchApi } : current.searchApi,
+        ssh: patch.ssh ? { ...current.ssh, ...patch.ssh } : current.ssh
+      };
+      await this.atomicWrite(this.filePath, next);
+      // 回读而非直接返回 next：get() 会做归一化（非法 defaultBackend 落到 local、未知字段被丢弃），
+      // 直接返回 next 会让"保存后立刻读回"拿到与磁盘不同的值，渲染端据此渲染就会用到脏状态。
+      return this.get();
+    });
   }
 
   async setSecret(name: SecretName, value: string): Promise<void> {
     if (!safeStorage.isEncryptionAvailable()) throw new Error("系统安全存储不可用，拒绝保存明文密钥。 ");
-    const secrets = await this.readSecrets();
-    secrets[name] = safeStorage.encryptString(value).toString("base64");
-    await this.atomicWrite(this.secretPath, secrets);
+    // 与 update 共用同一条队列：密钥写入同样是读-改-写，并发会丢键/写坏 tmp。
+    return this.serialize(async () => {
+      const secrets = await this.readSecrets();
+      secrets[name] = safeStorage.encryptString(value).toString("base64");
+      await this.atomicWrite(this.secretPath, secrets);
+    });
   }
 
   async getSecret(name: SecretName): Promise<string> {
@@ -102,6 +109,22 @@ export class SettingsStore {
     } catch {
       return {};
     }
+  }
+
+  /**
+   * 写入串行化（与 TaskStore.save 同一套做法）。
+   *
+   * 不串行会**真实损坏**：两次并发 updateSettings 同时写同一个 `settings.json.tmp`，
+   * 先完成的那次把它 rename 走，后一次 rename 就报 ENOENT（实测 20/20 轮都失败）。
+   * 而且 update() 是「读-改-写」，并发时后写者会覆盖前者的 patch（丢失更新）。
+   * 因此串行化覆盖**整个事务**，而不只是文件写入那一步。
+   */
+  private queue: Promise<unknown> = Promise.resolve();
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(operation, operation);
+    // 队列不能被单次失败污染，否则后续所有写入连坐失败。
+    this.queue = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   private async atomicWrite(filePath: string, data: unknown): Promise<void> {

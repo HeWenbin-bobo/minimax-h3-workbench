@@ -92,7 +92,11 @@ export class LlmService {
           content?: string;
           base_resp?: { status_msg?: string };
         };
-        const text = full.choices?.[0]?.message?.content ?? full.choices?.[0]?.delta?.content ?? full.choices?.[0]?.text ?? full.content;
+        // **不能用 `??` 链**：`??` 只在 null/undefined 时回退，空串是"有值"。
+        // 上游常见形态是 `choices[0].message.content` 为空串、真正内容在 `delta.content`
+        // 或顶层 `content` 里——用 `??` 会选中空串，然后把"明明有内容"报成
+        // "服务商未返回内容"。这里取第一个**非空**字符串。
+        const text = firstNonEmpty(full.choices?.[0]?.message?.content, full.choices?.[0]?.delta?.content, full.choices?.[0]?.text, full.content);
         if (text) send({ seq: 1, delta: text });
         else throw new Error(`服务商未返回内容：${full.base_resp?.status_msg || JSON.stringify(full).slice(0, 200)}`);
       }
@@ -134,7 +138,8 @@ export class LlmService {
         choices?: Array<{ message?: { content?: string }; text?: string }>;
         content?: string;
       };
-      return full.choices?.[0]?.message?.content ?? full.choices?.[0]?.text ?? full.content ?? undefined;
+      // 与流式空回复分支同一理由：`??` 不会跳过空串，取第一个非空值。
+      return firstNonEmpty(full.choices?.[0]?.message?.content, full.choices?.[0]?.text, full.content);
     } catch (error) {
       // 用户取消必须**向上抛**：调用方按 `AbortError` 识别取消并静默收尾。
       // 若在这里吞成 `undefined`，上层会抛"服务商未返回任何内容"——用户明明
@@ -242,6 +247,20 @@ export function resolveChatPath(baseUrl: string): string {
   try { host = new URL(baseUrl).hostname.toLowerCase(); } catch { host = ""; }
   const isOfficialMinimax = host === "api.minimax.io" || host === "api.minimaxi.com";
   return isOfficialMinimax ? "/text/chatcompletion_v2" : "/chat/completions";
+}
+
+/**
+ * 取第一个**非空**字符串。
+ *
+ * 为什么不能用 `a ?? b ?? c`：`??` 只跳过 null/undefined，**空串是有值**。
+ * 上游常见形态是 `choices[0].message.content === ""`、真正内容在 `delta.content`
+ * 或顶层 `content` 里；用 `??` 会选中空串，把"明明有内容"报成"服务商未返回内容"。
+ */
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
 }
 
 // ---------- 智能体模式（Vercel AI SDK 工具循环，Codex/Claude Code 形态） ----------

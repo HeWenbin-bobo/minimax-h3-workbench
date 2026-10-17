@@ -265,6 +265,41 @@ describe("buildPayload 搜索空结果的告知", () => {
 
 // 上游半开/卡住时 `reader.read()` 永不返回。智能体路径有 timeout.chunkMs 兜着，
 // 普通对话这条没有 → 光标一直闪、点停止前毫无反馈。这里锁住空闲超时行为。
+describe("非流式响应体取内容（空串不能被当成有内容）", () => {
+  async function chatWith(body: unknown): Promise<string> {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } })
+    ));
+    const service = new LlmService({ baseUrl: "https://llm.test/v1", apiKey: "k", model: "m", systemPrompt: "" });
+    let received = "";
+    await service.chat([{ role: "user", content: "hi" }], false, (event) => { received += event.delta; });
+    vi.unstubAllGlobals();
+    return received;
+  }
+
+  // `??` 只跳过 null/undefined：`message.content` 为空串时会选中它，
+  // 于是明明 `text`/顶层 `content` 里有内容，却被报成"服务商未返回内容"。
+  it("message.content 为空串时回退到 choices[0].text", async () => {
+    await expect(chatWith({ choices: [{ message: { content: "" }, text: "来自 text" }] }))
+      .resolves.toBe("来自 text");
+  });
+
+  it("message.content 为空串时回退到顶层 content", async () => {
+    await expect(chatWith({ choices: [{ message: { content: "" } }], content: "顶层内容" }))
+      .resolves.toBe("顶层内容");
+  });
+
+  it("全部为空时仍按「未返回内容」报错（不静默）", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), { status: 200, headers: { "Content-Type": "application/json" } })
+    ));
+    const service = new LlmService({ baseUrl: "https://llm.test/v1", apiKey: "k", model: "m", systemPrompt: "" });
+    const error = await service.chat([{ role: "user", content: "hi" }], false, () => {}).catch((e: Error) => e);
+    vi.unstubAllGlobals();
+    expect((error as Error).message).toContain("未返回内容");
+  });
+});
+
 describe("consumeSse 空闲超时", () => {
   it("上游迟迟不吐数据时按超时抛中文错误", async () => {
     const stuck = new ReadableStream<Uint8Array>({

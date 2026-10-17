@@ -1,19 +1,19 @@
 ---
 name: playground-branch-status
-description: v0.2.1 已发布；2026-10-17 探索模式连续修复，137 笔未推送（HEAD 7f08304）
+description: v0.2.1 已发布；2026-10-18 探索模式连续修复，240 笔未推送（HEAD 3593c57）
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-17T23:05:00.000Z
+  modified: 2026-10-18T06:15:00.000Z
 ---
 
-**状态（2026-10-17 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 137 笔（未推送）。**
+**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 240 笔（未推送）。**
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
-- HEAD = `7f08304`。
-- 验证基线：`npm test` 399 项 / 34 文件全绿；typecheck、build 通过；
-  E2E test-01/02/03/05/06/07/08/10 逐个复跑通过。
+- HEAD = `3593c57`。
+- 验证基线：`npm test` **464 项 / 36 文件**全绿；typecheck、build 通过；
+  E2E test-01/02/03/04/05/06/07/08/09/10 逐个复跑通过。
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
 - HEAD = `9639b6c`。
@@ -124,4 +124,39 @@ E2E test-01..10 全过（逐个跑，避免 CDP 端口争用）。
   实际是云端转码延迟的真实契约（已加注释防止再被"修"）。
 - **自己引入的回归要立刻修并记录**：SSH `test()` 顺序、`setSessions` updater 副作用、
   capSessions 无限渲染循环——都在同一轮内发现并修正。
+
+## 2026-10-18 探索模式续（自 137 笔之后 → 240 笔）
+
+本轮反复验证的一条：**「校验器允许的形状」必须与「下游假设的形状」一致**。
+`validateRequest` 对 `baseSeed/width/height/ratio/resolution` 只做"给了才校验"，
+而 `submit()` 全部当必有 → `baseSeed` 缺省时 `undefined + 0 = NaN` 写进任务记录
+（卡片显示 "Seed NaN"）与 ComfyUI 的 `noise_seed`（JSON 里变 null）。
+修法是在 submit 内统一补齐并**同时**用于"写进任务"和"传给 runTask"，否则重试会读到未补值的旧对象。
+
+**本轮修复（按类）**：
+
+| 类型 | 具体问题 |
+|---|---|
+| **静默失败（旧路径）** | 工作台素材选择 `choose()` 丢弃 IPC Promise、不判 `ok`；预览面板 📁 用 `.catch(()=>undefined)` 吞掉白名单拒绝；`retry()` 绕过 `validateRequest`（未知 backend 静默落到 SSH，RB 非法时长真发云端并扣卡密） |
+| **取消失效** | `open_page` 漏传 `controller.signal`（停止后隐藏窗口仍跑满 45 秒）；`nonstreamChat` 读 `this.controller`，`abort()` 置空后补发请求仍会真的发出（最长 120 秒） |
+| **资源泄漏** | 三个后端 `delay()` 的 abort 监听器只在取消时移除（ComfyUI 30 分钟 ≈ 600 个、Cloud 轮询 360–720 个）→ 正常结束也 `removeEventListener` |
+| **崩溃风险** | SSH 握手失败后失败的 client 留在字段上、`once("error")` 已被消耗 → 迟到 error 无监听器，主进程退出 |
+| **参数契约** | `submit` 缺省字段补默认值（NaN seed / 缺 width·height / 非法 ratio·resolution）；`retry` 复用存档参数时补校验 |
+| **IPC 类型** | `artifact:save` 入参 null/非字符串 → 英文 TypeError；`settings:update` 传 null → 读属性时炸（对象展开 `...null` 合法，故容易漏） |
+| **文案与行为不符** | 游乐场「视频描述（留空则用聊天内容）」永远不生效（`videoRequest` 继承工作台的 demo 提示词） |
+| **跨会话串台** | `newSession()` 漏清 `planNext`（新对话首条消息会以计划模式发出） |
+| **产物识别** | `extractArtifact` 文档别名漏了 `md`——正是 `create_file` 的 kind 枚举值（同当年漏 `xlsx`） |
+| **判定口径** | `classifyEnvironment` 的 C 级门槛把"磁盘读不到(0)"当"空间不足"，把 24GB 显存机器判成 D 级 |
+| **瞬映下载** | 直链 `/video` 网络层抛错时直接跳出，`video_url` 回落永远轮不到（卡密已扣、成片拿不到） |
+
+**新增测试**：`extractArtifact` 围栏别名 5 条、`submit` 默认值 3 条、`retry` 校验 2 条、
+SSH 握手失败 1 条、RB 直链回落 1 条、磁盘未知判级 1 条。
+
+**探针自身的坑（不是产品问题，但会误导）**：
+- `.e2e/probe-preview.mjs` 用 `Object.keys(localStorage).find(k => k.includes("sessions"))`
+  取键——全新临时 userData 里还没有这个键，写入落到 `"undefined"`；且空会话清理是
+  400ms 节流后才写盘，400ms 就检查会读到清理前的旧值。改成固定键名 + 1200ms。
+- `.e2e/probe-l-ui-buttons.mjs` 假设"点一次取消 = 4 路全部取消"（实际是逐任务），
+  且用 `.cancel-button` 判"取消按钮消失"——该 class 也被「重试」按钮复用，要按文案判。
+
 

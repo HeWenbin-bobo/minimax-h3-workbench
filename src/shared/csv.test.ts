@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCsvRow } from "./csv";
+import { parseCsvRow, parseCsvRows } from "./csv";
 
 describe("parseCsvRow", () => {
   it("无引号：按逗号分隔", () => {
@@ -29,5 +29,34 @@ describe("parseCsvRow", () => {
 
   it("字段两侧空白被 trim", () => {
     expect(parseCsvRow("  a , b  ")).toEqual(["a", "b"]);
+  });
+});
+
+// 引号内的换行不是行尾（SheetJS 对含换行的字段会加引号跨行输出）。
+describe("parseCsvRows / splitCsvLines 跨行字段", () => {
+  it("含换行的单元格不被劈成两行", () => {
+    expect(parseCsvRows('A,B\n"多行\n内容",x\nC,D')).toEqual([
+      ["A", "B"],
+      ["多行\n内容", "x"],
+      ["C", "D"]
+    ]);
+  });
+
+  it("CRLF 换行与引号内 CRLF 都正确处理", () => {
+    expect(parseCsvRows('A,B\r\n"多\n行",x\r\n')).toEqual([
+      ["A", "B"],
+      ["多\n行", "x"]
+    ]);
+  });
+
+  it("引号内的 \"\" 转义不破坏切行", () => {
+    expect(parseCsvRows('a\n"say ""hi""\nnow",b')).toEqual([
+      ["a"],
+      ['say "hi"\nnow', "b"]
+    ]);
+  });
+
+  it("空行被忽略", () => {
+    expect(parseCsvRows("A,B\n\n\n1,2\n")).toEqual([["A", "B"], ["1", "2"]]);
   });
 });

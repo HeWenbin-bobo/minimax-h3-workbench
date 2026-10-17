@@ -36,7 +36,7 @@ import { normalizeHistory } from "./modules/historyNormalize";
 import { freezeTurn } from "./modules/stepSnapshot";
 import { CONTENT_FILTER_GUIDANCE, contentFilterNotice, isContentFilterError, retryDelayMs, retryNotice } from "./modules/errorRecovery";
 import { buildSystemPrompt } from "../shared/agentPrompt";
-import { parseCsvRow } from "../shared/csv";
+import { parseCsvRows as parseCsvRowsShared } from "../shared/csv";
 import {
   activeContextTokens,
   advanceWindow,
@@ -935,11 +935,12 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   return { name: safeName, path: filePath, size: Buffer.byteLength(content, "utf8") };
 }
 
-/** CSV 文本 → string[][]：按行切分再逐行用共享解析器切格（正确处理引号字段）。
- * 旧实现用 `line.split(/,|\t/)` 朴素切分——模型若对含逗号的字段加引号（合法 CSV），
- * 该字段会被错切成多列，xlsx 里的数据从落盘那一刻就是错的。 */
+/** CSV 文本 → string[][]：用共享解析器切行切格（正确处理引号字段与引号内的换行）。
+ * 旧实现先 `split("\n")` 再朴素切逗号，有两个坑：
+ * ① 含逗号的字段被错切成多列（xlsx 里的数据从落盘那一刻就是错的）；
+ * ② 含**换行**的字段（SheetJS 会加引号跨行输出）被劈成两行，后续列全部错位。 */
 function parseCsvRows(content: string): string[][] {
-  return content.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => parseCsvRow(line));
+  return parseCsvRowsShared(content);
 }
 
 /**

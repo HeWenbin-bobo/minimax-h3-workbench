@@ -44,6 +44,16 @@ export function App() {
   }, [theme]);
   const pickTheme = (choice: ThemeChoice) => { setTheme(choice); saveThemeChoice(choice); };
   const showError = (error: unknown) => setNotice({ text: describeError(error, "操作失败"), error: true });
+  // 提示条自动消失：此前只能手动点关闭，于是「已创建 4 个生成任务」这类
+  // 一次性反馈会**永久**悬在右下角遮挡内容，直到下一次提示把它顶掉。
+  // 错误给更长的时间（用户可能要读原因），普通提示 5 秒。
+  // 依赖 notice 对象本身：每次 setNotice 都是新对象，effect 重跑会清掉上一个计时器，
+  // 不会出现"旧提示的定时器把新提示清掉"的竞态。
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(undefined), notice.error ? 12_000 : 5_000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   useEffect(() => {
     Promise.all([window.h3.getSettings(), window.h3.getResourceLinks(), window.h3.listTasks()])

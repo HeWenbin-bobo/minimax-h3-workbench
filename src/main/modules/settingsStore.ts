@@ -146,6 +146,14 @@ export class SettingsStore {
   }
 
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
+    // 入参来自 IPC（`settings:update`），类型没有保证：
+    // - `patch` 为 null/undefined 时，下面 `patch.llm` 会抛英文
+    //   "Cannot read properties of null (reading 'llm')"（对象展开 `...null` 反而是合法的，
+    //   所以这个坑只在后面读属性时才炸，很容易漏）；
+    // - `patch` 是数组/字符串时展开会得到一堆无关索引键。
+    // 与其他 IPC 入口同一口径：在边界按"空 patch"处理并收敛成普通对象。
+    const incoming: Partial<AppSettings> =
+      patch && typeof patch === "object" && !Array.isArray(patch) ? patch : {};
     // 读-改-写必须整体串行：并发时会互相覆盖 patch，且两路同时写 settings.json.tmp
     // 会让后完成的 rename 报 ENOENT（实测 20/20 轮都失败）。
     return this.serialize(async () => {
@@ -155,14 +163,14 @@ export class SettingsStore {
       // probe-settings-partial 复现：只更新 llm.model → baseUrl 被清成官方默认）。
       const merged: Partial<AppSettings> = {
         ...current,
-        ...patch,
+        ...incoming,
         // `outputDirectoryHistory` **不接受渲染端写入**：它是删除白名单的信任根。
         // 渲染端（或从其内部发起的调用）若能任意追加目录，就等于拿到了"任意文件删除"的
         // 能力（先塞 `C:\`，再触发「彻底删除」）。该字段只由本方法在检测到目录变更时维护。
         outputDirectoryHistory: current.outputDirectoryHistory,
-        llm: patch.llm ? { ...current.llm, ...patch.llm } : current.llm,
-        searchApi: patch.searchApi ? { ...current.searchApi, ...patch.searchApi } : current.searchApi,
-        ssh: patch.ssh ? { ...current.ssh, ...patch.ssh } : current.ssh
+        llm: incoming.llm ? { ...current.llm, ...incoming.llm } : current.llm,
+        searchApi: incoming.searchApi ? { ...current.searchApi, ...incoming.searchApi } : current.searchApi,
+        ssh: incoming.ssh ? { ...current.ssh, ...incoming.ssh } : current.ssh
       };
       // 写盘前再归一化一次：patch 来自渲染端（可构造），脏类型不该落到磁盘上。
       // 只在 get() 里纠正的话，磁盘上会一直留着 `port: "abc"` 这类值。

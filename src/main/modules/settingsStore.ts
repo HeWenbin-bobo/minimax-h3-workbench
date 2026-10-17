@@ -6,6 +6,7 @@ import type { AppSettings, SecretName } from "../../shared/types";
 const defaultSettings = (): AppSettings => ({
   localComfyUrl: "http://127.0.0.1:8188",
   outputDirectory: path.join(app.getPath("videos"), "MiniMax-H3"),
+  outputDirectoryHistory: [],
   comfyuiRoot: "",
   rbBaseUrl: "https://rb.coolhs.com",
   defaultBackend: "local",
@@ -60,9 +61,20 @@ export function normalizeSettings(raw: Partial<AppSettings>, defaults: AppSettin
   const llm = obj(raw.llm);
   const searchApi = obj(raw.searchApi);
   const ssh = obj(raw.ssh);
+  // 历史输出目录：只保留字符串项、去重、剔除当前目录本身。
+  // 这是**删除白名单**的信任来源，绝不能从任务记录里取值（见 AppSettings 的注释）。
+  const currentOutput = str(raw.outputDirectory, defaults.outputDirectory);
+  const history = Array.isArray(raw.outputDirectoryHistory)
+    ? Array.from(new Set(
+        raw.outputDirectoryHistory
+          .filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()))
+          .map((entry) => entry.trim())
+      )).filter((entry) => entry !== currentOutput)
+    : [];
   return {
     localComfyUrl: str(raw.localComfyUrl, defaults.localComfyUrl),
-    outputDirectory: str(raw.outputDirectory, defaults.outputDirectory),
+    outputDirectory: currentOutput,
+    outputDirectoryHistory: history,
     comfyuiRoot: maybeStr(raw.comfyuiRoot, defaults.comfyuiRoot),
     rbBaseUrl: str(raw.rbBaseUrl, defaults.rbBaseUrl),
     defaultBackend,
@@ -141,6 +153,15 @@ export class SettingsStore {
       // 写盘前再归一化一次：patch 来自渲染端（可构造），脏类型不该落到磁盘上。
       // 只在 get() 里纠正的话，磁盘上会一直留着 `port: "abc"` 这类值。
       const next = normalizeSettings(merged, defaultSettings());
+      // 改过输出目录时把旧目录记进历史：彻底删除/过期清理要靠它才敢删旧目录里的成片。
+      // **只记录用户主动配置过的目录**——这是删除白名单唯一的信任来源，
+      // 绝不能从任务记录取值（记录可被篡改，删除不可逆）。
+      if (current.outputDirectory && current.outputDirectory !== next.outputDirectory) {
+        next.outputDirectoryHistory = Array.from(new Set([
+          ...(next.outputDirectoryHistory ?? []),
+          current.outputDirectory
+        ])).filter((entry) => entry !== next.outputDirectory);
+      }
       await this.atomicWrite(this.filePath, next);
       // 回读而非直接返回 next：get() 会做归一化（非法 defaultBackend 落到 local、未知字段被丢弃），
       // 直接返回 next 会让"保存后立刻读回"拿到与磁盘不同的值，渲染端据此渲染就会用到脏状态。

@@ -20,6 +20,14 @@ export type TaskStatus =
 export interface AppSettings {
   localComfyUrl: string;
   outputDirectory: string;
+  /**
+   * 用户**自己配置过**的历史输出目录（由 settingsStore 自动维护，不由界面直接编辑）。
+   *
+   * 用途只有一个：删除历史结果文件时的白名单。改过输出目录后，旧目录里的成片
+   * 仍属于本应用写出，彻底删除时应当能清掉；但**不能**因此信任"任务记录里的任意路径"——
+   * 记录可被篡改，而删除不可逆。信任来源必须是用户显式配置过的目录。
+   */
+  outputDirectoryHistory?: string[];
   /** 本机 ComfyUI 根目录（可选）。设置后模型下载页按此目录检查 5 个 H3 模型文件是否就位。 */
   comfyuiRoot: string;
   /** 瞬映 RB（rb.coolhs.com 或兼容中转）的 API 根地址。 */

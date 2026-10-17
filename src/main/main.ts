@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
-import { readFile, stat, writeFile, unlink, mkdir, rm } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink, mkdir, rm, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -215,12 +215,8 @@ app.whenReady().then(async () => {
   // （用户改过输出目录后，历史视频留在旧目录——只认当前目录会留下永久孤儿文件）。
   void orchestrator.purgeExpired(async (filePath) => {
     const settings = await settingsStore.get();
-    const resolved = path.resolve(filePath);
-    const root = path.resolve(settings.outputDirectory);
-    const relative = path.relative(root, resolved);
-    const insideCurrent = Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
-    if (!insideCurrent && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) return;
-    await unlink(resolved).catch(() => undefined);
+    // 与 tasks:purge 同一套信任根与 realpath 校验（见 deleteRoots / unlinkIfInside）。
+    await unlinkIfInside(deleteRoots(settings), filePath);
   });
   registerIpc(settingsStore, adapters, orchestrator);
   mainWindow = createWindow();
@@ -522,17 +518,13 @@ function registerIpc(
   handle("tasks:listDeleted", () => orchestrator.listDeleted());
   handle("tasks:purge", async (_event, ids: string[]) => {
     const settings = await settingsStore.get();
-    // 删文件的白名单：当前输出目录 **或** 任务记录里记着的、由本应用写出的结果路径。
-    // 只认当前目录会让"改过输出目录"的用户留下孤儿视频——界面写着
-    // 「已彻底删除（含视频文件）」，实际文件还躺在旧目录里（静默失败）。
-    // 与 h3media / showItem 的放行口径保持一致（那里早就按任务记录放行历史结果）。
-    const root = path.resolve(settings.outputDirectory);
+    // 删文件的白名单：当前输出目录 **或** 用户自己配置过的历史输出目录。
+    // **不能**按"任务记录里的任意路径"放行：记录可能被篡改（含手改 tasks.json），
+    // 而删除不可逆——读白名单宽松一点最多是多读一个文件，删白名单宽松就是任意文件删除。
+    // 信任来源必须是用户显式配置过的目录（见 SettingsStore 对历史目录的维护）。
+    const roots = deleteRoots(settings);
     const safeDelete = async (filePath: string) => {
-      const resolved = path.resolve(filePath);
-      const relative = path.relative(root, resolved);
-      const insideCurrent = Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
-      if (!insideCurrent && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) return;
-      await unlink(resolved).catch(() => undefined);
+      await unlinkIfInside(roots, filePath);
     };
     return orchestrator.purgeTasks(Array.isArray(ids) ? ids : [], safeDelete);
   });
@@ -1076,8 +1068,15 @@ function registerIpc(
    * 目录名走 `sessionDirName()`——与落盘同一套规则，保证删的正是写进去的那个。
    */
   handle("artifact:purgeSession", async (_event, sessionId: string) => {
+    const id = String(sessionId || "");
+    // 顺带释放该会话的内存态：这三张表按 sessionId 建条目，
+    // 只有"改配置/换模型"才会整体清空。会话被删掉之后条目仍在 →
+    // 长期使用（反复新建/删除对话）会持续累积 LlmService 与快照对象。
+    sessionServices.delete(id);
+    sessionBudgets.delete(id);
+    sessionWorldState.delete(id);
     const root = path.join(app.getPath("userData"), "artifacts");
-    const target = path.join(root, sessionDirName(String(sessionId || "")));
+    const target = path.join(root, sessionDirName(id));
     // 再兜一层：resolve 后必须仍在 artifacts 根之下（规则若被改动，这里也不会越界）。
     const relative = path.relative(root, path.resolve(target));
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
@@ -1219,6 +1218,50 @@ function knownOutputPaths(orchestrator: GenerationOrchestrator): Set<string> {
 function normalizeForCompare(filePath: string): string {
   const resolved = path.resolve(filePath);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * 删除输出文件的信任根：**当前输出目录 + 用户自己配置过的历史输出目录**。
+ *
+ * 为什么不用 `knownOutputPaths()`（任务记录里的路径）：那份数据来自
+ * `tasks.json`，可以被手工改写；而删除是**不可逆**的。
+ * 读白名单放宽一点最多是多读一个文件，删白名单放宽就是任意文件删除。
+ * 所以信任来源只能是用户在设置里显式填过的目录。
+ */
+function deleteRoots(settings: AppSettings): string[] {
+  return Array.from(new Set([
+    settings.outputDirectory,
+    ...(settings.outputDirectoryHistory ?? [])
+  ].filter((value): value is string => Boolean(value)).map((value) => path.resolve(value))));
+}
+
+/**
+ * 只在信任根内删除文件。**删除前做 realpath 包含性校验**（安全审查要求）：
+ *
+ * - 两侧都解析真实路径：候选文件若是指向外部的软链，`realpath` 后就不在根内 → 拒绝
+ * - 根目录自身也解析：userData/输出目录可能被重定向到软链上
+ * - 用 `path.relative` 判包含，同时排除"恰好等于根"与绝对路径（跨盘）两种越界
+ * - 解析失败（文件不存在）直接跳过：本来就没有可删的东西
+ */
+async function unlinkIfInside(roots: string[], filePath: string): Promise<void> {
+  let targetReal: string;
+  try {
+    targetReal = await realpath(filePath);
+  } catch {
+    return; // 文件不存在 / 无法解析：不删
+  }
+  for (const root of roots) {
+    let rootReal: string;
+    try {
+      rootReal = await realpath(root);
+    } catch {
+      continue; // 该根目录不存在（用户删了旧目录）：跳过
+    }
+    const relative = path.relative(rootReal, targetReal);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    await unlink(targetReal).catch(() => undefined);
+    return;
+  }
 }
 
 /**

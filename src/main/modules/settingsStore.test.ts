@@ -6,6 +6,7 @@ import { normalizeSettings } from "./settingsStore";
 const defaults: AppSettings = {
   localComfyUrl: "http://127.0.0.1:8188",
   outputDirectory: "F:\\out",
+  outputDirectoryHistory: [],
   comfyuiRoot: "",
   rbBaseUrl: "https://rb.example.com",
   defaultBackend: "local",

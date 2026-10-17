@@ -55,16 +55,37 @@ export class SshTunnel {
     return { url: `http://127.0.0.1:${this.localPort}`, fingerprint: this.observedFingerprint };
   }
 
-  async exec(command: string): Promise<{ stdout: string; stderr: string }> {
+  /**
+   * 在远端执行一条命令。
+   *
+   * **必须带超时**：readyTimeout 只管握手，不管 exec；远端命令挂住（磁盘卡死、NFS 无响应、
+   * 命令等待输入）时 stream 永远不触发 close，Promise 永不落定，「测试连接」就一直转圈。
+   * 超时后 reject，让调用方走既有的「SSH 不可达」错误分支。
+   */
+  async exec(command: string, timeoutMs = 15_000): Promise<{ stdout: string; stderr: string }> {
     if (!this.client) throw new Error("SSH 尚未连接。 ");
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`SSH 远端命令超过 ${Math.round(timeoutMs / 1000)} 秒未返回。`));
+      }, timeoutMs);
+      const finish = (error?: Error, result?: { stdout: string; stderr: string }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(error);
+        else resolve(result!);
+      };
       this.client!.exec(command, (error, stream) => {
-        if (error) return reject(error);
+        if (error) return finish(error);
         let stdout = "";
         let stderr = "";
         stream.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
         stream.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-        stream.on("close", () => resolve({ stdout, stderr }));
+        stream.on("close", () => finish(undefined, { stdout, stderr }));
+        stream.on("error", (streamError: Error) => finish(streamError));
       });
     });
   }

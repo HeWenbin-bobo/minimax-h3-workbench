@@ -151,11 +151,27 @@ export class SshTunnel {
     this.close();
   }
 
+  /**
+   * 关闭隧道。
+   *
+   * 两个细节都必须守：
+   * ① **先清字段、再断开**。`client.end()` / `server.close()` 可能同步触发
+   *    `close`/`error` 事件 → 监听器调 `drop()` → 再进 `close()`；
+   *    若字段还在，就会重复 `end()`（重入），且有无限递归的风险。
+   * ② **直接调用 close() 时也要销毁已接受的连接**。`server.close()` 只是停止
+   *    接受新连接，已建立的 socket 会继续挂着——应用退出时这些连接不会自己消失。
+   *    `drop()` 走的是同一函数，两边行为因此一致。
+   */
   close(): void {
-    this.server?.close();
-    this.client?.end();
+    const server = this.server;
+    const client = this.client;
+    // 先摘掉字段：之后任何由 end/close 触发的回调都会看到"已关闭"并直接返回。
     this.server = undefined;
     this.client = undefined;
     this.localPort = undefined;
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
+    server?.close();
+    client?.end();
   }
 }

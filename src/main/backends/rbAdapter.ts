@@ -1,7 +1,8 @@
-import { readFile, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describeError } from "../../shared/errors";
 import { assertSafeResultUrl } from "./resultUrl";
+import { readUploadFile } from "./mediaFile";
 import type {
   BackendTestResult,
   GenerationAdapter,
@@ -153,11 +154,13 @@ export class RbAdapter implements GenerationAdapter {
   }
 
   private async uploadFile(filePath: string, kind: "image" | "video", signal?: AbortSignal): Promise<string> {
-    const bytes = await readFile(filePath);
     const extension = path.extname(filePath).toLowerCase();
     if (kind === "image" && ![".jpg", ".jpeg", ".png", ".webp"].includes(extension)) {
       throw new Error("瞬映 RB 参考图仅支持 JPEG/PNG/WebP。");
     }
+    // **先验大小再读**：这里是整份读进内存再塞 multipart，用户选了上 GB 的视频时
+    // 会直接把主进程撑爆（OOM 闪退，连错误都来不及提示）。
+    const bytes = await readUploadFile(filePath, kind === "image" ? "参考图" : "参考视频");
     const uploadPath = kind === "image" ? "/api/v1/uploads" : "/api/v1/uploads/video";
     const form = new FormData();
     // 图片端点用 files（多文件数组），视频端点用 file（单文件）。

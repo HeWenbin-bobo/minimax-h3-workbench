@@ -9,6 +9,7 @@ import type {
   TaskStatus
 } from "../../shared/types";
 import { describeError } from "../../shared/errors";
+import { readUploadFile } from "./mediaFile";
 import { inspectH3Readiness } from "./comfyReadiness";
 import { buildFl2vaWorkflow, buildRef2vaWorkflow, type ComfyPrompt, type UploadedMedia } from "./workflows";
 
@@ -153,7 +154,8 @@ export class ComfyAdapter implements GenerationAdapter {
   }
 
   private async upload(filePath: string, signal?: AbortSignal): Promise<UploadedMedia> {
-    const bytes = await BunlessFile.read(filePath);
+    // 先验大小再读：BunlessFile.read 会把整份文件读进内存，上 GB 的视频会撑爆主进程。
+    const bytes = await readUploadFile(filePath);
     const form = new FormData();
     form.append("image", new Blob([new Uint8Array(bytes)]), path.basename(filePath));
     form.append("type", "input");

@@ -1,8 +1,9 @@
-import { readFile, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describeError } from "../../shared/errors";
 import { estimateCloudCost } from "../../shared/capabilities";
 import { assertSafeResultUrl } from "./resultUrl";
+import { readUploadFile } from "./mediaFile";
 import type {
   BackendTestResult,
   GenerationAdapter,
@@ -244,8 +245,9 @@ async function dataUri(filePath: string): Promise<string> {
     ".webm": "video/webm",
     ".mkv": "video/x-matroska"
   };
-  const bytes = await readFile(filePath);
-  if (bytes.byteLength > 50 * 1024 * 1024) throw new Error("参考素材超过云 API 允许的 50MB，请改用公网 URL 或压缩文件。 ");
+  // 先验大小再读（与 RB / ComfyUI 同一套）：整份读进内存后才发现超限时，
+  // 大文件已经把内存压力扛完了。
+  const bytes = await readUploadFile(filePath);
   return `data:${mime[extension] || "application/octet-stream"};base64,${bytes.toString("base64")}`;
 }
 

@@ -650,7 +650,27 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
     setDraft({ ...draft, llm: { ...draft.llm, provider, ...(preset && provider !== "custom" ? { baseUrl: preset.baseUrl, model: preset.model } : { baseUrl: preset ? "" : draft.llm.baseUrl }) } });
     setLlmModels(undefined);
   };
-  async function save() { try { const saved = await must(window.h3.updateSettings(draft)); if (apiKey) await must(window.h3.setSecret("minimaxApiKey", apiKey)); if (sshPassword) await must(window.h3.setSecret("sshPassword", sshPassword)); if (rbCardCode) await must(window.h3.setSecret("rbCardCode", rbCardCode)); if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey)); if (searchKey) await must(window.h3.setSecret("searchApiKey", searchKey)); setSettings(saved); setApiKey(""); setSshPassword(""); setRbCardCode(""); setLlmKey(""); setSearchKey(""); onNotice("连接设置已安全保存"); } catch (e) { onError(e); } }
+  async function save() {
+    try {
+      const saved = await must(window.h3.updateSettings(draft));
+      // **设置一落盘就同步给父组件**：后面五步是逐个保存密钥，任何一步失败都会跳到 catch。
+      // 旧写法把 `setSettings(saved)` 放在最后，于是"设置已保存、某个密钥没存上"时
+      // 界面仍显示旧配置（与磁盘不一致），用户重开页面才发现其实已经存了。
+      // 与 pickRoot() 同一口径：存了什么就显示什么。
+      setSettings(saved);
+      if (apiKey) await must(window.h3.setSecret("minimaxApiKey", apiKey));
+      if (sshPassword) await must(window.h3.setSecret("sshPassword", sshPassword));
+      if (rbCardCode) await must(window.h3.setSecret("rbCardCode", rbCardCode));
+      if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey));
+      if (searchKey) await must(window.h3.setSecret("searchApiKey", searchKey));
+      // 密钥输入框只在**全部成功**后清空：中途失败时保留用户刚输入的内容，
+      // 否则他得重新贴一遍（而失败原因可能只是某个通道暂时不可用）。
+      setApiKey(""); setSshPassword(""); setRbCardCode(""); setLlmKey(""); setSearchKey("");
+      onNotice("连接设置已安全保存");
+    } catch (e) {
+      onError(e);
+    }
+  }
   async function test(kind: BackendKind) {
     setTesting(kind);
     // 同 detect()/update()：IPC reject 时 setTesting(undefined) 不执行 → 按钮永久卡在「测试中…」。

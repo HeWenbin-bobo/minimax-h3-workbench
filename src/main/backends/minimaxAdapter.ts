@@ -140,14 +140,33 @@ export class MiniMaxAdapter implements GenerationAdapter {
     let progress = 15;
     const startedAt = Date.now();
     const timeoutMs = 60 * 60 * 1_000; // 云端排队+生成上限 1 小时：防止任务永远转圈
+    // 与 RbAdapter 同一套容忍策略：云端任务一旦提交就**已计费**，轮询期的一次网络抖动
+    // 或网关 502/503/504 不该把任务判死——任务仍在云端跑，用户却看到"失败"，
+    // 钱花了、成片拿不到。只有连续失败到上限才认定服务不可用。
+    const MAX_CONSECUTIVE_ERRORS = 5;
+    let consecutiveErrors = 0;
     for (;;) {
       if (signal?.aborted) throw new DOMException("任务已取消", "AbortError");
       if (Date.now() - startedAt > timeoutMs) throw new Error("云端任务超过 1 小时未完成，已停止轮询。请到 MiniMax 控制台确认任务状态。");
-      const response = await fetch(`${this.baseUrl}/v2/query/video_generation/${encodeURIComponent(taskId)}`, {
-        headers: { Authorization: `Bearer ${this.options.apiKey}` },
-        signal: requestSignal(signal, 20_000)
-      });
-      const payload = (await response.json()) as {
+      let response: Response;
+      try {
+        response = await fetch(`${this.baseUrl}/v2/query/video_generation/${encodeURIComponent(taskId)}`, {
+          headers: { Authorization: `Bearer ${this.options.apiKey}` },
+          signal: requestSignal(signal, 20_000)
+        });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          throw new Error(`连续 ${consecutiveErrors} 次查询云端任务失败：${describeError(error, "网络异常")}任务可能仍在云端生成，请到 MiniMax 控制台确认。`);
+        }
+        onProgress("running", progress, `网络抖动，正在重试（第 ${consecutiveErrors} 次）`);
+        await delay(10_000, signal);
+        continue;
+      }
+      // 响应体可能不是 JSON（网关错误页）：`await response.json()` 会抛，
+      // 那会把"临时网关故障"升级成一条英文解析错误。
+      const payload = (await response.json().catch(() => ({}))) as {
         task?: {
           status?: string;
           content?: { url?: string };
@@ -156,7 +175,22 @@ export class MiniMaxAdapter implements GenerationAdapter {
         };
         error?: { message?: string };
       };
-      if (!response.ok) throw new Error(payload.error?.message || `查询失败：${response.status}`);
+      if (!response.ok) {
+        // 5xx / 429 属临时性（网关过载、限流），与原任务无关：继续轮询。
+        const transient = response.status >= 500 || response.status === 429;
+        if (transient) {
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            throw new Error(`连续 ${consecutiveErrors} 次查询云端任务失败（HTTP ${response.status}）${payload.error?.message ? `：${payload.error.message}` : ""}。任务可能仍在云端生成，请到 MiniMax 控制台确认。`);
+          }
+          onProgress("running", progress, `云端暂时不可用（HTTP ${response.status}），正在重试（第 ${consecutiveErrors} 次）`);
+          await delay(10_000, signal);
+          continue;
+        }
+        // 4xx（除 429）是真错误：鉴权失效、任务不存在等，重试没有意义。
+        throw new Error(payload.error?.message || `查询失败：${response.status}`);
+      }
+      consecutiveErrors = 0;
       // MiniMax 官方文档的成功态是 "Success"（首字母大写），不是 succeeded；比对前统一小写并收下常见写法。
       // 只认 succeeded 的话，生成已完成的任务永远匹配不上，界面会一直"正在生成"直到 1 小时超时。
       // （本机无 MiniMax API Key，未能真机验证；该改动只放宽匹配、不放宽下载条件，故不会误判未完成任务。）

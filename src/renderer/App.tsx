@@ -1231,6 +1231,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       if (!result.ok) {
         setGeneratingIds((all) => all.filter((id) => id !== sessionId));
         sendingRef.current.delete(sessionId);
+        // 计划轮次标记也要清：主进程 handler 抛错时**不会**推 llm:done，
+        // 那个负责清理的回调永远不会跑。留着的话下一轮会被误判成"计划轮"，
+        // 收尾时给普通回答也亮出「继续执行」按钮。
+        planTurnRef.current.delete(sessionId);
         setSessions((all) => patchLast(all, sessionId, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
       }
     } catch (error) {

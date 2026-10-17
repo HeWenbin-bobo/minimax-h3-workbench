@@ -1036,6 +1036,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
   // 切会话时回到"贴底"：新打开的会话应显示最新消息，而不是沿用上一个会话的滚动位置状态。
   useEffect(() => { stickToBottomRef.current = true; }, [activeId]);
+  // 切换会话时关掉产物预览：`preview` 存的是上一个会话的文件路径，
+  // 留着会让右侧面板继续显示别的会话的产物（用户以为那是当前会话生成的东西）。
+  useEffect(() => { setPreview(undefined); }, [activeId]);
   // 新会话创建完成后释放"正在建会话"哨兵（此时 active 已就绪，守卫由 sendingRef 接管）。
   useEffect(() => { if (activeId) creatingSessionRef.current = false; }, [activeId]);
   const onMessagesScroll = () => {

@@ -626,11 +626,16 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [previewWidth, setPreviewWidth] = useState(() => loadPreviewWidth() ?? Math.round(window.innerWidth * 0.35));
   const previewCalibrated = useRef(false);
   useEffect(() => {
-    // 有保存过的宽度就尊重用户选择，不再自动校准覆盖。
-    if (!preview || previewCalibrated.current || loadPreviewWidth() !== undefined) return;
-    previewCalibrated.current = true;
+    if (!preview) return;
+    // 记住的宽度必须在**当前**窗口下重新夹取：用户在大屏拖到 900px、换小窗口打开时，
+    // 直接沿用会把聊天列挤没（拖拽路径有夹取，恢复路径此前没有）。
     const mainWidth = document.querySelector(".pg-main")?.getBoundingClientRect().width ?? 0;
-    if (mainWidth > 700) setPreviewWidth(Math.round(mainWidth * 0.55));
+    const clamp = (value: number) => Math.round(Math.max(360, Math.min(value, Math.max(360, mainWidth - 30))));
+    const saved = loadPreviewWidth();
+    if (saved !== undefined) { setPreviewWidth(clamp(saved)); return; }
+    if (previewCalibrated.current) return;
+    previewCalibrated.current = true;
+    if (mainWidth > 700) setPreviewWidth(clamp(mainWidth * 0.55));
   }, [preview]);
   // 拖拽过程中只更新内存宽度；**落盘留到松手**。拖拽时 mousemove 每秒可达上百次，
   // 每次都同步写 localStorage 会造成明显卡顿（本修复初版就是这么写的，属自引入的性能回归）。

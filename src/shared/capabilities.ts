@@ -37,6 +37,10 @@ export function pickVolumeForOutput(volumes: VolumeInfo[], outputDirectory?: str
     if (!mount) return false;
     if (pathDir === mount) return true;
     if (!pathDir.startsWith(mount)) return false;
+    // 挂载点自身以分隔符结尾（Linux/macOS 的根 "/"、Windows 的 "C:\"）时，
+    // 前缀匹配已经落在边界上——再去看下一个字符会把 "/" 永远判为不匹配，
+    // 于多卷场景下把输出目录错配到别的卷（实测 probe-volume-root）。
+    if (/[\\/]$/.test(mount)) return true;
     const next = pathDir.charAt(mount.length);
     return next === "/" || next === "\\";
   };

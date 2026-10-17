@@ -344,6 +344,20 @@ function registerIpc(
     baseSeed: 1
   };
   const backendKindLabel = (kind: BackendKind) => kind === "local" ? "本机 ComfyUI" : kind === "ssh" ? "SSH 远程显卡" : kind === "rb" ? "瞬映 RB" : "MiniMax H3";
+  /**
+   * 按后端约束夹取时长（智能体工具用）。
+   *
+   * 工具 schema 写的是 4–15 秒，但 RB 的 reference/tail_frame 只收 4/6/8，
+   * 而 `validateRequest` 会直接拒绝其它值。智能体不传 preset（默认 reference），
+   * 所以模型给 10 秒时会**建不出任务**——工具报错后模型常常换个说法重试同一时长，
+   * 用户看到的是"一直失败"。
+   * 夹到最近的合法值（10 → 8）比直接失败有用得多，且返回文案会如实复述实际时长。
+   */
+  const clampDurationForBackend = (kind: BackendKind, raw: number): number => {
+    const value = Math.max(4, Math.min(15, Math.round(raw || 4)));
+    if (kind !== "rb") return value;
+    return [4, 6, 8].reduce((best, option) => (Math.abs(option - value) < Math.abs(best - value) ? option : best), 4);
+  };
   // 游乐场 LLM：按会话各建一个服务实例，互不干扰；流式分块经 llm:chunk 推送（带 sessionId），结束经 llm:done 推送。
   // 早期是单例 + 全局并发守卫，导致"一个会话在回复时其它会话完全不能发消息"；改为按会话隔离后天然支持并发。
   let llm: LlmService | undefined; // 共享实例：仅用于 llm:test / llm:models 这类无状态探测
@@ -792,7 +806,11 @@ function registerIpc(
             // 跟随用户当前默认后端；不写死（写死 rb 会让没配瞬映卡密的用户必然失败）。
             backend: turn.value.defaultBackend,
             prompt: params.prompt,
-            duration: Math.max(4, Math.min(15, Math.round(params.duration || 4))),
+            // 时长必须按**后端**约束夹取：工具 schema 允许 4–15 秒，但 RB 的
+            // reference/tail_frame 只收 4/6/8（validateRequest 会直接拒）。
+            // 不夹的话模型传 10 秒时任务根本建不出来，而工具报错后模型往往
+            // 换个说法重试同一个时长，用户看到的是"一直失败"。
+            duration: clampDurationForBackend(turn.value.defaultBackend, params.duration),
             count: Math.max(1, Math.min(4, Math.round(params.count || 1))),
             baseSeed: Math.floor(Math.random() * 1_000_000)
           };

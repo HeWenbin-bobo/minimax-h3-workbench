@@ -41,12 +41,21 @@ export function splitCsvLines(text: string): string[] {
   return lines.map((line) => line.trim()).filter(Boolean);
 }
 
-/** 整段 CSV → 二维数组（正确跨行、正确引号）。 */
+/** 整段 CSV/TSV → 二维数组（正确跨行、正确引号）。 */
 export function parseCsvRows(text: string): string[][] {
-  return splitCsvLines(text).map((line) => parseCsvRow(line));
+  // 分隔符按**内容**推断：含制表符就是 TSV，否则 CSV。
+  // 不能像旧实现那样把 `,` 和 `\t` 一起当分隔符——TSV 单元格里出现逗号
+  //（"上海,中国"）会被多切一列（实测 probe-tsv-comma）。
+  const delimiter = text.includes("\t") ? "\t" : ",";
+  return splitCsvLines(text).map((line) => parseCsvRow(line, delimiter));
 }
 
-export function parseCsvRow(line: string): string[] {
+/**
+ * 单行 CSV/TSV 解析：正确处理引号字段。
+ *
+ * @param delimiter 字段分隔符（默认逗号）。TSV 传制表符——此时行内逗号是普通字符。
+ */
+export function parseCsvRow(line: string, delimiter = ","): string[] {
   const out: string[] = [];
   let cur = "";
   let inQuotes = false;
@@ -62,7 +71,7 @@ export function parseCsvRow(line: string): string[] {
       continue;
     }
     if (ch === '"') { inQuotes = true; continue; }
-    if (ch === "," || ch === "\t") { out.push(cur.trim()); cur = ""; continue; }
+    if (ch === delimiter) { out.push(cur.trim()); cur = ""; continue; }
     cur += ch;
   }
   if (cur.length > 0 || out.length > 0) out.push(cur.trim());

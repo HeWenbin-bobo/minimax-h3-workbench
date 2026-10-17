@@ -6,8 +6,10 @@ describe("parseCsvRow", () => {
     expect(parseCsvRow("a,b,c")).toEqual(["a", "b", "c"]);
   });
 
-  it("无引号：按制表符分隔", () => {
-    expect(parseCsvRow("a\tb\tc")).toEqual(["a", "b", "c"]);
+  it("无引号：分隔符由 parseCsvRows 推断（TSV 传制表符）", () => {
+    expect(parseCsvRow("a\tb\tc", "\t")).toEqual(["a", "b", "c"]);
+    // 逗号是默认分隔符；制表符在 CSV 里是普通字符
+    expect(parseCsvRow("a\tb,c")).toEqual(["a\tb", "c"]);
   });
 
   it("引号包裹：含逗号字段不被切开", () => {

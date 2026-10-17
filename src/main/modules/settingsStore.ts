@@ -32,6 +32,67 @@ const defaultSettings = (): AppSettings => ({
   }
 });
 
+/**
+ * settings.json 的读取归一化。**纯函数**，导出以便单测（文件 IO 与 Electron 依赖留在 store 里）。
+ *
+ * 为什么每个字段都要类型校验，而不是 `raw.x || default`：
+ * settings.json 可能被手改、或被旧版本写进错误类型。实测 localComfyUrl=123 会一路传到
+ * ComfyAdapter，抛 "options.baseUrl.replace is not a function"，用户看到英文技术错误。
+ * 嵌套对象同理：只做浅合并的话 `llm.baseUrl: 123` / `ssh.port: "abc"` 会原样透出，
+ * 分别变成 LlmService 里的 replace 报错和 ssh 的 NaN 端口。
+ */
+export function normalizeSettings(raw: Partial<AppSettings>, defaults: AppSettings): AppSettings {
+  const defaultBackend = raw.defaultBackend === "ssh" || raw.defaultBackend === "minimax" || raw.defaultBackend === "rb" || raw.defaultBackend === "local"
+    ? raw.defaultBackend
+    : "local";
+  const str = (value: unknown, fallback: string): string =>
+    typeof value === "string" && value.trim() ? value : fallback;
+  // 允许空串的字段（comfyuiRoot 不填就是"未配置"）不能用 str 的 trim 判空。
+  const maybeStr = (value: unknown, fallback: string): string =>
+    typeof value === "string" ? value : fallback;
+  const num = (value: unknown, fallback: number, min: number, max: number): number => {
+    const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+    return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+  };
+  // 嵌套对象：非对象（null/数组/字符串）整体回落默认值，避免 {...null} 之类的半残状态。
+  const obj = (value: unknown): Record<string, unknown> =>
+    value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const llm = obj(raw.llm);
+  const searchApi = obj(raw.searchApi);
+  const ssh = obj(raw.ssh);
+  return {
+    localComfyUrl: str(raw.localComfyUrl, defaults.localComfyUrl),
+    outputDirectory: str(raw.outputDirectory, defaults.outputDirectory),
+    comfyuiRoot: maybeStr(raw.comfyuiRoot, defaults.comfyuiRoot),
+    rbBaseUrl: str(raw.rbBaseUrl, defaults.rbBaseUrl),
+    defaultBackend,
+    minimaxBaseUrl: str(raw.minimaxBaseUrl, defaults.minimaxBaseUrl),
+    llm: {
+      provider: str(llm.provider, defaults.llm.provider),
+      baseUrl: str(llm.baseUrl, defaults.llm.baseUrl),
+      model: str(llm.model, defaults.llm.model),
+      // 系统提示词允许为空（空 = 用内置默认）。
+      systemPrompt: maybeStr(llm.systemPrompt, defaults.llm.systemPrompt)
+    },
+    searchApi: {
+      // 空串有语义（未配置 → 回落免 key 抓取），不能用 str。
+      baseUrl: maybeStr(searchApi.baseUrl, defaults.searchApi.baseUrl)
+    },
+    ssh: {
+      name: str(ssh.name, defaults.ssh.name),
+      // 主机可以为空（未配置），但不能是数字。
+      host: maybeStr(ssh.host, defaults.ssh.host),
+      port: num(ssh.port, defaults.ssh.port, 1, 65_535),
+      username: str(ssh.username, defaults.ssh.username),
+      privateKeyPath: maybeStr(ssh.privateKeyPath, defaults.ssh.privateKeyPath),
+      hostFingerprint: maybeStr(ssh.hostFingerprint, defaults.ssh.hostFingerprint),
+      remoteComfyHost: str(ssh.remoteComfyHost, defaults.ssh.remoteComfyHost),
+      remoteComfyPort: num(ssh.remoteComfyPort, defaults.ssh.remoteComfyPort, 1, 65_535),
+      remoteComfyPath: str(ssh.remoteComfyPath, defaults.ssh.remoteComfyPath)
+    }
+  };
+}
+
 export class SettingsStore {
   private readonly filePath = path.join(app.getPath("userData"), "settings.json");
   private readonly secretPath = path.join(app.getPath("userData"), "secrets.json");
@@ -39,30 +100,7 @@ export class SettingsStore {
   async get(): Promise<AppSettings> {
     try {
       const raw = JSON.parse(await readFile(this.filePath, "utf8")) as Partial<AppSettings>;
-      const defaults = defaultSettings();
-      const defaultBackend = raw.defaultBackend === "ssh" || raw.defaultBackend === "minimax" || raw.defaultBackend === "rb" || raw.defaultBackend === "local"
-        ? raw.defaultBackend
-        : "local";
-      // 所有字符串字段都要**类型校验**，不能只写 `raw.x || default`：
-      // settings.json 可能被手改、或被旧版本写进非字符串（实测：localComfyUrl=123
-      // 会一路传到 ComfyAdapter，抛 "options.baseUrl.replace is not a function"，
-      // 用户看到的是英文技术错误）。
-      const str = (value: unknown, fallback: string): string =>
-        typeof value === "string" && value.trim() ? value : fallback;
-      // 嵌套对象：非对象（null/数组/字符串）一律回落默认值，避免 {...null} 之类的半残状态。
-      const obj = <T extends object>(value: unknown, fallback: T): T =>
-        value && typeof value === "object" && !Array.isArray(value) ? { ...fallback, ...(value as T) } : fallback;
-      return {
-        localComfyUrl: str(raw.localComfyUrl, defaults.localComfyUrl),
-        outputDirectory: str(raw.outputDirectory, defaults.outputDirectory),
-        comfyuiRoot: typeof raw.comfyuiRoot === "string" ? raw.comfyuiRoot : defaults.comfyuiRoot,
-        rbBaseUrl: str(raw.rbBaseUrl, defaults.rbBaseUrl),
-        defaultBackend,
-        minimaxBaseUrl: str(raw.minimaxBaseUrl, defaults.minimaxBaseUrl),
-        llm: obj(raw.llm, defaults.llm),
-        searchApi: obj(raw.searchApi, defaults.searchApi),
-        ssh: obj(raw.ssh, defaults.ssh)
-      };
+      return normalizeSettings(raw, defaultSettings());
     } catch {
       return defaultSettings();
     }
@@ -76,13 +114,16 @@ export class SettingsStore {
       // 嵌套对象一律**局部合并**：patch 只带 llm.model 时，不能把 llm.baseUrl/provider/systemPrompt
       // 打回默认值。此前只对 ssh 做了合并，llm/searchApi 是整体替换——同样的坑（实测
       // probe-settings-partial 复现：只更新 llm.model → baseUrl 被清成官方默认）。
-      const next = {
+      const merged: Partial<AppSettings> = {
         ...current,
         ...patch,
         llm: patch.llm ? { ...current.llm, ...patch.llm } : current.llm,
         searchApi: patch.searchApi ? { ...current.searchApi, ...patch.searchApi } : current.searchApi,
         ssh: patch.ssh ? { ...current.ssh, ...patch.ssh } : current.ssh
       };
+      // 写盘前再归一化一次：patch 来自渲染端（可构造），脏类型不该落到磁盘上。
+      // 只在 get() 里纠正的话，磁盘上会一直留着 `port: "abc"` 这类值。
+      const next = normalizeSettings(merged, defaultSettings());
       await this.atomicWrite(this.filePath, next);
       // 回读而非直接返回 next：get() 会做归一化（非法 defaultBackend 落到 local、未知字段被丢弃），
       // 直接返回 next 会让"保存后立刻读回"拿到与磁盘不同的值，渲染端据此渲染就会用到脏状态。

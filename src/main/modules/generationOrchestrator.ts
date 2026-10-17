@@ -281,8 +281,20 @@ function validateRequest(request: GenerationRequest): void {
     throw new Error(`视频描述不能超过 ${MAX_PROMPT_LENGTH} 字。`);
   }
   if (request.backend === "rb") {
-    // RB 预设自带时长约束（easy_15/30 固定，flashvsr 只收视频）；prompt 仅 flashvsr 不需要。
-    if (request.preset !== "flashvsr_upscale" && !request.prompt?.trim()) throw new Error("请输入视频描述。");
+    // RB 预设自带时长约束（flashvsr 只收视频，无 prompt、无时长）：
+    // reference / tail_frame 官网只接受 4/6/8 秒；easy_15 / easy_30 是固定时长（忽略 duration）。
+    // 必须在这里兜住——工作台 UI 会 clamp，但 tasks:submit 与智能体的 generate_video 工具
+    // 都是可达入口（后者会把 4–15 秒原样传进来）。非法 seconds+preset 组合会真的发到云端，
+    // **失败也照样扣卡密次数**（CLAUDE.md 记过这条）。
+    if (request.preset === "flashvsr_upscale") {
+      if (!request.sourceVideoPath) throw new Error("视频变清晰模式必须选择源视频。");
+      return;
+    }
+    if (!request.prompt?.trim()) throw new Error("请输入视频描述。");
+    if (request.preset === "easy_15" || request.preset === "easy_30") return; // 固定时长，不用校验
+    if (![4, 6, 8].includes(request.duration)) {
+      throw new Error("瞬映 RB 的参考图/首尾帧模式只支持 4、6、8 秒。");
+    }
     return;
   }
   if (!request.prompt?.trim()) throw new Error("请输入视频描述。");

@@ -79,3 +79,19 @@ describe("normalizeHistory", () => {
     expect(normalizeHistory([], { model: "deepseek-chat" }).messages).toEqual([]);
   });
 });
+
+// 漏判的代价：用户上传的图会被**静默剥掉**，只留一句"当前模型不支持图片输入"，
+// 而用户明明选了视觉模型。这里锁定几类专用视觉家族。
+describe("supportsImages 视觉家族覆盖", () => {
+  it("专用视觉家族被识别", () => {
+    for (const model of ["llava-v1.6-34b", "llava-llama3", "pixtral-12b", "idefics2", "fuyu-8b", "molmo-7b", "step-1v-8k", "cogvlm2"]) {
+      expect(supportsImages(model), model).toBe(true);
+    }
+  });
+
+  it("同家族的纯文本变体不被误判", () => {
+    for (const model of ["llama-3.1-70b", "mistral-large", "yi-34b", "step-2-16k", "command-r-plus", "ernie-4.0", "deepseek-chat"]) {
+      expect(supportsImages(model), model).toBe(false);
+    }
+  });
+});

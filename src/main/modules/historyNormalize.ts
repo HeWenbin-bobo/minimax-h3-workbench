@@ -30,7 +30,11 @@ import type { ChatMessage } from "../../shared/types";
 /** 模型是否支持图片输入。按模型名前缀判定——上游 /models 只给 id，拿不到能力位。 */
 export function supportsImages(model: string): boolean {
   const lower = String(model || "").toLowerCase();
-  return /vl|vision|gpt-4o|gpt-4\.1|gpt-5|claude|gemini|glm-4v|qwen-vl|internvl|minicpm-v/.test(lower);
+  // 视觉模型家族。除了主流的 vl / vision 命名，这里还收录了几类**专用视觉家族**
+  // （实测漏判会让用户上传的图片被静默剥掉，只留一句"当前模型不支持图片输入"）：
+  //   llava / pixtral / idefics / fuyu / molmo / cogvlm / step-1v
+  // 注意 "vl" 是子串匹配：`cogvlm` 命中 "vl"，`qwen2.5-vl` 也是。
+  return /vl|vision|llava|pixtral|idefics|fuyu|molmo|step-1v|gpt-4o|gpt-4\.1|gpt-5|claude|gemini|glm-4v|internvl|minicpm-v/.test(lower);
 }
 
 export interface NormalizeResult {

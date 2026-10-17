@@ -1669,7 +1669,20 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
                 <button className="pg-plan-run" disabled={generating} onClick={executePlan} title="按上面的计划开始执行（会把这份计划原样交给模型接着做）">▶ 继续执行</button>
                 <span className="pg-plan-hint">确认后才会真正创建视频/文件</span>
               </div>}
-              {msg.taskGroups && msg.taskGroups.length > 0 && msg.taskGroups.map((group, gi) => group.length > 0 && <div key={`${msg.id}-${gi}`} className="result-grid pg-task-grid">{group.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} allowDemoPlaceholder={false} />)}</div>)}
+              {/* 重试会新建一个任务组（不同 parentId），而气泡只渲染自己 taskGroups 里的 id。
+                  不把新任务并进来，用户点完「重试」在这个会话里**看不到任何变化**——
+                  新任务在任何界面都不显示（游乐场不展示全局任务列表）。
+                  做法：把新任务 id 追加到本次工具调用的那个组里（原失败卡仍在，便于对照）。 */}
+              {msg.taskGroups && msg.taskGroups.length > 0 && msg.taskGroups.map((group, gi) => group.length > 0 && <div key={`${msg.id}-${gi}`} className="result-grid pg-task-grid">{group.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} allowDemoPlaceholder={false} onRetried={(created) => {
+                setSessions((all) => all.map((session) => session.id !== activeId ? session : {
+                  ...session,
+                  messages: session.messages.map((message) => message.id !== msg.id ? message : {
+                    ...message,
+                    taskGroups: (message.taskGroups ?? []).map((entry, index) => index === gi && !entry.includes(created.id) ? [...entry, created.id] : entry)
+                  })
+                }));
+                onNotice(`已重新提交，新任务已加入本组（${created.prompt.slice(0, 20)}）`);
+              }} />)}</div>)}
             </div>)}
           <div ref={bottomRef} />
         </div>

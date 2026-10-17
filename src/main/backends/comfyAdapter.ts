@@ -193,22 +193,34 @@ export class ComfyAdapter implements GenerationAdapter {
   }
 }
 
-function findMedia(value: unknown): { filename: string; subfolder?: string; type?: string } | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const record = value as Record<string, unknown>;
-  if (typeof record.filename === "string") return record as { filename: string; subfolder?: string; type?: string };
-  for (const child of Object.values(record)) {
-    if (Array.isArray(child)) {
-      for (const item of child) {
-        const found = findMedia(item);
-        if (found) return found;
-      }
-    } else {
-      const found = findMedia(child);
-      if (found) return found;
+/**
+ * 从 ComfyUI `history[promptId].outputs` 里挑出**成片**。
+ *
+ * 不能见 filename 就取第一个：`outputs` 里常同时有预览帧（`type: "temp"` 的 png）
+ * 与真正的视频/音频（`type: "output"`）。旧实现递归取第一个，会把预览图当成生成结果
+ * 下载成 .png（实测 probe-findmedia：拿到 preview_frame_0001.png）。
+ *
+ * 优先级：output 类型的视频/音频 > 任意类型的视频/音频 > 第一个带 filename 的（保底）。
+ */
+export function findMedia(value: unknown): { filename: string; subfolder?: string; type?: string } | undefined {
+  const all: Array<{ filename: string; subfolder?: string; type?: string }> = [];
+  const walk = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    const record = node as Record<string, unknown>;
+    if (typeof record.filename === "string") {
+      all.push(record as { filename: string; subfolder?: string; type?: string });
+      return;
     }
-  }
-  return undefined;
+    for (const child of Object.values(record)) {
+      if (Array.isArray(child)) child.forEach(walk);
+      else walk(child);
+    }
+  };
+  walk(value);
+  const isMedia = (item: { filename: string }) => /\.(mp4|webm|mov|mkv|gif|mp3|wav|flac)$/i.test(item.filename);
+  return all.find((item) => isMedia(item) && item.type === "output")
+    ?? all.find(isMedia)
+    ?? all[0];
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {

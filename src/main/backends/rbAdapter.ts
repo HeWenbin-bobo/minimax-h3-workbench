@@ -284,7 +284,24 @@ export class RbAdapter implements GenerationAdapter {
         error?: { message?: string };
         message?: string;
       };
-      if (!response.ok) throw new Error(`瞬映 RB 查询失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
+      if (!response.ok) {
+        // 5xx / 429 属临时性（网关过载、限流），与原任务无关：继续轮询。
+        // 卡密**已按次扣除**，云端任务仍在跑——一次 502 就把任务判死，
+        // 用户既拿不到成片、也退不回次数（与网络抖动那条同一类）。
+        const transient = response.status >= 500 || response.status === 429;
+        if (transient) {
+          consecutiveNetworkErrors += 1;
+          const detail = payload.error?.message || payload.message || "";
+          if (consecutiveNetworkErrors >= MAX_CONSECUTIVE_NETWORK_ERRORS) {
+            throw new Error(`连续 ${consecutiveNetworkErrors} 次查询瞬映任务失败（HTTP ${response.status}）${detail ? `：${detail}` : ""}。任务可能仍在云端生成，请到瞬映工作台确认。`);
+          }
+          onProgress("running", progress, `瞬映暂时不可用（HTTP ${response.status}），正在重试（第 ${consecutiveNetworkErrors} 次）`);
+          await delay(5_000, signal);
+          continue;
+        }
+        // 4xx（除 429）是真错误：卡密失效、任务不存在等，重试没有意义。
+        throw new Error(`瞬映 RB 查询失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
+      }
       const hasVideo = payload.has_video ?? payload.hasVideo;
       const status = (payload.status || "").toLowerCase();
       // 实测官网真实词汇表是 done / failed（progress 为"已完成"/"已失败"），并非 OpenAI 式的 succeeded。

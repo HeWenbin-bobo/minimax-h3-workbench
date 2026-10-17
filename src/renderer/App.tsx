@@ -709,7 +709,10 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
   async function testLlm() {
     setLlmTesting(true); setLlmResult(undefined);
     try {
-      await must(window.h3.updateSettings(draft));
+      // 这两处同样是"先把草稿落盘"，必须把回读值同步给父组件：
+      // 否则切到别的页面再回来，`useState(settings)` 会按旧值重建表单，
+      // 用户看到刚填的地址/模型"又变回去了"（实际磁盘上已经是新的）。
+      setSettings(await must(window.h3.updateSettings(draft)));
       if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey));
       const result = await window.h3.testLlm();
       if (result.data) setLlmResult(result.data); else onError(result.message);
@@ -719,7 +722,7 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
   async function fetchModels() {
     setFetchingModels(true);
     try {
-      await must(window.h3.updateSettings(draft));
+      setSettings(await must(window.h3.updateSettings(draft)));
       if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey));
       const response = await window.h3.listLlmModels();
       if (response.data?.ok) { setLlmModels(response.data.models); onNotice(response.data.message); }

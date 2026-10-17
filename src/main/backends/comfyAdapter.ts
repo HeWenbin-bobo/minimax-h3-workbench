@@ -258,13 +258,26 @@ export function findMedia(value: unknown): { filename: string; subfolder?: strin
     ?? all[0];
 }
 
+/**
+ * 可取消的 sleep。
+ *
+ * **正常结束必须摘掉 abort 监听器**：`{ once: true }` 只在**取消时**生效。
+ * 轮询每轮都调一次 delay（ComfyUI 3 秒一轮、最长 30 分钟 ≈ 600 次），
+ * 每次都往同一个长生命周期的 signal 上挂一个闭包且从不移除——
+ * 连接取消时要遍历几百个已失效的监听器，长任务里还会持续增长。
+ * 用 finally 统一摘除，成功与取消两条路径都干净。
+ */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
+    const onAbort = () => {
       clearTimeout(timer);
       reject(new DOMException("任务已取消", "AbortError"));
-    }, { once: true });
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

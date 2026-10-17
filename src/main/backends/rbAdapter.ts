@@ -384,12 +384,24 @@ export class RbAdapter implements GenerationAdapter {
 // 这里 re-export 保持既有调用方与单测的 import 路径不变。
 export { assertSafeResultUrl } from "./resultUrl";
 
+/**
+ * 可取消的 sleep。
+ *
+ * **正常结束必须摘掉 abort 监听器**：`{ once: true }` 只在**取消时**生效。
+ * 瞬映轮询每 5 秒一轮、最长 1 小时 ≈ 720 次，每次都往同一个 signal 上挂一个
+ * 从不移除的闭包——长任务里持续增长，取消时要遍历几百个失效监听器。
+ * 与 comfyAdapter / minimaxAdapter 同一套写法。
+ */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
+    const onAbort = () => {
       clearTimeout(timer);
       reject(new DOMException("任务已取消", "AbortError"));
-    }, { once: true });
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }

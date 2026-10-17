@@ -279,13 +279,25 @@ async function dataUri(filePath: string): Promise<string> {
   return `data:${mime[extension] || "application/octet-stream"};base64,${bytes.toString("base64")}`;
 }
 
+/**
+ * 可取消的 sleep。
+ *
+ * **正常结束必须摘掉 abort 监听器**：`{ once: true }` 只在**取消时**生效。
+ * 云端轮询每 10 秒一轮、最长 1 小时 ≈ 360 次，每次都往同一个 signal 上挂一个
+ * 从不移除的闭包——长任务里持续增长，取消时要遍历几百个失效监听器。
+ * 与 comfyAdapter / rbAdapter 同一套写法。
+ */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
+    const onAbort = () => {
       clearTimeout(timer);
       reject(new DOMException("任务已取消", "AbortError"));
-    }, { once: true });
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

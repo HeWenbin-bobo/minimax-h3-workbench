@@ -78,3 +78,20 @@ describe("pickVolumeForOutput", () => {
     expect(pickVolumeForOutput([], "F:\\x")).toBeUndefined();
   });
 });
+
+// 磁盘读数未知（fsSize 返回空/异常时 systemInspector 会置 0）不能当成"空间不足"。
+// 否则用户会看到「至少释放 70GB 磁盘空间」，而他的磁盘可能一块都没满——
+// 假告警比不提示更误导。
+describe("classifyEnvironment 磁盘读数未知", () => {
+  const base = { gpus: [], memoryTotalBytes: 64 * 1024 ** 3 };
+
+  it("diskFreeBytes = 0 时不报「释放 70GB」", () => {
+    const result = classifyEnvironment({ ...base, diskFreeBytes: 0, comfyReachable: false, comfyHasH3Nodes: false });
+    expect(result.recommendations.some((r) => r.includes("70GB"))).toBe(false);
+  });
+
+  it("真实空间不足（有读数但 < 70GB）时仍然告警", () => {
+    const result = classifyEnvironment({ ...base, diskFreeBytes: 20 * 1024 ** 3, comfyReachable: false, comfyHasH3Nodes: false });
+    expect(result.recommendations.some((r) => r.includes("70GB"))).toBe(true);
+  });
+});

@@ -55,7 +55,13 @@ export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentRep
   const totalVram = nvidia.reduce((sum, gpu) => sum + gpu.vramBytes, 0);
   const recommendations: string[] = [];
 
-  if (input.diskFreeBytes < 70 * GiB) recommendations.push("至少释放 70GB 磁盘空间后再安装完整创作包。 ");
+  // 磁盘读数未知时不要拿 0 当"空间不足"：
+  // `systemInspector` 在 `pickVolumeForOutput` 找不到卷（fsSize 返回空/异常）时
+  // 会把 `diskFreeBytes` 置为 0。若照常判定，用户会看到「至少释放 70GB 磁盘空间」，
+  // 而他的磁盘可能一块都没满——这种假告警比不提示更误导。
+  // 真正的 0 字节可用与"读不到"在语义上都无法生成，故统一按"未知"处理。
+  const diskKnown = input.diskFreeBytes > 0;
+  if (diskKnown && input.diskFreeBytes < 70 * GiB) recommendations.push("至少释放 70GB 磁盘空间后再安装完整创作包。 ");
 
   if (nvidia.length >= 2 && totalVram >= 48 * GiB && input.memoryTotalBytes >= 256 * GiB) {
     if (!input.comfyReachable) recommendations.push("安装或启动 ComfyUI 0.30.0+，然后重新检测。 ");

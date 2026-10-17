@@ -264,7 +264,11 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
     try {
       const response = await window.h3.setTaskCategory(activeProject[0].id, category);
       if (!response.ok) { onError(response.message); return; }
-      onNotice(category ? `已归类到「${category}」` : "已清除分类");
+      // 提示必须用**服务端实际存下的值**：它会 trim 并截断到 20 字。
+      // 直接用入参的话，用户输入 30 字时提示写着 30 字全名，
+      // 而过滤条上是 20 字截断版——两处对不上，用户以为分类没设对。
+      const saved = response.data?.[0]?.category;
+      onNotice(saved ? `已归类到「${saved}」` : "已清除分类");
     } catch (error) {
       onError(error);
     }

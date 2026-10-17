@@ -290,9 +290,20 @@ export class GenerationOrchestrator {
 }
 
 function validateRequest(request: GenerationRequest): void {
+  // 入口即做类型兜底：`tasks:submit` 是可达 IPC，参数由渲染端/智能体给出，
+  // 不保证类型。`prompt: 123` 会一路走到 `request.prompt.trim()` 抛
+  // "p.trim is not a function"（英文技术错误直接透给用户）；
+  // 而 `duration: NaN` 能同时绕过 `< 4` 与 `> 15` 两个比较，被原样送进工作流。
+  if (!request || typeof request !== "object") throw new Error("生成参数无效。");
+  if (typeof request.prompt !== "string") throw new Error("视频描述必须是文本。");
+  if (!Number.isFinite(request.duration)) throw new Error("视频时长必须是数字。");
+  if (request.count !== undefined && !Number.isFinite(request.count)) throw new Error("生成数量必须是数字。");
+  if (request.baseSeed !== undefined && !Number.isFinite(request.baseSeed)) throw new Error("随机种子必须是数字。");
+  if (request.width !== undefined && !Number.isFinite(request.width)) throw new Error("画面宽度必须是数字。");
+  if (request.height !== undefined && !Number.isFinite(request.height)) throw new Error("画面高度必须是数字。");
   // 长度上限在工作台/游乐场 UI 已由 maxlength 挡住，但 IPC 与智能体工具是可达入口：
   // 不在这里兜住的话，超长提示词会被真的塞进云端请求体。
-  if ((request.prompt?.length ?? 0) > MAX_PROMPT_LENGTH) {
+  if (request.prompt.length > MAX_PROMPT_LENGTH) {
     throw new Error(`视频描述不能超过 ${MAX_PROMPT_LENGTH} 字。`);
   }
   if (request.backend === "rb") {

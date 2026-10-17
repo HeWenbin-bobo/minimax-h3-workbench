@@ -151,3 +151,44 @@ describe("GenerationOrchestrator 提示词长度校验", () => {
       .rejects.toThrow("视频描述不能超过");
   });
 });
+
+// IPC 可达入口的参数类型兜底：渲染端/智能体给出的参数不保证类型。
+// 不做兜底时 `prompt: 123` 会抛英文 "p.trim is not a function"，
+// 而 `duration: NaN` 能同时绕过 `< 4` 与 `> 15` 两个比较被送进工作流。
+describe("validateRequest 类型兜底", () => {
+  function submitWith(patch: Record<string, unknown>) {
+    const { orchestrator } = makeOrchestrator([]);
+    return orchestrator.submit({
+      mode: "text", backend: "local", prompt: "测试", duration: 4,
+      ratio: "16:9", resolution: "768P", width: 1280, height: 720,
+      count: 1, baseSeed: 1, ...patch
+    } as never);
+  }
+
+  it("prompt 非字符串报中文错误（不透出 trim is not a function）", async () => {
+    const error = await submitWith({ prompt: 123 }).catch((e: Error) => e);
+    expect((error as Error).message).toBe("视频描述必须是文本。");
+  });
+
+  it("duration 为 NaN/Infinity 被拒绝（否则会绕过区间比较）", async () => {
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      await expect(submitWith({ duration: bad })).rejects.toThrow("视频时长必须是数字。");
+    }
+  });
+
+  it("count / baseSeed / width / height 非数字被拒绝", async () => {
+    await expect(submitWith({ count: "abc" })).rejects.toThrow("生成数量必须是数字。");
+    await expect(submitWith({ baseSeed: "abc" })).rejects.toThrow("随机种子必须是数字。");
+    await expect(submitWith({ width: "abc" })).rejects.toThrow("画面宽度必须是数字。");
+    await expect(submitWith({ height: "abc" })).rejects.toThrow("画面高度必须是数字。");
+  });
+
+  it("参数对象本身为 null 时报中文错误", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    await expect(orchestrator.submit(null as never)).rejects.toThrow("生成参数无效。");
+  });
+
+  it("合法参数照常通过（不误伤）", async () => {
+    await expect(submitWith({})).resolves.toHaveLength(1);
+  });
+});

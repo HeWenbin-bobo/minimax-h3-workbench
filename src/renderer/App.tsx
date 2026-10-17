@@ -736,6 +736,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const streamBuffers = useRef(new Map<string, string>());
   const taskIdBuffers = useRef(new Map<string, string[]>());
   const sendingRef = useRef(new Set<string>());
+  // 「提交生成任务」的同步守卫：同一 tick 内连点两次会读到两次 false，
+  // 于是创建两组任务（RB 后端每次提交都扣卡密次数，等于重复扣费）。
+  const videoSubmittingRef = useRef(false);
   // 首条消息的会话尚未创建时的同步守卫（见 send()：active 为空时按 id 守卫会失效）。
   const creatingSessionRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -1192,6 +1195,11 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   }
 
   async function submitVideo() {
+    // 双击「提交生成任务」会创建**两组**任务。工作台侧早就用 submittingRef 同步守卫挡过
+    // （React state 在同一 tick 内读到两次 false），游乐场这处漏了：RB 后端每次提交都扣卡密
+    // 次数，重复提交等于直接重复扣费；云后端同理。
+    if (videoSubmittingRef.current) return;
+    videoSubmittingRef.current = true;
     let session = active;
     if (!session) {
       session = { id: crypto.randomUUID(), title: "视频生成", messages: [], createdAt: new Date().toISOString() };
@@ -1207,6 +1215,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     } catch (error) {
       onError(error);
       return;
+    } finally {
+      videoSubmittingRef.current = false;
     }
     if (!result.ok) { onError(result.message); return; }
     const taskIds = result.data?.map((task) => task.id) ?? [];

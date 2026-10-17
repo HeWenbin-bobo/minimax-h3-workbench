@@ -12,8 +12,16 @@ export class TaskStore {
 
   async load(): Promise<GenerationTask[]> {
     try {
-      const tasks = JSON.parse(await readFile(this.filePath, "utf8")) as GenerationTask[];
-      let changed = false;
+      const raw = JSON.parse(await readFile(this.filePath, "utf8"));
+      // 逐条容错：一条坏数据不该让**全部**任务历史消失。
+      // 旧实现直接 `tasks.map(...)` 并靠外层 catch 兜底：数组里只要有一个 null/非对象，
+      // 访问 `task.status` 就抛 TypeError → catch 返回 [] → 用户的任务记录与回收站里的
+      // 「7 天可恢复」全部一次性清空（与渲染端会话加载同一类错误，见 App.normalizeStoredSessions）。
+      const tasks = (Array.isArray(raw) ? raw : []).filter(
+        (task): task is GenerationTask => Boolean(task) && typeof task === "object" && typeof (task as GenerationTask).id === "string"
+      );
+      // 丢掉坏元素后要落盘一次，否则每次启动都重复过滤、且坏数据一直留在文件里。
+      let changed = Array.isArray(raw) && raw.length !== tasks.length;
       const recovered = tasks.map((task) => {
         if (terminal.has(task.status)) return task;
         changed = true;

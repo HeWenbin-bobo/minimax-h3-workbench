@@ -188,7 +188,12 @@ export class ComfyAdapter implements GenerationAdapter {
         // 实测场景：工作流跑完了、outputs 为空（节点没接 SaveVideo、或模型输出被丢弃）。
         // 旧实现只认 `status_str === "error"`，这种"成功但没东西"的状态会被当成"还在跑"，
         // 于是一直轮询到 30 分钟才报超时——用户白等半小时，还以为是机器慢。
-        if (entry && (entry.status?.completed === true || entry.status?.status_str === "success")) {
+        //
+        // **判据只认 `status.completed === true`，不能认 `status_str === "success"`**：
+        // 实测（e2e test-03 的 mock，与真实 ComfyUI 行为一致）任务刚入 history 时
+        // 就可能带 `status_str: "success"` 而 outputs 还是空的，此时立刻报错会把
+        // 还在产出的任务判死。`completed` 才是"整条工作流真正跑完"的信号。
+        if (entry && entry.status?.completed === true) {
           throw new Error("ComfyUI 任务已完成，但没有产出视频。请检查工作流的输出节点是否接到了保存/预览节点。");
         }
       }

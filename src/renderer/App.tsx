@@ -557,15 +557,18 @@ function ResourcesPage({ resources, settings, onSettingsChange, onError }: { res
   }, [root]);
 
   async function pickRoot() {
-    // 选择目录、保存设置、重新检查三步都可能抛异常；不兜住的话「选择目录」点了没反应，
-    // 且 settings 已被本地改掉而磁盘没写成（状态与磁盘不一致）。
+    // 选择目录、保存设置、重新检查三步都可能抛异常；不兜住的话「选择目录」点了没反应。
+    //
+    // **顺序必须是"先落盘、再改本地 state"**：旧写法先 `onSettingsChange(next)` 再 await 保存，
+    // 保存被拒（`ok:false`）或抛错时本地已是新目录、磁盘还是旧值——
+    // 界面显示"已选好目录"、检查按钮按新目录去读，重启后却又变回旧目录。
     try {
       const response = await window.h3.selectDirectory();
       if (!response.data) return;
-      const next = { ...settings, comfyuiRoot: response.data };
-      onSettingsChange(next);
       const saved = await window.h3.updateSettings({ comfyuiRoot: response.data });
       if (!saved.ok) { onError(saved.message || "保存目录失败"); return; }
+      // 用服务端回读值（已归一化），而不是自己拼的对象——与「设置存了什么就显示什么」一致。
+      onSettingsChange(saved.data ?? { ...settings, comfyuiRoot: response.data });
       await checkRoot();
     } catch (error) {
       onError(error);

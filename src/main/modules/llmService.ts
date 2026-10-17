@@ -706,8 +706,18 @@ export async function consumeSse(
         );
       });
       let chunk: ReadableStreamReadResult<Uint8Array>;
+      const readPromise = reader.read();
       try {
-        chunk = await Promise.race([reader.read(), idle]);
+        chunk = await Promise.race([readPromise, idle]);
+      } catch (error) {
+        // 超时：**必须先把挂起的 read 处理掉再抛**。
+        // 挂起的 `reader.read()` 一旦因为超时被放弃，后续 `releaseLock()` 会让它
+        // reject 成 `ERR_INVALID_STATE: Releasing reader` —— 那是个没人接的 rejection，
+        // 在 Electron 主进程里足以把进程带走（与 abort 回调那次同类）。
+        // 正确顺序：cancel 流（让挂起的 read 以 done/abort 落定）→ 吞掉它的结果 → 抛中文错误。
+        await reader.cancel().catch(() => undefined);
+        void readPromise.catch(() => undefined);
+        throw error;
       } finally {
         if (timer) clearTimeout(timer);
       }

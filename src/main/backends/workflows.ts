@@ -16,9 +16,17 @@ export const H3_MODELS = {
   audioVae: "minimax_h3_audio_vae_fp32.safetensors"
 } as const;
 
+/**
+ * 把时长换算成模型接受的帧数（H3 要求 frames % 17 === 5）。
+ *
+ * **必须向上取整**：`(5 - raw % 17) % 17` 在 raw % 17 > 5 时得到负数——
+ * JS 的负数取模返回负值（`(5-11)%17 === -6`，Python 会给 11），于是本应"补到下一个合法值"
+ * 变成了"退到上一个合法值"。实测 frameLength(4)=90 帧=3.75 秒（比请求的 4 秒**短**），
+ * 4/6/7/9/11/12/13/14 秒全部短于请求。先 +17 保证非负，方向才对。
+ */
 export function frameLength(duration: number): number {
   const raw = Math.max(5, Math.round(duration * 24));
-  return raw + ((5 - (raw % 17)) % 17);
+  return raw + ((5 - (raw % 17) + 17) % 17);
 }
 
 function commonSampling(modelNode: string, conditioningNode: string, latentNode: string, seed: number): ComfyPrompt {

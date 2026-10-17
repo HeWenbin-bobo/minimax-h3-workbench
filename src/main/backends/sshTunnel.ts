@@ -13,6 +13,11 @@ export class SshTunnel {
 
   constructor(private readonly config: AppSettings["ssh"], private readonly password: string) {}
 
+  /** 当前连接实测到的主机指纹（hostVerifier 里记录）。未连接时为空串。 */
+  get fingerprint(): string {
+    return this.observedFingerprint;
+  }
+
   async start(): Promise<{ url: string; fingerprint: string }> {
     if (this.client && this.server && this.localPort) {
       return { url: `http://127.0.0.1:${this.localPort}`, fingerprint: this.observedFingerprint };

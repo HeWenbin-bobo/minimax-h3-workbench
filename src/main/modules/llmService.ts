@@ -419,7 +419,18 @@ export async function chatAgent(
           duration: z.number().int().min(4).max(15).describe("时长秒数，4–15 之间的整数。用户没说就按 6。"),
           count: z.number().int().min(1).max(4).describe("生成数量，1–4 之间的整数。用户没说就按 1。")
         }),
-        execute: async (params) => callbacks.generateVideo(params)
+        // 与其他工具一致：失败要变成**给模型的说明**，而不是抛出。
+        // `orchestrator.submit` 会做参数校验并抛中文错误（未保存卡密、RB 预设只收 4/6/8 秒、
+        // 图生视频缺参考图…）。抛出去的话 AI SDK 会把整轮判为失败，主进程随即
+        // "回落普通对话"——而普通对话没有生成工具，用户的视频请求直接丢失，
+        // 看到的还是一句"智能体模式请求失败"。返回文本则模型能据实告诉用户该去补什么。
+        execute: async (params) => {
+          try {
+            return await callbacks.generateVideo(params);
+          } catch (error) {
+            return `创建视频任务失败：${describeError(error, "未知错误")}。请如实告诉用户失败原因和需要先补什么（例如到「连接设置」保存对应后端的密钥/卡密），不要假装任务已创建，也不要重复调用本工具重试。`;
+          }
+        }
       })
       }),
       // open_page：看具体网页。搜索给了链接但要看正文/详情时用它（比搜索更精准一步）。

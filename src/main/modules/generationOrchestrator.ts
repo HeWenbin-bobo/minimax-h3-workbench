@@ -188,7 +188,9 @@ export class GenerationOrchestrator {
       createdAt: now,
       updatedAt: now,
       message: "等待重试",
-      request: task.request
+      // 存**本次实际使用**的请求（含新 baseSeed），不能存 task.request（旧种子）——
+      // 否则任务自报 seed=新值、存档 request.baseSeed=旧值，两者矛盾（实测复现）。
+      request
     };
     this.tasks.unshift(created);
     this.trimHistory();

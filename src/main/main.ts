@@ -10,6 +10,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  nativeImage,
   protocol,
   shell,
   type IpcMainInvokeEvent
@@ -1016,12 +1017,21 @@ function registerIpc(
     //（只发文件名、不发图）。实测 probe-heic 复现。
     if ([".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".heif"].includes(extension)) {
       if (info.size > 15 * 1024 * 1024) throw new Error("图片附件超过 15MB 上限，请压缩后再上传。");
+      // **HEIC/HEIF 必须转码**：Chromium 不解码 HEIC（实测 <img> 直接 onerror），
+      // 原样返回 `data:image/heic` 只会让用户看到一张破图，而模型也收不到图。
+      // iPhone 默认就是 HEIC，用户根本不会意识到需要先转格式。
+      if (extension === ".heic" || extension === ".heif") {
+        const bytes = await readFile(filePath);
+        const image = nativeImage.createFromBuffer(bytes);
+        if (image.isEmpty()) {
+          throw new Error("这张 HEIC/HEIF 照片无法在本机解码（缺少系统 HEIF 支持）。请先转换为 JPG/PNG 后再上传。");
+        }
+        return { kind: "image", name, dataUrl: `data:image/jpeg;base64,${image.toJPEG(90).toString("base64")}` };
+      }
       const mime = extension === ".png" ? "image/png"
         : extension === ".webp" ? "image/webp"
           : extension === ".gif" ? "image/gif"
-            : extension === ".heic" ? "image/heic"
-              : extension === ".heif" ? "image/heif"
-                : "image/jpeg";
+            : "image/jpeg";
       return { kind: "image", name, dataUrl: `data:${mime};base64,${(await readFile(filePath)).toString("base64")}` };
     }
     if ([".txt", ".md", ".json", ".csv", ".srt", ".vtt", ".log"].includes(extension)) {

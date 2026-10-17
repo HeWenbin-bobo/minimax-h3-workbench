@@ -80,3 +80,28 @@ describe("TaskStore.load 坏数据容错", () => {
     expect(await readFile(taskFile(), "utf8")).toBe(before);
   });
 });
+
+// 字段类型归一：磁盘 JSON 是外部数据，`prompt: 123` 会一路穿透到
+// `buildAgentMemoryHint`（每轮智能体对话都调 `.trim()`）→ 整条链路挂着。
+describe("TaskStore.load 字段类型归一", () => {
+  it("prompt 非字符串时归一为空串（不让下游抛 trim is not a function）", async () => {
+    await writeFile(taskFile(), JSON.stringify([makeTask({ prompt: 123 })]), "utf8");
+    const tasks = await new TaskStore().load();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].prompt).toBe("");
+  });
+
+  it("progress 非数字时归一为 0", async () => {
+    await writeFile(taskFile(), JSON.stringify([makeTask({ progress: "abc" })]), "utf8");
+    const tasks = await new TaskStore().load();
+    expect(tasks[0].progress).toBe(0);
+  });
+
+  it("归一后的脏值会写回磁盘（不只停留在内存）", async () => {
+    await writeFile(taskFile(), JSON.stringify([makeTask({ prompt: 123 })]), "utf8");
+    await new TaskStore().load();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const onDisk = JSON.parse(await readFile(taskFile(), "utf8"));
+    expect(onDisk[0].prompt).toBe("");
+  });
+});

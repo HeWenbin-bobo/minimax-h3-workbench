@@ -23,6 +23,16 @@ export class TaskStore {
       // 丢掉坏元素后要落盘一次，否则每次启动都重复过滤、且坏数据一直留在文件里。
       let changed = Array.isArray(raw) && raw.length !== tasks.length;
       const recovered = tasks.map((task) => {
+        // 字段类型也要归一：磁盘 JSON 是外部数据，`prompt: 123` 这类脏值会一路穿透——
+        // `buildAgentMemoryHint` 每轮都读 `task.prompt.trim()`（整条智能体链路会挂），
+        // 任务卡片的 `prompt.slice()`、`retry` 的 `prompt.trim()` 同理。
+        // 在读取边界修一次，比在每个下游各判一次便宜且不易漏。
+        const prompt = typeof task.prompt === "string" ? task.prompt : "";
+        const progress = Number.isFinite(task.progress) ? task.progress : 0;
+        if (prompt !== task.prompt || progress !== task.progress) {
+          changed = true;
+          task = { ...task, prompt, progress };
+        }
         if (terminal.has(task.status)) return task;
         changed = true;
         return {

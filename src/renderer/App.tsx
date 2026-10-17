@@ -1643,6 +1643,10 @@ interface ArtifactInfo { name: string; path: string; size: number; kind: Artifac
  * ② 旧路径——从消息正文的围栏代码块扫出来的内容（懒落盘，首次点「预览」才写文件）。 */
 function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }: { kind: ArtifactKind; content?: string; saved?: ArtifactInfo; sessionId: string; onPreview: (artifact: ArtifactInfo) => void; onError: (e: unknown) => void }) {
   const [artifact, setArtifact] = useState<ArtifactInfo | undefined>(saved);
+  // 懒落盘的去重：`artifact` 是 state，同一 tick 内连点两次「预览」会双双读到 undefined，
+  // 各自调一次 saveArtifact —— 落盘两次、生成两个内容相同的文件（`报告.md` 与 `报告 (2).md`），
+  // 用户却在卡片上只看到一张。用同步 ref 兜住。
+  const savingRef = useRef<Promise<ArtifactInfo | undefined> | undefined>(undefined);
   const sizeLabel = (bytes: number) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
   // 表格产物存 .xlsx（Excel 双击可开，主进程 SheetJS 转换）；文档存 .md；网页存 .html。
   const ext = kind === "html" ? ".html" : kind === "sheet" ? ".xlsx" : ".md";
@@ -1650,20 +1654,29 @@ function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }:
   async function ensureSaved(): Promise<ArtifactInfo | undefined> {
     if (artifact) return artifact;
     if (content === undefined) return undefined; // 既没落盘元数据也没内容：无从保存
+    // 已有一次保存在进行中：直接复用那个 Promise，不再发第二次 IPC。
+    if (savingRef.current) return savingRef.current;
     const name = `artifact-${Date.now()}${ext}`;
     const saveKind = kind === "sheet" ? "xlsx" : kind === "doc" ? "md" : "html";
     // IPC 也可能**抛异常**（不只是返回 ok:false）。不兜住的话点「预览」毫无反应、
     // 也没有任何提示（与 send()/executePlan() 同一类问题）。
-    try {
-      const response = await window.h3.saveArtifact(sessionId, name, content, saveKind);
-      if (!response.data) { onError(response.message); return undefined; }
-      const info = { ...response.data, kind, content };
-      setArtifact(info);
-      return info;
-    } catch (error) {
-      onError(error);
-      return undefined;
-    }
+    const task = (async (): Promise<ArtifactInfo | undefined> => {
+      try {
+        const response = await window.h3.saveArtifact(sessionId, name, content, saveKind);
+        if (!response.data) { onError(response.message); return undefined; }
+        const info = { ...response.data, kind, content };
+        setArtifact(info);
+        return info;
+      } catch (error) {
+        onError(error);
+        return undefined;
+      } finally {
+        // 无论成败都释放：失败后用户再点一次应当能重试，不能被一个陈旧的空结果卡住。
+        savingRef.current = undefined;
+      }
+    })();
+    savingRef.current = task;
+    return task;
   }
   return <div className="pg-artifact-card">
     <span className="pg-artifact-icon">{kind === "sheet" ? "📊" : kind === "doc" ? "📝" : "📄"}</span>

@@ -43,7 +43,11 @@ export function onDownloadProgress(listener: ProgressListener): () => void {
 export async function downloadAndInstall(): Promise<void> {
   if (!app.isPackaged) throw new Error("开发模式下不支持应用内更新，请运行 npm run package:win 打包后测试。");
   wire();
-  await autoUpdater.checkForUpdates(); // 先取 latest.yml 缓存，downloadUpdate 才有目标
+  const checked = await autoUpdater.checkForUpdates(); // 先取 latest.yml 缓存，downloadUpdate 才有目标
+  // `checkForUpdates()` 在"已是最新版本"时返回 null。此时继续 downloadUpdate 会抛
+  // electron-updater 的英文内部错误 "Please check update first"——用户看到的是
+  // 一句与当前动作完全对不上的技术文案（他明明点的是"立即更新"）。
+  if (!checked) throw new Error("当前已是最新版本，无需更新。");
   await autoUpdater.downloadUpdate();
   autoUpdater.quitAndInstall(false, true); // isSilent=false 保留安装向导；isForceRunAfter=true 装完自动启动
 }

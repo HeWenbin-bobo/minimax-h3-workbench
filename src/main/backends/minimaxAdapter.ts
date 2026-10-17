@@ -193,7 +193,11 @@ async function dataUri(filePath: string): Promise<string> {
     ".heic": "image/heic",
     ".heif": "image/heif",
     ".mp4": "video/mp4",
-    ".mov": "video/quicktime"
+    ".mov": "video/quicktime",
+    // 选择器也允许 webm / mkv；MIME 表漏了它们会回落成 application/octet-stream，
+    // 云端拿到无类型数据多半直接拒收（与 heic/heif 那处同类）。
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska"
   };
   const bytes = await readFile(filePath);
   if (bytes.byteLength > 50 * 1024 * 1024) throw new Error("参考素材超过云 API 允许的 50MB，请改用公网 URL 或压缩文件。 ");

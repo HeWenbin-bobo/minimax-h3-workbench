@@ -529,6 +529,19 @@ function formatClock(iso: string): string {
 /** 会话落盘上限。 */
 const PG_SESSION_CAP = 50;
 
+/** 预览面板宽度持久化键。用户拖过宽度就记住，重开沿用（注释承诺的"并记住"）。 */
+const PG_PREVIEW_WIDTH_KEY = "h3-preview-width";
+function loadPreviewWidth(): number | undefined {
+  try {
+    const raw = localStorage.getItem(PG_PREVIEW_WIDTH_KEY);
+    const value = raw ? Number(raw) : NaN;
+    return Number.isFinite(value) && value >= 300 ? Math.round(value) : undefined;
+  } catch { return undefined; }
+}
+function savePreviewWidth(width: number): void {
+  try { localStorage.setItem(PG_PREVIEW_WIDTH_KEY, String(Math.round(width))); } catch { /* 存不下就只在本次会话生效 */ }
+}
+
 /** 会话"最近使用"时间戳：新建会话还没用过时退回创建时间。 */
 function sessionRecency(session: PlaygroundSession): string {
   return session.updatedAt || session.createdAt;
@@ -589,14 +602,21 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 面板压缩聊天区（flex 布局挤压而非悬浮），宽度可拖拽调整并记住。
   const [preview, setPreview] = useState<ArtifactInfo>();
   // 初始宽度按窗口估个值，首次打开时按聊天容器实测校准（playground 限宽 1150，按窗口算会偏大占满）。
-  const [previewWidth, setPreviewWidth] = useState(() => Math.round(window.innerWidth * 0.35));
+  // 用户拖过宽度就**记住**（localStorage），重启/重开面板都沿用——此前只是 state，关掉就丢，
+  // 与上面"并记住"的注释不符。
+  const [previewWidth, setPreviewWidth] = useState(() => loadPreviewWidth() ?? Math.round(window.innerWidth * 0.35));
   const previewCalibrated = useRef(false);
   useEffect(() => {
-    if (!preview || previewCalibrated.current) return;
+    // 有保存过的宽度就尊重用户选择，不再自动校准覆盖。
+    if (!preview || previewCalibrated.current || loadPreviewWidth() !== undefined) return;
     previewCalibrated.current = true;
     const mainWidth = document.querySelector(".pg-main")?.getBoundingClientRect().width ?? 0;
     if (mainWidth > 700) setPreviewWidth(Math.round(mainWidth * 0.55));
   }, [preview]);
+  const resizePreview = (width: number) => {
+    setPreviewWidth(width);
+    savePreviewWidth(width);
+  };
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
   const [webSearch, setWebSearch] = useState(true);
   // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
@@ -1205,7 +1225,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           </div>
         </div>
         </div>
-        {preview && <PgPreviewPanel artifact={preview} onClose={() => setPreview(undefined)} width={previewWidth} onResize={setPreviewWidth} />}
+        {preview && <PgPreviewPanel artifact={preview} onClose={() => setPreview(undefined)} width={previewWidth} onResize={resizePreview} />}
       </div>
     </div>
   </section>;

@@ -35,6 +35,15 @@ const defaultSettings = (): AppSettings => ({
 });
 
 /**
+ * 历史输出目录最多保留几条。
+ *
+ * 无上限的话，用户反复切换输出目录时 settings.json 会一直变大，
+ * 而这些旧目录绝大多数早已不存在（删除时会 `realpath` 失败并跳过）。
+ * 保留最近 20 个足够覆盖"换过几次目录、还需要清理旧成片"的真实场景。
+ */
+const MAX_OUTPUT_DIR_HISTORY = 20;
+
+/**
  * settings.json 的读取归一化。**纯函数**，导出以便单测（文件 IO 与 Electron 依赖留在 store 里）。
  *
  * 为什么每个字段都要类型校验，而不是 `raw.x || default`：
@@ -70,7 +79,7 @@ export function normalizeSettings(raw: Partial<AppSettings>, defaults: AppSettin
         raw.outputDirectoryHistory
           .filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()))
           .map((entry) => entry.trim())
-      )).filter((entry) => entry !== currentOutput)
+      )).filter((entry) => entry !== currentOutput).slice(-MAX_OUTPUT_DIR_HISTORY)
     : [];
   return {
     localComfyUrl: str(raw.localComfyUrl, defaults.localComfyUrl),

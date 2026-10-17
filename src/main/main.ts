@@ -209,9 +209,29 @@ function createWindow(): BrowserWindow {
     }
   });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  // 导航守卫：**只允许留在应用自己的页面**。
+  //
+  // 不能只比 origin：file:// 文档的 origin 全是 "null"，`null !== null` 为 false，
+  // 于是 file:// → file:// 的任意本地文件导航会被放行（实测 probe-navigate-file：
+  // 主窗口被导航到 C:/Windows/win.ini）。开发模式（VITE_DEV_SERVER_URL）下则放行同源。
+  const isAllowedUrl = (target: string): boolean => {
+    try {
+      const next = new URL(target);
+      const devUrl = process.env.VITE_DEV_SERVER_URL;
+      if (devUrl) {
+        const dev = new URL(devUrl);
+        if (next.origin === dev.origin) return true;
+      }
+      // 生产：只允许应用自身的 dist/index.html（file: 协议且路径一致）。
+      if (next.protocol !== "file:") return false;
+      const appUrl = new URL(pathToFileURL(path.join(__dirname, "../../dist/index.html")).toString());
+      return decodeURIComponent(next.pathname).toLowerCase() === decodeURIComponent(appUrl.pathname).toLowerCase();
+    } catch {
+      return false;
+    }
+  };
   window.webContents.on("will-navigate", (event, url) => {
-    const current = window.webContents.getURL();
-    if (new URL(url).origin !== new URL(current).origin) event.preventDefault();
+    if (!isAllowedUrl(url)) event.preventDefault();
   });
   return window;
 }

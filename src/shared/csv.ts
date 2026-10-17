@@ -41,13 +41,38 @@ export function splitCsvLines(text: string): string[] {
   return lines.map((line) => line.trim()).filter(Boolean);
 }
 
-/** 整段 CSV/TSV → 二维数组（正确跨行、正确引号）。 */
+/**
+ * 推断分隔符：分别按 `,` 与 `\t` 试切，选**能切出多列的行数最多**的那个。
+ *
+ * 不能只看"全文含不含 \t"：CSV 单元格里出现制表符（"备注\t含tab"）会被误判成 TSV，
+ * 整表列数错乱（实测 probe-delim-guess）。也不能两个都当分隔符（TSV 里的逗号会被切，probe-tsv-comma）。
+ *
+ * 计分：引号内的分隔符不算数（parseCsvRow 已处理），所以对每种分隔符数"width > 1 的行数"。
+ * 平手时取列数一致的那个，再平手取首行列数大的。
+ */
+function detectDelimiter(lines: string[]): string {
+  const score = (delimiter: string) => {
+    const widths = lines.map((line) => parseCsvRow(line, delimiter).length);
+    const first = widths[0] ?? 1;
+    return {
+      separated: widths.filter((width) => width > 1).length,
+      consistent: widths.every((width) => width === first),
+      first
+    };
+  };
+  const comma = score(",");
+  const tab = score("\t");
+  if (comma.separated !== tab.separated) return comma.separated > tab.separated ? "," : "\t";
+  if (comma.consistent !== tab.consistent) return comma.consistent ? "," : "\t";
+  return tab.first > comma.first ? "\t" : ",";
+}
+
+/** 整段 CSV/TSV → 二维数组（正确跨行、正确引号、自动识别分隔符）。 */
 export function parseCsvRows(text: string): string[][] {
-  // 分隔符按**内容**推断：含制表符就是 TSV，否则 CSV。
-  // 不能像旧实现那样把 `,` 和 `\t` 一起当分隔符——TSV 单元格里出现逗号
-  //（"上海,中国"）会被多切一列（实测 probe-tsv-comma）。
-  const delimiter = text.includes("\t") ? "\t" : ",";
-  return splitCsvLines(text).map((line) => parseCsvRow(line, delimiter));
+  const lines = splitCsvLines(text);
+  if (lines.length === 0) return [];
+  const delimiter = detectDelimiter(lines);
+  return lines.map((line) => parseCsvRow(line, delimiter));
 }
 
 /**

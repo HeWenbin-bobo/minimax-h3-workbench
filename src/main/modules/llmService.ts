@@ -78,7 +78,11 @@ export class LlmService {
         const received = await consumeSse(response.body, send);
         if (!received) {
           // 流式 200 却零内容（部分中转/模型的已知毛病）：自动降级发一次非流式请求，而不是直接报错。
-          const fallback = await this.nonstreamChat(payload);
+          // 把本轮 controller 显式传进去，**不能让它读 `this.controller`**：
+          // 用户在"流式读完了但没内容"的那一刻点「停止」时，`abort()` 会把字段置空，
+          // 于是补发请求只带超时信号、仍然真的发出去（最长 120 秒），
+          // 回来后还会把内容推进一个用户以为已经停掉的气泡。
+          const fallback = await this.nonstreamChat(payload, controller);
           if (fallback) send({ seq: 1, delta: fallback });
           else throw new Error("服务商未返回任何内容（流式与非流式均为空），请检查模型名称或更换服务商。");
         }
@@ -100,7 +104,10 @@ export class LlmService {
   }
 
   // 非流式补发：流式空回复时的一次自动降级重试（同样载荷，stream:false）。
-  private async nonstreamChat(payload: Array<Record<string, unknown>>): Promise<string | undefined> {
+  // @param turn 本轮自己的 controller。**不能省略、也不要读 `this.controller`**——
+  //   后者可能已被 `abort()` 置空（用户点停止）或被下一轮换掉，两种情况都会让这次补发
+  //   失去取消能力（最长白跑 120 秒，返回后还会写进一个用户以为已停止的气泡）。
+  private async nonstreamChat(payload: Array<Record<string, unknown>>, turn: AbortController): Promise<string | undefined> {
     try {
       // 必须带超时并合并取消信号。这里是"流式已经失败一次"之后的补发，
       // 上游此时往往正处于异常状态；裸 fetch 一挂住，`chat()` 就永不返回，
@@ -120,7 +127,7 @@ export class LlmService {
           // 与流式路径同一理由：不设就用上游默认（实测约 4096 token），长回答会被静默截断。
           max_tokens: 64_000
         }),
-        signal: this.controller ? AbortSignal.any([this.controller.signal, timeout]) : timeout
+        signal: AbortSignal.any([turn.signal, timeout])
       });
       if (!response.ok) return undefined;
       const full = (await response.json().catch(() => ({}))) as {
@@ -133,7 +140,7 @@ export class LlmService {
       // 若在这里吞成 `undefined`，上层会抛"服务商未返回任何内容"——用户明明
       // 点的是停止，却看到一条红色失败提示（与本轮修的"取消被当成搜索失败"同类）。
       if (error instanceof DOMException && error.name === "AbortError") throw error;
-      if (this.controller?.signal.aborted) throw new DOMException("对话已取消", "AbortError");
+      if (turn.signal.aborted) throw new DOMException("对话已取消", "AbortError");
       return undefined;
     }
   }

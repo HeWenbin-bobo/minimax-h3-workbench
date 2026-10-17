@@ -92,6 +92,11 @@ export class LlmService {
   // 非流式补发：流式空回复时的一次自动降级重试（同样载荷，stream:false）。
   private async nonstreamChat(payload: Array<Record<string, unknown>>): Promise<string | undefined> {
     try {
+      // 必须带超时并合并取消信号。这里是"流式已经失败一次"之后的补发，
+      // 上游此时往往正处于异常状态；裸 fetch 一挂住，`chat()` 就永不返回，
+      // 该会话的 `busy` 与取消器一直被占着——用户点了「停止」也只能等，
+      // 之后这条会话再也发不出消息（同会话并发守卫会一直拒绝）。
+      const timeout = AbortSignal.timeout(120_000);
       const response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
         method: "POST",
         headers: {
@@ -104,7 +109,8 @@ export class LlmService {
           stream: false,
           // 与流式路径同一理由：不设就用上游默认（实测约 4096 token），长回答会被静默截断。
           max_tokens: 64_000
-        })
+        }),
+        signal: this.controller ? AbortSignal.any([this.controller.signal, timeout]) : timeout
       });
       if (!response.ok) return undefined;
       const full = (await response.json().catch(() => ({}))) as {

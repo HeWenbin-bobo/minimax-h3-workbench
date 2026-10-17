@@ -212,8 +212,16 @@ export class GenerationOrchestrator {
     task.message = "已取消";
     this.controllers.get(taskId)?.abort();
     if (task.providerTaskId) {
-      const adapter = await this.adapters.get(task.backend);
-      await adapter.cancel?.(task.providerTaskId).catch(() => undefined);
+      // 通知云端取消是**尽力而为**，整段必须兜住：
+      // `adapters.get()` 会去读密钥（`getSecret`），而密钥可能解不开——那次会抛错。
+      // 不兜的话异常发生在"已标记取消"与 `update()` 之间，于是任务永远停在半截状态：
+      // 内存里说取消了、磁盘没写、渲染端也收不到通知（界面一直显示"取消中"）。
+      try {
+        const adapter = await this.adapters.get(task.backend);
+        await adapter.cancel?.(task.providerTaskId);
+      } catch {
+        // 云端取消失败不改变本地结论：本地已中止轮询，用户看到的就是"已取消"。
+      }
     }
     return this.update(task, "cancelled", task.progress, "已取消");
   }

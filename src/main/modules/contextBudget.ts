@@ -40,9 +40,25 @@ export function estimateTokens(text: string): number {
   return Math.ceil(cjk / 1.6 + rest / 4);
 }
 
-/** 消息列表的估算总量（含角色开销的粗算，每条消息 +4 token）。 */
-export function estimateMessagesTokens(messages: Array<{ content: string }>): number {
-  return messages.reduce((sum, message) => sum + estimateTokens(message.content) + 4, 0);
+/**
+ * 单张图片的 token 估算。**不能按 base64 字符数算**——base64 只是传输编码，
+ * 真实计费取决于模型把图切成的 patch 数，通常几十到一两千 token。取保守中值 1000。
+ *
+ * 为什么必须算进去：图片以 data URL 存在 `images` 里（一张 1MB 的图 ≈ 100 万字符），
+ * 而 `content` 里没有它。旧实现只按文本估 → 带图会话的占用被严重低估
+ * （实测：1MB 图片只算 7 token），压缩永远触发不了，直到上游报"上下文超窗"。
+ */
+const TOKENS_PER_IMAGE = 1_000;
+
+/** 消息列表的估算总量（含角色开销的粗算，每条消息 +4 token；图片按张计）。 */
+export function estimateMessagesTokens(
+  messages: Array<{ content: string; images?: string[] }>
+): number {
+  return messages.reduce(
+    (sum, message) =>
+      sum + estimateTokens(message.content) + 4 + (message.images?.length ?? 0) * TOKENS_PER_IMAGE,
+    0
+  );
 }
 
 /**

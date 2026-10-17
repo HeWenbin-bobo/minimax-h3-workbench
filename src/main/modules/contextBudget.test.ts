@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   advanceWindow,
   createContextWindowState,
+  estimateMessagesTokens,
   estimateTokens,
   growthTokens,
   looksLikeContextOverflow,
@@ -178,5 +179,31 @@ describe("looksLikeContextOverflow", () => {
     ]) {
       expect(looksLikeContextOverflow(message)).toBe(false);
     }
+  });
+});
+
+// 图片必须计入估算：图片以 data URL 存在 images 里（content 不含它），
+// 旧实现只按文本估 → 带图会话占用被严重低估（实测 1MB 图片只算 7 token），
+// 压缩永远触发不了，直到上游报"上下文超窗"。
+describe("estimateMessagesTokens 计入图片", () => {
+  const img = "data:image/png;base64," + "A".repeat(100_000);
+
+  it("带 1 张图的消息比纯文本多约 1000 token", () => {
+    const withImage = estimateMessagesTokens([{ role: "user", content: "看图", images: [img] }]);
+    const textOnly = estimateMessagesTokens([{ role: "user", content: "看图" }]);
+    expect(withImage - textOnly).toBe(1000);
+  });
+
+  it("多张图按张累加", () => {
+    const four = estimateMessagesTokens([{ role: "user", content: "看图", images: [img, img, img, img] }]);
+    const one = estimateMessagesTokens([{ role: "user", content: "看图", images: [img] }]);
+    expect(four - one).toBe(3 * 1000);
+  });
+
+  it("图片大小不影响估算（不按 base64 字符数算）", () => {
+    const small = "data:image/png;base64,AAA";
+    const huge = "data:image/png;base64," + "A".repeat(1_000_000);
+    expect(estimateMessagesTokens([{ role: "user", content: "", images: [small] }]))
+      .toBe(estimateMessagesTokens([{ role: "user", content: "", images: [huge] }]));
   });
 });

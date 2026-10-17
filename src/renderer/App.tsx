@@ -357,9 +357,15 @@ function TaskCard({ task, index, onError, allowDemoPlaceholder = true }: { task?
   async function retry() {
     if (!task || retrying) return;
     setRetrying(true);
-    const response = await window.h3.retryTask(task.id);
-    setRetrying(false);
-    if (!response.ok) onError(response.message || "重试失败");
+    // IPC 可能 reject（不只是返回 ok:false）。不兜住的话按钮永远停在「重试中…」。
+    try {
+      const response = await window.h3.retryTask(task.id);
+      if (!response.ok) onError(response.message || "重试失败");
+    } catch (error) {
+      onError(error);
+    } finally {
+      setRetrying(false);
+    }
   }
   if (!task && !allowDemoPlaceholder) {
     return <article className="task-card missing"><div className="task-placeholder"><span>0{index + 1}</span><i>任务已不存在</i></div><div className="task-meta"><div><strong>结果 {index + 1}</strong><small>该任务已被删除，可在工作台回收站恢复</small></div></div></article>;

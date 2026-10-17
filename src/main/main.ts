@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { Readable } from "node:stream";
 import { readFile, stat, writeFile, unlink, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,12 +10,12 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
-  net,
   protocol,
   shell,
   type IpcMainInvokeEvent
 } from "electron";
 import { AdapterRegistry } from "./backends/adapterRegistry";
+import { mediaMime, parseByteRange } from "./modules/mediaRange";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import { describeError, isNetworkError } from "../shared/errors";
 import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmArtifactEvent, LlmDoneEvent, LlmPlanEvent, LlmQuestionEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, SecretName } from "../shared/types";
@@ -131,7 +133,49 @@ app.whenReady().then(async () => {
     if (!resolved && !knownOutputPaths(orchestrator).has(normalizeForCompare(requestedPath))) {
       return new Response("Path outside output directory", { status: 403 });
     }
-    return net.fetch(pathToFileURL(resolved ?? path.resolve(requestedPath)).toString());
+    const filePath = resolved ?? path.resolve(requestedPath);
+    // **必须自己实现 Range**：`net.fetch(file://…)` 不支持 Range——实测带
+    // `Range: bytes=100-199` 仍返回 200、整个文件，且没有 Content-Range/Accept-Ranges。
+    // 后果是视频拖动进度条完全失效（浏览器拿不到 206，只能重新从头加载）。
+    try {
+      const info = await stat(filePath);
+      if (!info.isFile()) return new Response("Not a file", { status: 404 });
+      const size = info.size;
+      const range = parseByteRange(request.headers.get("range"), size);
+      if (range === "invalid") {
+        return new Response("Range Not Satisfiable", {
+          status: 416,
+          headers: { "Content-Range": `bytes */${size}` }
+        });
+      }
+      const headers = {
+        "Content-Type": mediaMime(filePath),
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-cache"
+      };
+      // Response 只接受 **Web** ReadableStream；Node 的 createReadStream 必须过 `Readable.toWeb`
+      // （直接强转会在运行时抛 "object.stream is not a function"）。
+      if (!range) {
+        // 无 Range：整文件。用流而不是 readFile——一个 2K/30 秒的成片可能上百 MB，
+        // 一次性读进内存会让主进程明显卡顿。
+        return new Response(Readable.toWeb(createReadStream(filePath)) as ReadableStream, {
+          status: 200,
+          headers: { ...headers, "Content-Length": String(size) }
+        });
+      }
+      const { start, end } = range;
+      return new Response(Readable.toWeb(createReadStream(filePath, { start, end })) as ReadableStream, {
+        status: 206,
+        headers: {
+          ...headers,
+          "Content-Length": String(end - start + 1),
+          "Content-Range": `bytes ${start}-${end}/${size}`
+        }
+      });
+    } catch {
+      // 文件在任务记录里但已被用户删除：明确 404，让 <video> 显示加载失败而不是挂住。
+      return new Response("Media not found", { status: 404 });
+    }
   });
 
   // 产物预览协议：只服务 userData/artifacts/ 内的 HTML 文件。

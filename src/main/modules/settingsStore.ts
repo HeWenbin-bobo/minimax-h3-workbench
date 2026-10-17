@@ -146,6 +146,10 @@ export class SettingsStore {
       const merged: Partial<AppSettings> = {
         ...current,
         ...patch,
+        // `outputDirectoryHistory` **不接受渲染端写入**：它是删除白名单的信任根。
+        // 渲染端（或从其内部发起的调用）若能任意追加目录，就等于拿到了"任意文件删除"的
+        // 能力（先塞 `C:\`，再触发「彻底删除」）。该字段只由本方法在检测到目录变更时维护。
+        outputDirectoryHistory: current.outputDirectoryHistory,
         llm: patch.llm ? { ...current.llm, ...patch.llm } : current.llm,
         searchApi: patch.searchApi ? { ...current.searchApi, ...patch.searchApi } : current.searchApi,
         ssh: patch.ssh ? { ...current.ssh, ...patch.ssh } : current.ssh

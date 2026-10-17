@@ -1,17 +1,17 @@
 ---
 name: playground-branch-status
-description: v0.2.1 已发布；2026-10-18 探索模式连续修复，240 笔未推送（HEAD 3593c57）
+description: v0.2.1 已发布；2026-10-18 探索模式连续修复，273 笔未推送（HEAD db9ac5f）
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-18T06:15:00.000Z
+  modified: 2026-10-18T07:52:00.000Z
 ---
 
-**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 240 笔（未推送）。**
+**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 273 笔（未推送）。**
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
-- HEAD = `3593c57`。
+- HEAD = `db9ac5f`。
 - 验证基线：`npm test` **464 项 / 36 文件**全绿；typecheck、build 通过；
   E2E test-01/02/03/04/05/06/07/08/09/10 逐个复跑通过。
 
@@ -158,5 +158,32 @@ SSH 握手失败 1 条、RB 直链回落 1 条、磁盘未知判级 1 条。
   400ms 节流后才写盘，400ms 就检查会读到清理前的旧值。改成固定键名 + 1200ms。
 - `.e2e/probe-l-ui-buttons.mjs` 假设"点一次取消 = 4 路全部取消"（实际是逐任务），
   且用 `.cancel-button` 判"取消按钮消失"——该 class 也被「重试」按钮复用，要按文案判。
+- `.e2e/probe-g-settings-trash.mjs` 只点一次「彻底删除」——该操作已改为两段式确认
+  （先「彻底删除」再「确认删除」），探针没跟上，断言自然落空。
+
+## 2026-10-18 第三批（240 → 273 笔）
+
+这一批的主线是**「两条路径只修了其中一条」**与**「保存即断线」**：
+
+| 类型 | 具体问题 |
+|---|---|
+| **只修了一半** | `submit()` 补了缺省参数默认值，`retry()` 没补 → 抽出 `normalizeRequest()` 共用；`pickRoot()` 修了"先改 state 再落盘"，`ConnectionsPage.save()` 同样错序；`settings:update` 与 `secret:set` 都会 `invalidate()`，LLM 侧保住了在途实例，SSH 侧却当场 `close()` |
+| **保存即断线** | 任何一次设置保存都会 `AdapterRegistry.invalidate()` → `sshAdapter.close()` → 正在跑的 SSH 生成断在 ECONNREFUSED；改完 model/Key 后保留下来的会话实例又会被下一轮复用（旧配置）→ 引入 `serviceGeneration` 代次 |
+| **写盘失败没回滚** | `submit` / `retry` 先改内存再 `await save()`，失败时内存多出一批「等待生成」幽灵任务，且 `trimHistory` 可能已淘汰旧组 |
+| **删了又冒回来** | 删除流程先打 `deletedAt` 再 `cancel()`，而 `cancel()` 会推 `task:update`；渲染端无条件 upsert，刚删的项目借推送"复活" |
+| **读盘脏值** | `tasks.json` 的 `index`/`seed` 未归一（排序 NaN、`noise_seed` 变 null）；`secrets.json` 非字符串值 → 英文 `ERR_INVALID_ARG_TYPE`；`role` 未校验（"tool"/数字 → 该会话永久 400）；会话 `messages` 里字符串会被按字符展开、`taskIds` 非数组会包成 `["abc"]` 导致渲染端 map 白屏 |
+| **英文技术错误** | ComfyUI / MiniMax 反代返回 HTML 时 `response.json()` 抛 `Unexpected token '<'`（ComfyUI 轮询里还会把已计时的任务判死）；`/object_info` 非对象时 `"x" in "ok"` 抛 TypeError |
+| **ok:false 被静默** | 启动读设置、回收站刷新、任务列表刷新、模型清单检查、两个「选择」按钮——全部只判 `data`，失败时"保持旧值且无提示" |
+| **取消/监听器** | `QuestionBridge.answer()`（最常见路径）不摘 abort 监听器；`SshTunnel.close()` 先断后清字段（可重入）+ 不销毁已接受 socket |
+| **产物/附件** | 文档围栏漏 `md` 别名；GIF 附件被压成静态 JPEG（丢动画与透明） |
+| **判定与筛选** | 磁盘读不到时 C 级门槛把够用的机器判成 D 级；游乐场会话分类筛选失效后列表变空、按钮也没了 |
+| **文案与行为不符** | 游乐场「留空则用聊天内容」永不生效（表单继承工作台 demo 提示词）；`newSession()` 漏清 `planNext` → 新对话首条消息以计划模式发出 |
+
+**新增测试**：SSH 适配器延后关闭 3 条、`secrets` 脏值 2 条、ComfyUI HTML 2 条、
+`extractArtifact` 别名 5 条、`submit`/`retry` 归一 5 条、会话归一 3 条。
+
+**结论**：`npm test` **479 项 / 37 文件**；E2E test-01…test-10 逐个复跑全过。
+273 笔仍未推送（等用户明确指示）。
+
 
 

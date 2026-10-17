@@ -111,9 +111,24 @@ export function renderMarkdown(text: string): ReactNode[] {
   return nodes;
 }
 
-/** 解析表格行 "| a | b |" → ["a","b"]：去首尾竖线后按 | 切分并修剪。 */
+/**
+ * 解析表格行 "| a | b |" → ["a","b"]：去首尾竖线后**按未转义的 | 切分**并修剪。
+ *
+ * 不能用 `split("|")`：单元格里的 `\|` 是 markdown 的转义竖线（模型常用来写 "A|B" 这类内容），
+ * 朴素切分会把一格拆成两格、整行错位（实测 `| x\|y | z |` → 3 格而非 2 格）。
+ */
 function parseTableRow(line: string): string[] {
-  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+  const body = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let current = "";
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (ch === "\\" && body[i + 1] === "|") { current += "|"; i += 1; continue; }
+    if (ch === "|") { cells.push(current.trim()); current = ""; continue; }
+    current += ch;
+  }
+  cells.push(current.trim());
+  return cells;
 }
 
 // 行内：`code`、**bold**、[text](https-url)。先切行内元素再拼纯文本。

@@ -260,3 +260,30 @@ describe("submit 对可缺省字段补默认值", () => {
     expect(task.request?.resolution).toBe("768P");
   });
 });
+
+// 重试直接展开 `task.request` 建任务，而那份数据来自 tasks.json（外部数据）。
+// 不过校验的话：未知 backend 会被 registry 的分支链静默落到 SSH；
+// 非法的 RB seconds+preset 会真的发到云端（失败照样扣卡密次数）。
+describe("retry 复用存档参数时同样过校验", () => {
+  it("存档里 backend 被手改成未知值时拒绝重试，不建任务", async () => {
+    const broken = makeTask({
+      id: "t-bad",
+      status: "failed",
+      request: { mode: "text", backend: "evil", prompt: "测试", duration: 4, ratio: "16:9", resolution: "768P", width: 1280, height: 720, count: 1, baseSeed: 1 } as never
+    });
+    const { orchestrator } = makeOrchestrator([broken]);
+    await expect(orchestrator.retry("t-bad")).rejects.toThrow("生成后端无效。");
+    expect(orchestrator.list()).toHaveLength(1); // 只有原来那条失败记录
+  });
+
+  it("存档里 RB 时长非法时拒绝重试（不会白扣卡密）", async () => {
+    const broken = makeTask({
+      id: "t-rb",
+      status: "failed",
+      backend: "rb",
+      request: { mode: "text", backend: "rb", prompt: "测试", duration: 10, ratio: "16:9", resolution: "768P", width: 1280, height: 720, count: 1, baseSeed: 1 } as never
+    });
+    const { orchestrator } = makeOrchestrator([broken]);
+    await expect(orchestrator.retry("t-rb")).rejects.toThrow("只支持 4、6、8 秒");
+  });
+});

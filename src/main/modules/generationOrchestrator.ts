@@ -201,6 +201,13 @@ export class GenerationOrchestrator {
     if (!task.request) throw new Error("该任务没有保存原始参数，无法重试。请重新提交。");
     if (!["failed", "cancelled", "interrupted"].includes(task.status)) throw new Error("只有失败或已取消的任务才能重试。");
     const request = { ...task.request, baseSeed: Math.floor(Math.random() * 1_000_000) };
+    // **重试也必须过同一道校验**。`task.request` 来自 `tasks.json`（外部数据），
+    // `TaskStore.load` 只归一了 prompt，backend/duration/width 等仍是原样：
+    // - `backend: "evil"` 会被 `AdapterRegistry.get` 的分支链**静默落到 SSH**，
+    //   用户得到"请填写 SSH 主机和用户名"，与实际动作完全无关；
+    // - 非法的 duration/preset 组合会真的发到云端（失败照样扣卡密次数）。
+    // 放在建任务之前：脏记录应当被明确拒绝，而不是先建一条注定失败、还会计费的任务。
+    validateRequest(request);
     const parentId = randomUUID();
     const now = new Date().toISOString();
     const created: GenerationTask = {

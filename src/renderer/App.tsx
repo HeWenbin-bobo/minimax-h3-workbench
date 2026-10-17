@@ -1940,15 +1940,26 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
 
 /** CSV/TSV 文本 → 表格渲染（首行表头）。渲染端简单解析，不引解析库。
  * 表格字段含逗号时，SheetJS 的 sheet_to_csv 会输出引号包裹的 CSV（如 `a,"b,c",d`）；
- * 含**换行**的字段还会变成跨行引号字段。parseCsvRows 同时处理这两种情况。 */
+ * 含**换行**的字段还会变成跨行引号字段。parseCsvRows 同时处理这两种情况。
+ *
+ * **行数上限**：预览是只读展示用途，一次性铺开全部行会把主线程占满——
+ * 5 万行 × 3 列 ≈ 20 万个 DOM 节点，实测级别的卡顿。
+ * 超过 `MAX_PREVIEW_ROWS` 只渲染前若干行并明确告知（不静默少给）。 */
+const MAX_PREVIEW_ROWS = 500;
+
 function SheetTable({ csv }: { csv: string }) {
   const rows = parseCsvRows(csv);
   if (rows.length === 0) return <p className="pg-preview-doc-empty">（空表格）</p>;
-  const [header, ...body] = rows;
-  return <table className="pg-sheet-table">
-    <thead><tr>{header.map((cell, i) => <th key={i}>{cell}</th>)}</tr></thead>
-    <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{cell}</td>)}</tr>)}</tbody>
-  </table>;
+  const [header, ...allBody] = rows;
+  const body = allBody.slice(0, MAX_PREVIEW_ROWS);
+  const hidden = allBody.length - body.length;
+  return <>
+    <table className="pg-sheet-table">
+      <thead><tr>{header.map((cell, i) => <th key={i}>{cell}</th>)}</tr></thead>
+      <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{cell}</td>)}</tr>)}</tbody>
+    </table>
+    {hidden > 0 && <p className="pg-preview-doc-empty">（共 {allBody.length} 行，预览仅显示前 {MAX_PREVIEW_ROWS} 行；完整内容请在文件夹中打开）</p>}
+  </>;
 }
 
 /**

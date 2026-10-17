@@ -353,7 +353,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       <div className="submit-area"><div>{request.backend === "minimax" ? <><span>云端估算</span><strong>约 ${estimateCloudCost(request.resolution, request.duration, request.count).toFixed(2)} / {request.count} 条</strong></> : request.backend === "rb" ? <><span>云端估算</span><strong>卡密计费 · {request.count} 条消耗 {request.count} 次</strong></> : <><span>本地生成</span><strong>不产生 API 费用</strong></>}</div><button className="primary" disabled={submitting} onClick={submit}>{submitting ? "提交中…" : `生成 ${request.count} 个结果`}</button></div>
     </div><div className="result-pane"><div className="result-pane-head">{activeProject
       ? <button className="text-button danger" onClick={deleteProject}>🗑 删除此项目</button>
-      : <span className="result-pane-hint">新建任务预览 · 将生成 {clampedCount} 路结果</span>}</div><div className={`result-grid${shownCount === 1 ? " single" : ""}`}>{currentTasks.map((task, index) => <TaskCard key={task?.id || `slot-${index}`} task={task} index={index} onError={onError} />)}</div></div></div>
+      : <span className="result-pane-hint">新建任务预览 · 将生成 {clampedCount} 路结果</span>}</div><div className={`result-grid${shownCount === 1 ? " single" : ""}`}>{currentTasks.map((task, index) => <TaskCard key={task?.id || `slot-${index}`} task={task} index={index} onError={onError} onRetried={(created) => setActiveProjectId(created.parentId)} />)}</div></div></div>
   </section>;
 }
 
@@ -428,7 +428,7 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
  * 再拿示例视频顶上就是"把 demo 冒充成用户生成的结果"（实测：删除任务后气泡里
  * 出现「结果 1 · 4 秒 · 480P · 已生成 · 就绪」的假结果）。
  */
-function TaskCard({ task, index, onError, allowDemoPlaceholder = true }: { task?: GenerationTask; index: number; onError: (e: unknown) => void; allowDemoPlaceholder?: boolean }) {
+function TaskCard({ task, index, onError, allowDemoPlaceholder = true, onRetried }: { task?: GenerationTask; index: number; onError: (e: unknown) => void; allowDemoPlaceholder?: boolean; onRetried?: (task: GenerationTask) => void }) {
   const canCancel = task && !["succeeded","failed","cancelled","interrupted"].includes(task.status);
   const canRetry = task && ["failed","cancelled","interrupted"].includes(task.status);
   const showDemo = !task && allowDemoPlaceholder;
@@ -442,7 +442,10 @@ function TaskCard({ task, index, onError, allowDemoPlaceholder = true }: { task?
     // IPC 可能 reject（不只是返回 ok:false）。不兜住的话按钮永远停在「重试中…」。
     try {
       const response = await window.h3.retryTask(task.id);
-      if (!response.ok) onError(response.message || "重试失败");
+      if (!response.ok) { onError(response.message || "重试失败"); return; }
+      // 重试会**新建一个项目组**（新 parentId）。项目视图只显示当前组的任务，
+      // 不切过去的话用户点完「重试」界面毫无变化，以为按钮坏了。
+      if (response.data) onRetried?.(response.data);
     } catch (error) {
       onError(error);
     } finally {

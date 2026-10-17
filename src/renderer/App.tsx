@@ -752,6 +752,22 @@ export function capSessions(sessions: PlaygroundSession[], generatingIds: string
   return next.length === sessions.length ? sessions : next;
 }
 
+/**
+ * 软删除时间的归一化。
+ *
+ * `deletedAt` 参与两处计算：回收站每项的「N 天后自动清除」与启动时的 7 天过期清理。
+ * 非法值（非字符串、空串、`"abc"`）会让 `new Date(...)` 得到 Invalid Date：
+ * - 界面上显示「NaN 天后自动清除」
+ * - `Date.now() - NaN > 7 天` 恒为 false → 这条记录**永远不会被清理**
+ *   （白占 localStorage 配额，配额满了之后所有会话都存不进去）
+ * 这里把非法值视为"刚删除"，让 7 天计时正常走完。
+ */
+function normalizeDeletedAt(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "string" && !Number.isNaN(new Date(value).getTime())) return value;
+  return new Date().toISOString();
+}
+
 /** 读盘后的会话归一化。**导出以便单测**：坏元素的容错逻辑读代码看不出来，必须能断言。 */
 export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
   if (!Array.isArray(raw)) return [];
@@ -773,6 +789,11 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
     // 非字符串会让分组排序抛 "a.localeCompare is not a function"（实测：
     // 数字分类排在字母分类之前时会命中）。空串沿用"未分类"语义。
     category: typeof session.category === "string" && session.category ? session.category : undefined,
+    // `deletedAt` 必须是可解析的时间串：非法值会让回收站显示「NaN 天后自动清除」，
+    // 且 `Date.now() - NaN > 7 天` 恒为 false —— 这条记录**永远不会被过期清理掉**，
+    // 白占 localStorage 配额（配额满了之后所有会话都存不进去）。
+    // 非法值一律视为"刚删除"，让 7 天计时正常走完。
+    deletedAt: normalizeDeletedAt(session.deletedAt),
     // toolSteps 与 streaming 同理是瞬态：流式途中关闭应用会残留，读取时强制剥离。
     // 旧数据迁移：扁平 taskIds → 单组 taskGroups（旧消息没有分组结构）。
     messages: (Array.isArray(session.messages) ? session.messages : []).filter(Boolean).map((msg) => {

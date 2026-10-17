@@ -212,3 +212,35 @@ describe("normalizeStoredSessions 消息 content 类型兜底", () => {
     expect(result[0].messages[0].content).toBe("你好\n世界");
   });
 });
+
+// deletedAt 非法时：回收站显示「NaN 天后自动清除」，且永远不会被过期清理
+// （`Date.now() - NaN > 7 天` 恒为 false），白占 localStorage 配额。
+describe("normalizeStoredSessions deletedAt 归一", () => {
+  it("非法字符串被改成可解析时间（7 天计时能正常走）", () => {
+    const before = Date.now();
+    const result = normalizeStoredSessions([{ id: "a", messages: [], deletedAt: "abc" }]);
+    const stamp = new Date(result[0].deletedAt!).getTime();
+    expect(Number.isNaN(stamp)).toBe(false);
+    expect(stamp).toBeGreaterThanOrEqual(before - 1000);
+  });
+
+  it("非字符串被改成可解析时间", () => {
+    for (const bad of [123, {}, [], true]) {
+      const result = normalizeStoredSessions([{ id: "a", messages: [], deletedAt: bad }]);
+      expect(Number.isNaN(new Date(result[0].deletedAt!).getTime())).toBe(false);
+    }
+  });
+
+  it("空值/缺失仍表示「未删除」（不误标成已删除）", () => {
+    for (const value of [undefined, null, ""]) {
+      const result = normalizeStoredSessions([{ id: "a", messages: [], deletedAt: value }]);
+      expect(result[0].deletedAt).toBeUndefined();
+    }
+  });
+
+  it("合法时间串原样保留", () => {
+    const iso = "2026-10-01T00:00:00.000Z";
+    const result = normalizeStoredSessions([{ id: "a", messages: [], deletedAt: iso }]);
+    expect(result[0].deletedAt).toBe(iso);
+  });
+});

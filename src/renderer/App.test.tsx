@@ -83,6 +83,26 @@ describe("capSessions 容量裁剪", () => {
     const kept = capSessions(actives, ["a59"]);
     expect(kept.some((s) => s.id === "a59")).toBe(true);
   });
+
+  // 回归：回收站会话数量超过上限时，不能把**活跃**会话全挤掉。
+  // （第一版把回收站也算进名额，room 被压成 0，活跃会话全灭。）
+  it("回收站会话数超过上限时，活跃会话仍按上限保留", async () => {
+    const { capSessions } = await import("./App");
+    const actives = Array.from({ length: 5 }, (_, i) => make(`a${i}`, i * 1000));
+    const deleted = Array.from({ length: 60 }, (_, i) => make(`d${i}`, 6 * 86_400_000, { deletedAt: at(6 * 86_400_000) }));
+    const kept = capSessions([...actives, ...deleted], []);
+    expect(kept.filter((s) => !(s as { deletedAt?: string }).deletedAt)).toHaveLength(5);
+    expect(kept.filter((s) => (s as { deletedAt?: string }).deletedAt)).toHaveLength(60);
+  });
+
+  it("活跃会话超过上限时按最近使用裁到上限", async () => {
+    const { capSessions } = await import("./App");
+    const actives = Array.from({ length: 60 }, (_, i) => make(`a${i}`, i * 1000)); // a0 最新
+    const kept = capSessions(actives, []);
+    expect(kept).toHaveLength(50);
+    expect(kept.some((s) => s.id === "a0")).toBe(true);
+    expect(kept.some((s) => s.id === "a59")).toBe(false);
+  });
 });
 
 // 回归：文字后紧跟表格时，表格不能被并进段落（否则整张表渲染成一堆竖线）。

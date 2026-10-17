@@ -795,7 +795,14 @@ function registerIpc(
         // 截到 8 万字符后关键事实已被脚本挤掉，模型拿到的是一堆代码噪声。
         openPage: async (url: string) => {
           const parsed = assertPublicHttpUrl(url);
-          const text = await renderPageText(parsed.toString(), 45_000);
+          const raw = await renderPageText(parsed.toString(), 45_000);
+          const text = raw.trim();
+          // 纯 canvas / 纯图片 / PDF 预览页的 innerText 可能是空的（或只有几个空白的换行）。
+          // 直接返回空串会让模型以为"打开了但什么都没有"，接着凭记忆编内容。
+          // 如实说明"取不到正文"，并给出可行的替代路径。
+          if (!text) {
+            return `已打开该网页，但页面上没有可提取的正文（可能是纯图片/画布/PDF 页面）。可以改用 web_search 搜索相关信息，或换一个以文字为主的链接。`;
+          }
           return text.length > 80_000 ? `${text.slice(0, 80_000)}\n\n（页面过长已截断）` : text;
         },
         // create_file（文件产物工具）：模型对工具调用的信任远高于文字约定（实测：只靠提示词约定

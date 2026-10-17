@@ -425,7 +425,20 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
   // 正在等待二次确认的项目组（parentId）。彻底删除不可逆，不能单击即生效。
   const [confirmingGroup, setConfirmingGroup] = useState<string>();
   const retentionMs = 7 * 24 * 60 * 60 * 1_000;
-  const refresh = useCallback(() => window.h3.listDeletedTasks().then((r) => { if (r.data) setItems(r.data); setLoading(false); }).catch(() => setLoading(false)), []);
+  // 刷新回收站列表。**失败必须能落到界面上**（不只是"保持旧列表"）：
+  // 用户刚点过「彻底删除 / 恢复」，此时刷新若失败，列表还是旧的——
+  // 他会以为操作根本没生效，再去点一次（对不可逆操作是灾难性的重复确认）。
+  //
+  // `onError` 是父组件每次渲染新建的函数。放进依赖会让 `refresh` 每次父渲染都变，
+  // 进而让下面的 effect 反复重挂 + 重复拉取（生成期间父组件每个进度事件都会渲染一次）。
+  // 用 ref 持有它，让 `refresh` 保持稳定（与 PlaygroundPage 的 onNoticeRef 同一做法）。
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+  const refresh = useCallback(() => window.h3.listDeletedTasks().then((r) => {
+    if (r.ok && r.data) setItems(r.data);
+    else if (!r.ok) onErrorRef.current(r.message || "读取回收站失败");
+    setLoading(false);
+  }).catch((error) => { onErrorRef.current(error); setLoading(false); }), []);
   useEffect(() => {
     void refresh();
     window.addEventListener("h3-tasks-changed", refresh);

@@ -57,7 +57,15 @@ export function App() {
 
   useEffect(() => {
     Promise.all([window.h3.getSettings(), window.h3.getResourceLinks(), window.h3.listTasks()])
-      .then(([s, r, t]) => { if (s.data) setSettings(s.data); if (r.data) setResources(r.data); if (t.data) setTasks(t.data); }).catch(showError);
+      .then(([s, r, t]) => {
+        // `ok:false` 也要走错误路径：IPC 层把主进程异常翻成了 `{ok:false, message}`，
+        // 它不是 rejection。只判 `s.data` 时，读设置失败会被静默吞掉——
+        // `settings` 永远为空、界面永久停在启动页，日志里也没有任何记录。
+        if (!s.data) { showError(s.message || new Error("读取设置失败。")); return; }
+        setSettings(s.data);
+        if (r.data) setResources(r.data);
+        if (t.data) setTasks(t.data);
+      }).catch(showError);
     const offTask = window.h3.onTaskUpdate((item) => setTasks((all) => upsert(all, item)));
     window.h3.checkForUpdates().then((response) => {
       if (!response.data) return;

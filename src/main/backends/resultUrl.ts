@@ -17,30 +17,70 @@ export function assertSafeResultUrl(rawUrl: string): URL {
   return url;
 }
 
-// 仅覆盖直接写 IP 的情形（域名解析到内网需 DNS 层校验，此处超出权限范围）；
-// IPv4 私网/回环/链路本地/组播 + IPv6 回环/唯一本地/链路本地 + IPv4 映射的 IPv6。
+// 仅覆盖直接写 IP 的情形（域名解析到内网需 DNS 层校验，此处超出权限范围）。
 function isPrivateAddress(host: string): boolean {
   const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   if (ipv4) {
     const [a, b] = ipv4.slice(1).map(Number);
     if (ipv4.slice(1).some((part) => Number(part) > 255)) return false; // 非法 IP 交给 fetch 报错
-    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) // 运营商级 NAT 100.64/10
+      || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
   }
-  if (host.includes(":")) {
+  if (!host.includes(":")) return false;
+  const groups = parseIpv6(host);
+  // 解析不了就按原来的前缀启发式兜底，宁可多拦。
+  if (!groups) {
     const normalized = host.toLowerCase();
-    // IPv4 映射/兼容的 IPv6（如 ::ffff:127.0.0.1）：WHATWG URL 会把 ::ffff:127.0.0.1 规范化成
-    // 十六进制 [::ffff:7f00:1]，普通前缀检查漏判 → 回环/内网被放行（实测 SSRF 绕过）。
-    // 取末 32 位（末两个 hextet）还原成 IPv4 再走同一套私网判定。
-    const mapped = /::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(normalized);
-    if (mapped) {
-      const high = parseInt(mapped[1], 16);
-      const low = parseInt(mapped[2], 16);
-      const dotted = `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
-      return isPrivateAddress(dotted);
-    }
     return normalized === "::" || normalized === "::1"
-      || normalized.startsWith("fc") || normalized.startsWith("fd") // 唯一本地地址 fc00::/7
-      || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb"); // 链路本地 fe80::/10
+      || normalized.startsWith("fc") || normalized.startsWith("fd")
+      || /^fe[89ab]/.test(normalized);
   }
+  return isPrivateIpv6(groups);
+}
+
+// 把 ::ffff:127.0.0.1 这类写法展开成 8 个 hextet。WHATWG URL 已把 hostname 规范成十六进制，
+// 这里同时兼容点分内嵌形式，避免只认一种写法。
+function parseIpv6(host: string): number[] | undefined {
+  let text = host.replace(/^\[|\]$/g, "").toLowerCase();
+  const tail = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (tail) {
+    const parts = tail.slice(1).map(Number);
+    if (parts.some((part) => part > 255)) return undefined;
+    text = text.slice(0, tail.index) + `${((parts[0] << 8) | parts[1]).toString(16)}:${((parts[2] << 8) | parts[3]).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return undefined;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const rest = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - head.length - rest.length;
+  if (missing < 0 || (halves.length === 1 && missing !== 0)) return undefined;
+  const groups = [...head, ...Array<string>(missing).fill("0"), ...rest];
+  if (groups.length !== 8 || !groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return undefined;
+  return groups.map((group) => parseInt(group, 16));
+}
+
+// 私网判定要连 IPv6 里嵌的 IPv4 一起看：只查前缀的话，::ffff:7f00:1、::7f00:1（IPv4 兼容）、
+// ::ffff:0:7f00:1（IPv4 翻译）、64:ff9b::7f00:1（NAT64）、2002:7f00:1::（6to4）全都会被放行
+// ——实测都能打到回环/内网，属于 SSRF 绕过。
+function isPrivateIpv6([a, b, c, d, e, f, g, h]: number[]): boolean {
+  const embedded = () => isPrivateAddress(`${g >> 8}.${g & 0xff}.${h >> 8}.${h & 0xff}`);
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0 && g === 0 && h === 0) return true; // ::
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0 && g === 0 && h === 1) return true; // ::1
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0) return embedded(); // IPv4 兼容 ::a.b.c.d
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0xffff) return embedded(); // IPv4 映射
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0xffff && f === 0) return embedded(); // IPv4 翻译
+  if (a === 0x64 && b === 0xff9b && c === 0 && d === 0 && e === 0 && f === 0) return embedded(); // NAT64 64:ff9b::/96
+  if (a === 0x64 && b === 0xff9b && c === 1) return true; // NAT64 本地 64:ff9b:1::/48
+  if (a === 0x2002) return isPrivateAddress(`${b >> 8}.${b & 0xff}.${c >> 8}.${c & 0xff}`); // 6to4 2002::/16
+  // Teredo 2001::/32：客户端 IPv4 在末两个 hextet，按位取反存放。
+  if (a === 0x2001 && b === 0) {
+    const high = g ^ 0xffff;
+    const low = h ^ 0xffff;
+    return isPrivateAddress(`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`);
+  }
+  if ((a & 0xfe00) === 0xfc00) return true; // 唯一本地 fc00::/7
+  if ((a & 0xffc0) === 0xfe80) return true; // 链路本地 fe80::/10
+  if ((a & 0xffc0) === 0xfec0) return true; // 站点本地 fec0::/10（已废弃但仍应拦）
+  if ((a & 0xff00) === 0xff00) return true; // 组播 ff00::/8
   return false;
 }

@@ -153,6 +153,9 @@ export class MiniMaxAdapter implements GenerationAdapter {
       // 只认 succeeded 的话，生成已完成的任务永远匹配不上，界面会一直"正在生成"直到 1 小时超时。
       // （本机无 MiniMax API Key，未能真机验证；该改动只放宽匹配、不放宽下载条件，故不会误判未完成任务。）
       const taskStatus = String(payload.task?.status ?? "").toLowerCase();
+      // 注意：这里是 `succeeded && url` 的联合条件，**不能**拆成"成功就报错"。
+      // 实测契约：云端可能先回报 Success、下一轮才给 content.url（转码未完成），
+      // 所以"成功但暂无 url"必须继续轮询（minimaxAdapter.test 有专门用例锁定）。
       if (["success", "succeeded", "done", "completed"].includes(taskStatus) && payload.task?.content?.url) {
         return {
           url: payload.task.content.url,

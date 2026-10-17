@@ -612,9 +612,24 @@ function registerIpc(
     // 脏类型会以英文 TypeError 透到界面（"text.trim is not a function"）。
     const safeHistory = safeMessages(messages);
     const session = typeof sessionId === "string" && sessionId ? sessionId : `anon-${Math.random().toString(36).slice(2)}`;
-    const service = await serviceForSession(session);
     // 同一会话不允许并发（会往同一个气泡里写两股流）；不同会话各自独立，可同时生成。
-    if (sessionAborters.has(session) || service.busy) throw new Error("该会话的上一轮回复还在进行中，请先停止或等待完成。");
+    //
+    // **守卫与登记必须同步完成**：`serviceForSession()` 内部会 await 读设置与密钥，
+    // 若把 `sessionAborters.set` 放在它之后，两个同时到达的请求都会在 await 之前通过
+    // `has()` 检查，双双进入同一会话（渲染端会把两股流写进同一个气泡）。
+    if (sessionAborters.has(session)) throw new Error("该会话的上一轮回复还在进行中，请先停止或等待完成。");
+    const controller = new AbortController();
+    sessionAborters.set(session, controller);
+    let service: LlmService;
+    try {
+      service = await serviceForSession(session);
+      if (service.busy) throw new Error("该会话的上一轮回复还在进行中，请先停止或等待完成。");
+    } catch (error) {
+      // 这里抛错时没有任何分支的 finally 会跑，必须自己摘登记，
+      // 否则该会话从此永久撞上面的守卫（与本轮已修的"读密钥失败"同一形态）。
+      sessionAborters.delete(session);
+      throw error;
+    }
     const chunk = (event: LlmStreamEvent) => sendChunk({ ...event, sessionId: session });
     const done = (event: LlmDoneEvent) => sendDone({ ...event, sessionId: session });
     /**
@@ -635,8 +650,7 @@ function registerIpc(
     };
     // 上下文压缩前置：超阈值才动手，未超时原样透传（零回归）。
     // 放在这里而不是各分支内部，是为了普通对话与智能体共用同一套记账——两条路径吃的是同一份历史。
-    const controller = new AbortController();
-    sessionAborters.set(session, controller);
+    // controller 已在上面（并发守卫处）创建并登记，这里不再重复建。
     let effective = safeHistory;
     try {
       effective = (await maybeCompact(session, safeHistory, "auto", controller.signal)).messages;

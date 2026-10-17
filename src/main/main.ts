@@ -1044,23 +1044,46 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   // 同名不覆盖：同一会话里连着生成两份"报告.md"时，后者会把前者顶掉，
   // 于是**两张卡片指向同一个文件**、都显示第二版内容（实测 probe-dup-artifact）。
   // 这里探测重名并加 " (2)" / " (3)" 后缀，保证每次落盘都是独立文件。
-  const filePath = await uniqueArtifactPath(dir, safeName);
-  // 返回的 name 必须取**实际落盘文件名**（可能带 " (2)" 序号）。
-  // 用 safeName 会让卡片显示"报告.md"、磁盘上却是"报告 (2).md"——用户按卡片名去找
-  // 文件会找不到（实测 probe-dup-xlsx）。
-  const finalName = path.basename(filePath);
-  if (kind === "xlsx") {
-    // SheetJS：CSV 文本 → 工作簿 → xlsx 二进制。用户点名要"能保存成 .xlsx"，纯 CSV 落盘达不到。
-    const XLSX = await loadXlsx();
-    const book = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(parseCsvRows(content)), "Sheet1");
-    XLSX.writeFile(book, filePath);
-    const info = await stat(filePath);
-    return { name: finalName, path: filePath, size: info.size };
-  }
-  await writeFile(filePath, content, "utf8");
-  return { name: finalName, path: filePath, size: Buffer.byteLength(content, "utf8") };
+  //
+  // **探测与写入必须整体串行**：AI SDK 在同一个 step 里会并行执行多个 tool call，
+  // 两个 create_file 同名时会在彼此 `stat` 之前都判"不重名"，然后写同一个路径——
+  // 前者被静默覆盖，两张卡片显示同一份内容（与 probe-dup-artifact 的现象一样，
+  // 只是成因不同）。串行化范围只需覆盖"取路径 + 落盘"这一小段。
+  return artifactWriteQueue.run(async () => {
+    const filePath = await uniqueArtifactPath(dir, safeName);
+    // 返回的 name 必须取**实际落盘文件名**（可能带 " (2)" 序号）。
+    // 用 safeName 会让卡片显示"报告.md"、磁盘上却是"报告 (2).md"——用户按卡片名去找
+    // 文件会找不到（实测 probe-dup-xlsx）。
+    const finalName = path.basename(filePath);
+    if (kind === "xlsx") {
+      // SheetJS：CSV 文本 → 工作簿 → xlsx 二进制。用户点名要"能保存成 .xlsx"，纯 CSV 落盘达不到。
+      const XLSX = await loadXlsx();
+      const book = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(parseCsvRows(content)), "Sheet1");
+      XLSX.writeFile(book, filePath);
+      const info = await stat(filePath);
+      return { name: finalName, path: filePath, size: info.size };
+    }
+    await writeFile(filePath, content, "utf8");
+    return { name: finalName, path: filePath, size: Buffer.byteLength(content, "utf8") };
+  });
 }
+
+/**
+ * 产物落盘的串行队列（进程级，与 TaskStore.save 同一套做法）。
+ * 只用于把"重名探测 + 写文件"做成不可分割的一段，避免并发 tool call 互相覆盖。
+ * 单次失败不能污染队列，否则后续所有落盘连坐失败。
+ */
+const artifactWriteQueue = (() => {
+  let tail: Promise<unknown> = Promise.resolve();
+  return {
+    run<T>(operation: () => Promise<T>): Promise<T> {
+      const next = tail.then(operation, operation);
+      tail = next.then(() => undefined, () => undefined);
+      return next;
+    }
+  };
+})();
 
 /** CSV 文本 → string[][]：用共享解析器切行切格（正确处理引号字段与引号内的换行）。
  * 旧实现先 `split("\n")` 再朴素切逗号，有两个坑：

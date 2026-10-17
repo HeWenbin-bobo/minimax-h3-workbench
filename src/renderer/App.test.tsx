@@ -54,3 +54,33 @@ describe("方案块渲染（<proposed_plan> 契约）", () => {
     expect(html).not.toContain("md-plan");
   });
 });
+
+// 会话容量裁剪：回收站里的会话必须保留（"7 天内可恢复"的承诺不能被容量上限打破）。
+// 与主进程 trimHistory / TaskStore.write 对 deletedAt 的处理保持一致。
+describe("capSessions 容量裁剪", () => {
+  const now = Date.now();
+  const at = (msAgo: number) => new Date(now - msAgo).toISOString();
+  const make = (id: string, ageMs: number, extra: Record<string, unknown> = {}) =>
+    ({ id, title: id, createdAt: at(ageMs), updatedAt: at(ageMs), messages: [], ...extra }) as never;
+
+  it("未超上限时原样返回（同一个引用，避免无谓重渲染）", async () => {
+    const { capSessions } = await import("./App");
+    const list = [make("a", 1000)];
+    expect(capSessions(list, [])).toBe(list);
+  });
+
+  it("回收站会话不被容量上限淘汰（即使它很旧）", async () => {
+    const { capSessions } = await import("./App");
+    const actives = Array.from({ length: 60 }, (_, i) => make(`a${i}`, i * 1000));
+    const deleted = Array.from({ length: 5 }, (_, i) => make(`d${i}`, 6 * 86_400_000, { deletedAt: at(6 * 86_400_000) }));
+    const kept = capSessions([...actives, ...deleted], []);
+    expect(kept.filter((s) => (s as { deletedAt?: string }).deletedAt)).toHaveLength(5);
+  });
+
+  it("正在生成的会话不被淘汰", async () => {
+    const { capSessions } = await import("./App");
+    const actives = Array.from({ length: 60 }, (_, i) => make(`a${i}`, i * 1000));
+    const kept = capSessions(actives, ["a59"]);
+    expect(kept.some((s) => s.id === "a59")).toBe(true);
+  });
+});

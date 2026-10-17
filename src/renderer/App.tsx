@@ -521,14 +521,22 @@ function sessionRecency(session: PlaygroundSession): string {
 }
 
 /**
- * 裁到上限：按最近使用保留最新的，但正在生成回复的会话一律保留——
- * 否则并发场景下一段还在跑的对话会被静默砍掉，回复流到一半目标就没了。
+ * 裁到上限：按最近使用保留最新的，但两类会话一律保留——
+ * ① 正在生成回复的（否则并发场景下一段还在跑的对话会被静默砍掉，回复流到一半目标就没了）；
+ * ② **回收站里的**（deletedAt 非空）。它们归"7 天内可恢复"的承诺管，不该被容量上限悄悄挤掉。
+ *
+ * ②与主进程同一套语义：`GenerationOrchestrator.trimHistory` 也刻意让 `deletedAt` 任务不参与
+ * 条数淘汰、`TaskStore.write` 明确注释不按条数截断。渲染端此前漏了这一条：实测 60 个活跃会话
+ * + 10 个 6 天前删的会话，裁完 10 个已删全部消失——用户点「恢复」才发现东西没了。
+ * 体积仍有界：过期回收站会话由启动时的 7 天清理移除。
  */
-function capSessions(sessions: PlaygroundSession[], generatingIds: string[]): PlaygroundSession[] {
+export function capSessions(sessions: PlaygroundSession[], generatingIds: string[]): PlaygroundSession[] {
   if (sessions.length <= PG_SESSION_CAP) return sessions;
-  const running = sessions.filter((s) => generatingIds.includes(s.id));
-  const rest = sessions.filter((s) => !generatingIds.includes(s.id)).sort((a, b) => sessionRecency(b).localeCompare(sessionRecency(a)));
-  const kept = new Set([...running.map((s) => s.id), ...rest.slice(0, Math.max(0, PG_SESSION_CAP - running.length)).map((s) => s.id)]);
+  const keepAlways = (s: PlaygroundSession) => generatingIds.includes(s.id) || Boolean(s.deletedAt);
+  const pinned = sessions.filter(keepAlways);
+  const rest = sessions.filter((s) => !keepAlways(s)).sort((a, b) => sessionRecency(b).localeCompare(sessionRecency(a)));
+  const room = Math.max(0, PG_SESSION_CAP - pinned.length);
+  const kept = new Set([...pinned.map((s) => s.id), ...rest.slice(0, room).map((s) => s.id)]);
   return sessions.filter((s) => kept.has(s.id));
 }
 

@@ -279,11 +279,18 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   // 项目分类：所有项目出现过的分类 + "全部"/"未分类" 过滤；新分类在当前项目上直接输入。
   const projectCategories = useMemo(() => Array.from(new Set(tasks.map((t) => t.category).filter((c): c is string => Boolean(c)))), [tasks]);
   const [categoryFilter, setCategoryFilter] = useState<string>("全部");
+  // 筛选值可能失效：用户把最后一组改成别的分类、或整组删除后，
+  // `categoryFilter` 指向的分类已不在 `projectCategories` 里——列表变空，
+  // 而对应的按钮也没了，用户找不到"怎么变回去"的入口。
+  // 用**派生值**兜住（不做 setState 同步，避免再引入渲染循环）：
+  // 失效时按"全部"显示，筛选条的选中态也一并跟随。
+  const categoryFilterValues = ["全部", ...projectCategories, "未分类"];
+  const activeCategoryFilter = categoryFilterValues.includes(categoryFilter) ? categoryFilter : "全部";
   const filteredProjects = useMemo(() => {
-    if (categoryFilter === "全部") return projects;
-    if (categoryFilter === "未分类") return projects.filter((group) => !group[0].category);
-    return projects.filter((group) => group[0].category === categoryFilter);
-  }, [projects, categoryFilter]);
+    if (activeCategoryFilter === "全部") return projects;
+    if (activeCategoryFilter === "未分类") return projects.filter((group) => !group[0].category);
+    return projects.filter((group) => group[0].category === activeCategoryFilter);
+  }, [projects, activeCategoryFilter]);
   async function setProjectCategory(category: string) {
     if (!activeProject) return;
     // IPC 可能 reject；不兜住会变成未处理的 Promise rejection（点了没反应也没提示）。
@@ -314,7 +321,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   }
   return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="page-title-actions"><button className="text-button" onClick={() => setShowTrash((v) => !v)}>🗑 回收站</button><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div></div>
     {projects.length > 0 && <div className="category-filter">
-      {["全部", ...projectCategories, "未分类"].map((c) => <button key={c} className={categoryFilter === c ? "on" : ""} onClick={() => setCategoryFilter(c)}>{c}</button>)}
+      {categoryFilterValues.map((c) => <button key={c} className={activeCategoryFilter === c ? "on" : ""} onClick={() => setCategoryFilter(c)}>{c}</button>)}
       {catEdit.project ? <input className="cat-input" autoFocus value={catEdit.value} placeholder="分类名（留空清除）"
         onChange={(e) => setCatEdit({ project: true, value: e.target.value })}
         onBlur={() => commitProjectCategory()}

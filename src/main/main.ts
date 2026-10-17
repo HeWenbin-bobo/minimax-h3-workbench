@@ -279,7 +279,18 @@ function createWindow(): BrowserWindow {
       sandbox: true
     }
   });
-  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  // 页面内 `target="_blank"` / window.open：**一律不在应用内开新窗口**，
+  // 但聊天里渲染的 Markdown 链接正是这个形态（markdown.tsx 的 <a target="_blank">）。
+  // 无差别 deny 会让"点链接"彻底没反应——用户以为应用坏了。
+  // 因此：只把 https 链接交给系统浏览器（与 shell:openExternal 同一道协议限制），其余一律拒绝。
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      if (new URL(url).protocol === "https:") void shell.openExternal(url);
+    } catch {
+      // 非法 URL：什么都不做，等同于 deny。
+    }
+    return { action: "deny" };
+  });
   // 导航守卫：**只允许留在应用自己的页面**。
   //
   // 不能只比 origin：file:// 文档的 origin 全是 "null"，`null !== null` 为 false，

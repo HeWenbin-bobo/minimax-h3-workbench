@@ -13,6 +13,27 @@ import { BrowserWindow, session } from "electron";
 const PARTITION = "persist:h3-browser-fetch";
 const DEFAULT_TIMEOUT_MS = 25_000;
 
+/**
+ * 隐藏窗口加载的是**任意外部页面**（`open_page` 的 URL 由模型给出，`web_search` 抓的是公开搜索结果页），
+ * 必须按不可信内容处理。
+ *
+ * 实测默认行为（probe browserfetch-hardening）：不装 handler 时，
+ * 页面里的 `window.open()` 会**真的创建新窗口**（该窗口不受 renderOnce 的 finally 管，
+ * 抓取结束也不会关），`Notification.requestPermission()` 直接返回 granted。
+ * 前者可用来做弹窗骚扰/钓鱼，后者能拿到系统通知权限。
+ *
+ * 加固原则：这个窗口只用来**读 DOM**，任何主动能力（新窗口、权限）都不需要。
+ */
+function harden(win: BrowserWindow, ses: Electron.Session): void {
+  // 不允许页面开新窗口。
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  // 权限一律拒绝（通知、地理位置、媒体、剪贴板、USB/串口…）。
+  // Electron 要求 request 与 check 两个 handler 都实现：多数 Web API 先 check 再 request，
+  // 只实现其一会漏（electron.d.ts 对 setPermissionCheckHandler 有明确说明）。
+  ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  ses.setPermissionCheckHandler(() => false);
+}
+
 // 隐藏窗口是重资源：串行执行，避免并发开一堆窗口把内存打满。
 let chain: Promise<void> = Promise.resolve();
 
@@ -25,6 +46,7 @@ export function renderHtml(url: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise
 }
 
 async function renderOnce(url: string, timeoutMs: number): Promise<string> {
+  const ses = session.fromPartition(PARTITION);
   const win = new BrowserWindow({
     show: false,
     width: 1280,
@@ -39,6 +61,7 @@ async function renderOnce(url: string, timeoutMs: number): Promise<string> {
       backgroundThrottling: false
     }
   });
+  harden(win, ses);
   try {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`浏览器渲染超时（${timeoutMs / 1000} 秒）`)), timeoutMs);

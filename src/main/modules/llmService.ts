@@ -183,6 +183,8 @@ export class LlmService {
           // 把本轮取消信号透给搜索：否则用户点「停止」后，搜索仍会跑完
           // （浏览器渲染可达数十秒）才轮到下面的 fetch —— 停止看起来没反应。
           const results = await this.search(lastUser.content.slice(0, 200), browserOnly, signal);
+          // **中止要立即向上抛，不能被下面的 catch 吞掉**：那个 catch 的语义是
+          // "搜索失败 → 基于自身知识回答"，把取消当失败会让用户点了停止后仍继续发请求。
           if (signal?.aborted) throw new DOMException("对话已取消", "AbortError");
           // 空串（配置了搜索 API 但对端返回 0 条）必须**明确告知**，不能什么都不追加。
           // 不告知的话模型以为自己检索过了，直接凭训练知识作答——正是本项目反复踩到的
@@ -192,6 +194,9 @@ export class LlmService {
             ? `${system.content}\n\n以下是网络搜索结果，回答时可引用：\n${results}`
             : `${system.content}\n\n（联网搜索已执行但未返回任何结果。涉及实时信息时请如实说明本次未能检索到，不要凭记忆给出具体数字或日期；可建议用户换个关键词或稍后再问。）`;
         } catch (error) {
+          // 取消不是"搜索失败"：原样抛给调用方，走既有的 AbortError 分支。
+          if (error instanceof DOMException && error.name === "AbortError") throw error;
+          if (signal?.aborted) throw new DOMException("对话已取消", "AbortError");
           system.content = `${system.content}\n\n（联网搜索失败：${describeError(error, "未知错误")}，请基于自身知识回答。）`;
         }
       }

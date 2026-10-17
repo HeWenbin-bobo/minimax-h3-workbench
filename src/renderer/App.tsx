@@ -699,6 +699,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           return {
             ...msg,
             streaming: false,
+            // 本轮已结束：任何挂着的选择题卡片都该摘掉。
+            // 超时/跳过时 QuestionBridge 会 reject，模型按最佳判断继续并最终走到 done——
+            // 不清的话卡片会永久留在已收尾的气泡上，用户再点只得到"已超时"的提示。
+            questions: undefined,
             // 步骤日志完成后保留（回答旁边能看到"这条回答是怎么来的"）；仅重启时剥离（瞬态）。
             error: failed,
             taskGroups: mergedGroups.length ? mergedGroups : undefined,

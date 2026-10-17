@@ -241,7 +241,18 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
     [activeProject, clampedCount]
   );
   const shownCount = currentTasks.length;
-  async function choose(kind: "image" | "video", field: keyof GenerationRequest) { const response = await window.h3.selectFile(kind); if (response.data) setRequest((r) => ({ ...r, [field]: response.data })); }
+  async function choose(kind: "image" | "video", field: keyof GenerationRequest) {
+    // IPC 可能 reject（主进程 handler 异常、通道被销毁），也可能返回 ok:false。
+    // 旧实现两者都没接：不是未处理的 rejection，就是点了「选择」毫无反应——
+    // 用户分不清是没选中还是软件坏了（与 ConnectionsPage 两个选择按钮同一类，见 69028e2）。
+    try {
+      const response = await window.h3.selectFile(kind);
+      if (!response.ok) onError(response.message || "无法打开文件选择器");
+      else if (response.data) setRequest((r) => ({ ...r, [field]: response.data }));
+    } catch (error) {
+      onError(error);
+    }
+  }
   // 同步守卫：submitting 是异步 state，同一 tick 内双击会双双读到 false → 提交两次。
   // 云端后端每次提交都**真实扣费**，重复提交等于白扣（实测 probe-studio-double-submit：
   // 双击建出 2 个项目组、ComfyUI /prompt 被命中 2 次）。
@@ -1743,7 +1754,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           </div>
         </div>
         </div>
-        {preview && <PgPreviewPanel artifact={preview} onClose={() => setPreview(undefined)} width={previewWidth} onResize={resizePreview} />}
+        {preview && <PgPreviewPanel artifact={preview} onClose={() => setPreview(undefined)} width={previewWidth} onResize={resizePreview} onError={onError} />}
       </div>
     </div>
   </section>;
@@ -1857,7 +1868,7 @@ function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }:
 /** 产物侧栏预览：占位压缩聊天区（非悬浮），左缘拖拽条可调宽度。渲染区按 kind 分支：
  * html→沙箱 iframe（走协议按路径加载，内容不进渲染端）；sheet→CSV 渲染表格；doc→renderMarkdown 文档排版。
  * sheet/doc 需要文本内容：metadata 路径下 content 为空，故按需从磁盘读（受主进程路径白名单约束）。 */
-function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: ArtifactInfo; onClose: () => void; width: number; onResize: (width: number) => void }) {
+function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artifact: ArtifactInfo; onClose: () => void; width: number; onResize: (width: number) => void; onError: (e: unknown) => void }) {
   const [nonce, setNonce] = useState(0);
   const [diskContent, setDiskContent] = useState<string>();
   const [readError, setReadError] = useState<string>();
@@ -1946,7 +1957,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
       <span className="pg-preview-tab">{icon} {artifact.name}</span>
       <span className="pg-preview-actions">
         <button className="pg-tool" title="重新加载" onClick={() => setNonce((n) => n + 1)}>↻</button>
-        <button className="pg-tool" title="在文件夹中显示" onClick={() => window.h3.showItem(artifact.path).catch(() => undefined)}>📁</button>
+        <button className="pg-tool" title="在文件夹中显示" onClick={() => window.h3.showItem(artifact.path).then((r) => { if (!r.ok) onError(r.message || "无法打开所在文件夹"); }).catch(onError)}>📁</button>
         <button className="pg-tool" title="关闭预览" onClick={onClose}>×</button>
       </span>
     </div>

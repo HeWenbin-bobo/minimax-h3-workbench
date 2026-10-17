@@ -1054,9 +1054,17 @@ function registerIpc(
     return true;
   });
   handle("shell:openExternal", async (_event, url: string) => {
-    const parsed = new URL(url);
+    // 入参来自 IPC：`new URL(123)` 抛的是英文 `TypeError: Invalid URL`，
+    // 会原样透到界面（与本轮修的 isAbsolutePath 同一类）。
+    if (typeof url !== "string" || !url) throw new Error("链接地址无效。");
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error("链接地址无效。");
+    }
     if (parsed.protocol !== "https:") throw new Error("只允许打开 HTTPS 链接。");
-    await shell.openExternal(url);
+    await shell.openExternal(parsed.toString());
     return true;
   });
   // 游乐场产物落盘：存 userData/artifacts/<sessionId>/，返回 {name,path,size} 供文件卡片展示。

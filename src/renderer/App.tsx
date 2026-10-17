@@ -598,8 +598,13 @@ function ResourcesPage({ resources, settings, onSettingsChange, onError }: { res
     let cancelled = false;
     setChecking(true);
     window.h3.checkLocalModels().then((response) => {
-      if (!cancelled) setModelStatus(response.data ?? []);
-    }).catch(() => { if (!cancelled) setModelStatus([]); }).finally(() => { if (!cancelled) setChecking(false); });
+      // `ok:false` 与 reject 都按"读不到清单"处理（显示为 []，界面会给出
+      // 「未能读取模型清单」而不是「全部就绪」）。旧写法只判 `data ?? []`，
+      // 失败时静默得到空数组、也没有任何提示——用户以为是"目录里没有模型"。
+      if (cancelled) return;
+      if (response.ok && response.data) setModelStatus(response.data);
+      else { setModelStatus([]); if (!response.ok) onError(response.message || "读取模型清单失败"); }
+    }).catch((error) => { if (!cancelled) { setModelStatus([]); onError(error); } }).finally(() => { if (!cancelled) setChecking(false); });
     return () => { cancelled = true; };
   }, [root]);
 

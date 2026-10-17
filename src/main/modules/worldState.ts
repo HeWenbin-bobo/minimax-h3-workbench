@@ -22,6 +22,14 @@ import type { ChatMessage } from "../../shared/types";
 
 export type SectionId = "current_time" | "network_access" | "artifacts" | "context_budget";
 
+/** section 的中文名。注入文本是给模型读的中文事实，不能把内部 id 直接拼进去。 */
+const SECTION_LABELS: Record<SectionId, string> = {
+  current_time: "当前时间",
+  network_access: "联网状态",
+  artifacts: "产物能力",
+  context_budget: "上下文余量"
+};
+
 export interface WorldSection {
   id: SectionId;
   /** 注入给模型的正文（自带 `# 标题` 小节头）。 */
@@ -229,10 +237,12 @@ export function diffWorldState(
   }
 
   // 消失的 section：上一轮有、这一轮不在候选集里。显式作废，避免模型凭上一轮印象继续用。
+  // 文案用**中文小节名**而不是内部 id：这段是给模型读的中文环境事实，
+  // 冒出 `current_time` / `context_budget` 这类标识符既是噪声，也和其余中文文案不一致。
   if (previous) {
     for (const entry of previous) {
       if (sections.some((section) => section.id === entry.id)) continue;
-      blocks.push(`（${entry.id} 已不再适用，先前关于它的说明作废）`);
+      blocks.push(`（「${SECTION_LABELS[entry.id] ?? "该说明"}」已不再适用，先前关于它的内容作废）`);
     }
   }
 

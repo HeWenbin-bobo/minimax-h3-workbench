@@ -96,7 +96,7 @@ describe("diffWorldState 注入", () => {
     // 候选集里只留联网 → 时间发"作废"，联网正常在场
     const only = buildSections(baseInput).filter((section) => section.id === "network_access");
     const { text } = diffWorldState(only, previous);
-    expect(text).toContain("current_time 已不再适用");
+    expect(text).toContain("「当前时间」已不再适用");
     expect(text).toContain("# 联网状态");
   });
 });

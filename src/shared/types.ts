@@ -250,6 +250,14 @@ export interface WorkbenchApi {
   purgeSessionArtifacts(sessionId: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
   /**
+   * 把主窗口带到前台（最小化时先还原）。
+   *
+   * 为什么需要 IPC：渲染端的 `window.focus()` 只能在**已显示**的窗口里抢焦点，
+   * 窗口最小化或不在前台时它什么也做不了——系统通知点击后"点了没反应"就是这个原因。
+   * 主进程的 `second-instance` 早就用了 restore/show/focus 三步，这里复用同一套。
+   */
+  focusWindow(): Promise<ApiResponse<boolean>>;
+  /**
    * 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。agent=true 走 AI SDK 工具循环。
    * sessionId 由渲染端生成：不同会话可并发对话，事件按该 id 路由回各自的会话，互不串流。
    * browserSearch=true 走「浏览器搜索」：只用应用自带 Chromium 渲染抓取（跳过搜索 API 与 HTTP 直抓），

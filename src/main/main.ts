@@ -1188,6 +1188,19 @@ function registerIpc(
     await shell.openExternal(parsed.toString());
     return true;
   });
+  // 把主窗口带到前台（系统通知点击后调用）。
+  //
+  // 渲染端的 `window.focus()` 只能在**已显示**的窗口里抢焦点；窗口最小化
+  // （或应用在后台被系统压住）时它什么也做不了，用户点通知"没反应"。
+  // 这里复用 `second-instance` 那套三步（restore / show / focus）。
+  handle("window:focus", () => {
+    const target = mainWindow;
+    if (!target || target.isDestroyed()) return false;
+    if (target.isMinimized()) target.restore();
+    target.show();
+    target.focus();
+    return true;
+  });
   // 游乐场产物落盘：存 userData/artifacts/<sessionId>/，返回 {name,path,size} 供文件卡片展示。
   // 渲染端只传文本与文件名，路径由主进程生成——渲染端无法指定任意位置写文件。
   // kind: html/csv/tsv/md 写文本；xlsx 用 SheetJS 把 CSV 文本转成真 Excel 二进制（双击可开）。

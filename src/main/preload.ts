@@ -30,6 +30,7 @@ const api: WorkbenchApi = {
   readArtifactText: (filePath) => invoke("artifact:read", filePath),
   purgeSessionArtifacts: (sessionId) => invoke("artifact:purgeSession", sessionId),
   openExternal: (url) => invoke("shell:openExternal", url),
+  focusWindow: () => invoke("window:focus"),
   chatLlm: (messages, webSearch, agent, sessionId, browserSearch, planMode) => invoke("llm:chat", messages, webSearch, Boolean(agent), String(sessionId || ""), Boolean(browserSearch), planMode),
   checkAgentFrameworkUpdate: () => invoke("update:checkFramework"),
   abortLlm: (sessionId) => invoke("llm:abort", sessionId),

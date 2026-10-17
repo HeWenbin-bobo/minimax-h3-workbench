@@ -97,7 +97,9 @@ export function App() {
     const notify = (body: string) => {
       try {
         const notification = new Notification("MiniMax H3", { body });
-        notification.onclick = () => window.focus();
+        // **必须走主进程**：渲染端 `window.focus()` 只能在已显示的窗口里抢焦点，
+        // 窗口最小化时点了通知毫无反应（主进程 second-instance 早就用 restore/show/focus 三步）。
+        notification.onclick = () => { void window.h3.focusWindow().catch(() => undefined); };
       } catch {
         // 无通知权限：界面内的任务卡片已经反映了状态，静默即可。
       }

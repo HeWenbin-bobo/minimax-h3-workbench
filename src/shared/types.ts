@@ -207,7 +207,7 @@ export interface WorkbenchApi {
   setSecret(name: SecretName, value: string): Promise<ApiResponse<boolean>>;
   hasSecret(name: SecretName): Promise<ApiResponse<boolean>>;
   selectDirectory(): Promise<ApiResponse<string | undefined>>;
-  selectFile(kind: "image" | "video" | "key"): Promise<ApiResponse<string | undefined>>;
+  selectFile(kind: "image" | "video" | "key" | "attachment"): Promise<ApiResponse<string | undefined>>;
   inspectEnvironment(): Promise<ApiResponse<EnvironmentReport>>;
   checkForUpdates(): Promise<ApiResponse<UpdateInfo>>;
   downloadAndInstallUpdate(): Promise<ApiResponse<boolean>>;

@@ -927,7 +927,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   async function pickAttachment() {
     // IPC 可能 reject（不只是 ok:false）；不兜住的话点「附件」毫无反应。
     try {
-      const response = await window.h3.selectFile("image");
+      const response = await window.h3.selectFile("attachment");
       if (!response.data) return;
       const payload = await window.h3.readAttachment(response.data);
       if (!payload.data) { onError(new Error(payload.message || "读取附件失败")); return; }

@@ -382,12 +382,19 @@ function registerIpc(
     const result = await dialog.showOpenDialog(mainWindow!, { properties: ["openDirectory", "createDirectory"] });
     return result.canceled ? undefined : result.filePaths[0];
   });
-  handle("dialog:file", async (_event, kind: "image" | "video" | "key") => {
+  handle("dialog:file", async (_event, kind: "image" | "video" | "key" | "attachment") => {
     const filters = kind === "image"
       ? [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "heic", "heif"] }]
       : kind === "video"
         ? [{ name: "视频", extensions: ["mp4", "mov", "webm", "mkv"] }]
-        : [{ name: "SSH 私钥", extensions: ["pem", "key", "ppk", "*"] }];
+        : kind === "attachment"
+          // 对话附件：图片 + 文本。此前这里用的是 "image"，而 attachment:read 明确支持
+          // .txt/.md/.json/.csv/.srt/.vtt/.log —— 用户却根本选不到它们（能力存在但够不着）。
+          ? [
+              { name: "图片与文本", extensions: ["png", "jpg", "jpeg", "webp", "heic", "heif", "txt", "md", "json", "csv", "srt", "vtt", "log"] },
+              { name: "所有文件", extensions: ["*"] }
+            ]
+          : [{ name: "SSH 私钥", extensions: ["pem", "key", "ppk", "*"] }];
     const result = await dialog.showOpenDialog(mainWindow!, { properties: ["openFile"], filters });
     return result.canceled ? undefined : result.filePaths[0];
   });

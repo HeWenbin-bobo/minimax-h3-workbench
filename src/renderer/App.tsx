@@ -783,7 +783,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
           const failed = !event.ok && Boolean(event.message);
           // 收尾把缓冲的整组任务并入分组结构（保持"哪几路是一起提交的"）。
-          const mergedGroups = [...(msg.taskGroups ?? []), ...(pendingGroups.length ? [pendingGroups] : [])];
+          //
+          // **必须去重**：onLlmTasks 里同一批任务既实时追加进 taskGroups、又写进缓冲，
+          // 这里再并一次就会挂两份——实测 2 个任务渲染成 4 张卡片、还撞了重复 React key
+          // （probe-dup-taskgroup）。缓冲存在的意义是"事件可能早于 React 提交"，即
+          // 那些**没进到 msg.taskGroups** 的批次；已在列表里的就跳过。
+          const existing = new Set((msg.taskGroups ?? []).map((group) => group.join(",")));
+          const pendingGroupsToAdd = pendingGroups.length && !existing.has(pendingGroups.join(",")) ? [pendingGroups] : [];
+          const mergedGroups = [...(msg.taskGroups ?? []), ...pendingGroupsToAdd];
           return {
             ...msg,
             streaming: false,

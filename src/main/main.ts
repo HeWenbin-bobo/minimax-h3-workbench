@@ -11,6 +11,7 @@ import {
   dialog,
   ipcMain,
   nativeImage,
+  nativeTheme,
   protocol,
   shell,
   type IpcMainInvokeEvent
@@ -280,13 +281,18 @@ app.on("activate", () => {
 app.on("before-quit", () => { adapters?.close(); void clearBrowserFetchCache(); });
 
 function createWindow(): BrowserWindow {
+  // 首帧底色跟随系统深浅色。主题选择存在渲染端 localStorage（主进程读不到），
+  // 而默认值是「跟随系统」——用 nativeTheme 做首帧底色，深色用户不会先看到一块白。
+  // 用户如果强制选了浅色/深色，渲染端加载后会覆盖，最多闪一帧同系统色的背景（远好于白闪）。
+  const dark = nativeTheme.shouldUseDarkColors;
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1120,
     minHeight: 720,
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
-    backgroundColor: "#f7f8fa",
+    // 与 styles.css 的 `--canvas` 一致（浅色 #f7f8fa / 深色 #0f1114）。
+    backgroundColor: dark ? "#0f1114" : "#f7f8fa",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

@@ -645,6 +645,22 @@ function registerIpc(
     // 用户只是点了下停止，回头发现对话内容没了。
     if (signal.aborted) return { messages: effective };
     const compacted = buildCompactedHistory(effective, summary);
+    // **压缩没有净收益就不要提交**。
+    //
+    // `buildCompactedHistory` 只保留用户消息（助手回复与工具步骤全部丢弃），
+    // 收益来自"丢掉那些助手内容"。若历史本身就是长用户消息（比如用户粘了一份长文档），
+    // 保留部分 + 摘要可能比原历史还大——实测 2.8k → 2.9k。
+    // 此时提交等于：白花一次摘要请求 + 把原始措辞换成二手摘要 + 占用不降。
+    const afterTokens = activeContextTokens(compacted, undefined);
+    if (afterTokens >= active) {
+      if (trigger === "manual") {
+        // 手动触发必须给反馈，否则用户点了「立即压缩」看不到任何反应。
+        const info = { before: active, after: active, windowNumber: budget.window.windowNumber, reason: "压缩无收益（历史以你的消息为主），已保持原样" };
+        sendToWindow("llm:compaction", { ...info, sessionId: session });
+        return { messages: effective, info };
+      }
+      return { messages: effective };
+    }
     budget.compacted = compacted;
     budget.compactedThrough = messages.length;
     budget.window = advanceWindow(budget.window);

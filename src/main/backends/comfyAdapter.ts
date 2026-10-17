@@ -98,14 +98,19 @@ export class ComfyAdapter implements GenerationAdapter {
   async cancel(providerTaskId?: string): Promise<void> {
     // ComfyUI 无"按 prompt 中断"接口：先把仍在排队的任务出队（对不存在/运行中任务是无害 no-op），
     // 再中断当前采样；本应用本地/SSH 后端并发为 1，两步组合等价于只取消目标任务。
+    //
+    // **必须带超时**：编排层的 cancel() 会 await 这里，而 `tasks:cancel` 是等待返回的 IPC。
+    // ComfyUI 无响应（模型加载卡死、连接半开）时裸 fetch 永不落定，用户点了「停止」
+    // 界面一直转圈、任务也停不下来——取消功能在最该起作用的场景失效。
     if (providerTaskId) {
       await fetch(`${this.baseUrl}/queue`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delete: [providerTaskId] })
+        body: JSON.stringify({ delete: [providerTaskId] }),
+        signal: AbortSignal.timeout(5_000)
       }).catch(() => undefined);
     }
-    await fetch(`${this.baseUrl}/interrupt`, { method: "POST" }).catch(() => undefined);
+    await fetch(`${this.baseUrl}/interrupt`, { method: "POST", signal: AbortSignal.timeout(5_000) }).catch(() => undefined);
   }
 
   private async assertModelsReady(mode: GenerationRequest["mode"], signal?: AbortSignal): Promise<void> {

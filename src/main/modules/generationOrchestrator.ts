@@ -162,9 +162,20 @@ export class GenerationOrchestrator {
       message: "等待生成",
       request: normalized
     }));
-    this.tasks.unshift(...created);
+    // **写盘失败要把内存态回滚**。
+    // `save()` 现在会把写盘失败抛给调用方（磁盘满、目录只读），而这里先改了内存：
+    // `unshift` 加进了新任务、`trimHistory` 还可能淘汰了旧组。不回滚的话，
+    // 用户看到"提交失败"的报错，界面上却仍多出一批停在「等待生成」的幽灵任务，
+    // 重启后又消失（因为磁盘上根本没写成功）——典型的"报错了但界面更乱"。
+    const before = this.tasks;
+    this.tasks = [...created, ...before];
     this.trimHistory();
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      this.tasks = before;
+      throw error;
+    }
     created.forEach(this.listener);
 
     const concurrency = request.backend === "minimax" ? 2 : 1;
@@ -213,9 +224,16 @@ export class GenerationOrchestrator {
       // 否则任务自报 seed=新值、存档 request.baseSeed=旧值，两者矛盾（实测复现）。
       request: normalized
     };
-    this.tasks.unshift(created);
+    // 与 submit 同一理由：写盘失败要把内存态回滚，否则会留下一条永远「等待重试」的幽灵任务。
+    const before = this.tasks;
+    this.tasks = [created, ...before];
     this.trimHistory();
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      this.tasks = before;
+      throw error;
+    }
     this.listener({ ...created });
     void runPool([created], normalized.backend === "minimax" ? 2 : 1, (item) => this.runTask(normalized, item)).catch(() => undefined);
     return created;

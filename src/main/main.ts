@@ -232,9 +232,16 @@ app.whenReady().then(async () => {
   // 回收站过期清理：删除超过 7 天的任务，连同输出文件一并清除。
   // 删文件的口径与 tasks:purge 一致：信任根是「当前输出目录 + 用户配置过的历史输出目录」，
   // 且逐个做 realpath 包含性校验（见 deleteRoots / unlinkIfInside）。
+  //
+  // **必须接住 rejection**：`purgeTasks` 内部 `await store.save(...)` 在磁盘满/只读时会抛
+  // （save 刻意把写盘失败交给调用方），而这里是启动流程里的 fire-and-forget——
+  // 裸 `void promise` 会变成未处理 rejection。虽然全局兜底会记日志不退出，
+  // 但清理失败应当被记录下来，而不是混进"某个调用忘了接"的噪声里。
   void orchestrator.purgeExpired(async (filePath) => {
     const settings = await settingsStore.get();
     await unlinkIfInside(deleteRoots(settings), filePath);
+  }).catch((error) => {
+    console.error("[tasks] 回收站过期清理失败：", error instanceof Error ? error.message : error);
   });
   registerIpc(settingsStore, adapters, orchestrator);
   mainWindow = createWindow();

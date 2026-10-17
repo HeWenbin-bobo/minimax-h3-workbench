@@ -1146,9 +1146,16 @@ function registerIpc(
     // 预览要的是表格文本，故用同一套 SheetJS 反向转回 CSV——避免"存得下、看不了"。
     if (/\.xlsx$/i.test(resolved)) {
       const XLSX = await loadXlsx();
-      const book = XLSX.readFile(resolved);
-      const first = book.SheetNames[0];
-      return first ? XLSX.utils.sheet_to_csv(book.Sheets[first]) : "";
+      try {
+        const book = XLSX.readFile(resolved);
+        const first = book.SheetNames[0];
+        return first ? XLSX.utils.sheet_to_csv(book.Sheets[first]) : "";
+      } catch (error) {
+        // SheetJS 对损坏文件抛的是英文内部错误（实测 "Unsupported ZIP encryption"）。
+        // 预览面板会把它原样显示成"读取失败：Unsupported ZIP encryption"，
+        // 用户既不知道原因也不知道怎么办。
+        throw new Error(`表格文件已损坏或格式不受支持，无法读取（${error instanceof Error ? error.message : "未知错误"}）。可重新生成该表格。`);
+      }
     }
     if (!/\.(html?|csv|tsv|md|txt|json)$/i.test(resolved)) throw new Error("该文件类型不支持文本预览。");
     return readFile(resolved, "utf8");

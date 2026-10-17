@@ -104,6 +104,22 @@ describe("TaskStore.load 字段类型归一", () => {
     const onDisk = JSON.parse(await readFile(taskFile(), "utf8"));
     expect(onDisk[0].prompt).toBe("");
   });
+
+  // index 参与项目内排序（`sort((a, b) => a.index - b.index)`），非数字会让比较函数
+  // 返回 NaN → 4 路结果顺序未定义；seed 直接进 ComfyUI 的 noise_seed（非数字变 null）。
+  it("index / seed 非数字时归一为 0", async () => {
+    await writeFile(taskFile(), JSON.stringify([makeTask({ index: "abc", seed: null })]), "utf8");
+    const tasks = await new TaskStore().load();
+    expect(tasks[0].index).toBe(0);
+    expect(tasks[0].seed).toBe(0);
+  });
+
+  it("index / seed 正常数字原样保留（不误伤）", async () => {
+    await writeFile(taskFile(), JSON.stringify([makeTask({ index: 3, seed: 12345 })]), "utf8");
+    const tasks = await new TaskStore().load();
+    expect(tasks[0].index).toBe(3);
+    expect(tasks[0].seed).toBe(12345);
+  });
 });
 
 // message 也必须归一：任务卡片会 `task.message?.slice(0, 60)`，

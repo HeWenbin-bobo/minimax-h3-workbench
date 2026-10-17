@@ -49,6 +49,16 @@ export class TaskStore {
         // message 同理：任务卡片会 `task.message?.slice(0, 60)`——可选链只挡 null/undefined，
         // 数字照样抛 "task.message.slice is not a function"。
         const message = typeof task.message === "string" ? task.message : undefined;
+        // `index` 参与项目内排序（`[...activeProject].sort((a, b) => a.index - b.index)`）：
+        // 非数字时比较函数返回 NaN，sort 结果是**未定义顺序**，项目里的 4 路会乱序排。
+        // `seed` 直接进 ComfyUI 的 `noise_seed`（非数字会被 JSON.stringify 成 null）。
+        // 两者都只在磁盘上出错，界面看不出原因，故在读取边界统一归一。
+        const index = Number.isFinite(task.index) ? task.index : 0;
+        const seed = Number.isFinite(task.seed) ? task.seed : 0;
+        if (index !== task.index || seed !== task.seed) {
+          changed = true;
+          task = { ...task, index, seed };
+        }
         // request.prompt 也会被重试路径 `prompt.trim()` 读取。
         const normalizedRequest = task.request && typeof task.request.prompt === "string"
           ? task.request

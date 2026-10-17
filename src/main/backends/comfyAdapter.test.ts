@@ -43,6 +43,21 @@ describe("ComfyAdapter readiness", () => {
     }
   });
 
+  // 反代/登录页会返回 HTML：`response.json()` 抛英文 `Unexpected token '<'`，
+  // 原样透到「测试连接」失败提示里，用户完全不知道是地址填错还是被拦了。
+  it("接口返回 HTML 时给出中文提示（不透出 Unexpected token）", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response("<!DOCTYPE html><html><body>登录</body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" }
+      })
+    ));
+    const result = await adapter().test();
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("不是 ComfyUI 接口数据");
+    expect(result.message).not.toContain("Unexpected token");
+  });
+
   it("reports the exact missing H3 models instead of a false successful connection", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);

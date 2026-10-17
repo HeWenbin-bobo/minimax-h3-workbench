@@ -35,8 +35,13 @@ export class ComfyAdapter implements GenerationAdapter {
         fetch(`${this.baseUrl}/object_info`, { signal: requestSignal(signal, 12_000) })
       ]);
       if (!statsResponse.ok || !nodesResponse.ok) throw new Error(`ComfyUI 返回 ${statsResponse.status}/${nodesResponse.status}`);
-      const stats = (await statsResponse.json()) as Record<string, unknown>;
-      const nodes = (await nodesResponse.json()) as JsonObject;
+      const stats = (await readJson(statsResponse)) as Record<string, unknown> | undefined;
+      const nodes = (await readJson(nodesResponse)) as JsonObject | undefined;
+      // 反向代理/登录页返回 HTML 时 `response.json()` 会抛英文 `Unexpected token '<'`。
+      // 这里明确说清"返回的不是 ComfyUI 接口数据"，用户才知道去查地址/代理。
+      if (!stats || !nodes) {
+        throw new Error("该地址返回的不是 ComfyUI 接口数据（可能填成了网页地址，或被反向代理/登录页拦截）。");
+      }
       const { hasH3Nodes: hasH3, missingModels: missing } = inspectH3Readiness(nodes);
       const ok = hasH3 && missing.length === 0;
       return {
@@ -84,7 +89,7 @@ export class ComfyAdapter implements GenerationAdapter {
       signal: requestSignal(signal, 30_000)
     });
     if (!response.ok) throw new Error(`ComfyUI 提交失败：${response.status} ${await response.text()}`);
-    const submitted = (await response.json()) as { prompt_id?: string; error?: { message?: string } };
+    const submitted = (await readJson(response)) as { prompt_id?: string; error?: { message?: string } };
     if (!submitted.prompt_id) throw new Error(submitted.error?.message || "ComfyUI 未返回 prompt_id");
     onProviderId?.(submitted.prompt_id);
     onProgress("running", 15, "ComfyUI 正在生成");
@@ -119,7 +124,9 @@ export class ComfyAdapter implements GenerationAdapter {
     // 编排层传的正是用户取消信号（永不到期），有它就没有超时 → ComfyUI 卡住时这里无限挂住。
     const response = await fetch(`${this.baseUrl}/object_info`, { signal: requestSignal(signal, 12_000) });
     if (!response.ok) throw new Error(`无法读取 ComfyUI 模型清单：HTTP ${response.status}`);
-    const nodes = (await response.json()) as JsonObject;
+    // 非 JSON（反向代理/登录页返回 HTML）时明确报错，而不是抛英文 `Unexpected token '<'`。
+    const nodes = (await readJson(response)) as JsonObject | undefined;
+    if (!nodes) throw new Error("该地址返回的不是 ComfyUI 接口数据（可能填成了网页地址，或被反向代理/登录页拦截）。");
     const readiness = inspectH3Readiness(nodes);
     if (!readiness.hasH3Nodes) throw new Error("当前 ComfyUI 缺少 MiniMax H3 原生节点，请更新到 0.30.0+ 后完全重启。 ");
     const requiredKeys = mode === "video"
@@ -165,7 +172,7 @@ export class ComfyAdapter implements GenerationAdapter {
     form.append("overwrite", "true");
     const response = await fetch(`${this.baseUrl}/upload/image`, { method: "POST", body: form, signal: requestSignal(signal, 120_000) });
     if (!response.ok) throw new Error(`素材上传失败：${response.status} ${await response.text()}`);
-    return (await response.json()) as UploadedMedia;
+    return (await readJson(response)) as UploadedMedia;
   }
 
   private async waitForOutput(
@@ -181,8 +188,10 @@ export class ComfyAdapter implements GenerationAdapter {
       if (Date.now() - startedAt > timeoutMs) throw new Error("等待 ComfyUI 生成超过 30 分钟，已超时终止。请检查 ComfyUI 是否正常运行。");
       const response = await fetch(`${this.baseUrl}/history/${encodeURIComponent(promptId)}`, { signal: requestSignal(signal, 20_000) });
       if (response.ok) {
-        const history = (await response.json()) as Record<string, unknown>;
-        const entry = history[promptId] as {
+        // 轮询里**不能**因为一次非 JSON 响应就把任务判死（网关错误页、维护页都会这样）：
+        // readJson 返回 undefined 时跳过本轮判断，走下面共用的"继续轮询"。
+        const history = (await readJson(response)) as Record<string, unknown> | undefined;
+        const entry = history?.[promptId] as {
           outputs?: unknown;
           status?: { status_str?: string; completed?: boolean; messages?: unknown[] };
         } | undefined;
@@ -256,6 +265,20 @@ export function findMedia(value: unknown): { filename: string; subfolder?: strin
   return all.find((item) => isMedia(item) && item.type === "output")
     ?? all.find(isMedia)
     ?? all[0];
+}
+
+/**
+ * 读 JSON，失败返回 undefined。
+ *
+ * 为什么不用裸 `response.json()`：ComfyUI 前面常挂反向代理/内网门户/认证页，
+ * 这些会返回 **HTML**，`response.json()` 抛的是英文 `Unexpected token '<' ...`，
+ * 原样透到界面既看不懂也指不出方向。
+ * - `test()` / `assertModelsReady`：undefined → 明确报"返回的不是 ComfyUI 接口数据"；
+ * - 轮询 `waitForOutput`：undefined → 当作"这一轮还没结果"，继续轮询（一次网关错误页
+ *   不该把已扣时的任务判死）。
+ */
+async function readJson(response: Response): Promise<unknown | undefined> {
+  return response.json().catch(() => undefined);
 }
 
 /**

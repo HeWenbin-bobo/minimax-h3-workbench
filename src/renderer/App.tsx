@@ -493,7 +493,19 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
     setLlmModels(undefined);
   };
   async function save() { try { const saved = await must(window.h3.updateSettings(draft)); if (apiKey) await must(window.h3.setSecret("minimaxApiKey", apiKey)); if (sshPassword) await must(window.h3.setSecret("sshPassword", sshPassword)); if (rbCardCode) await must(window.h3.setSecret("rbCardCode", rbCardCode)); if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey)); if (searchKey) await must(window.h3.setSecret("searchApiKey", searchKey)); setSettings(saved); setApiKey(""); setSshPassword(""); setRbCardCode(""); setLlmKey(""); setSearchKey(""); onNotice("连接设置已安全保存"); } catch (e) { onError(e); } }
-  async function test(kind: BackendKind) { setTesting(kind); const result = await window.h3.testBackend(kind); setTesting(undefined); if (result.data) setResults((r) => ({...r,[kind]:result.data})); else onError(result.message); }
+  async function test(kind: BackendKind) {
+    setTesting(kind);
+    // 同 detect()/update()：IPC reject 时 setTesting(undefined) 不执行 → 按钮永久卡在「测试中…」。
+    try {
+      const result = await window.h3.testBackend(kind);
+      if (result.data) setResults((r) => ({ ...r, [kind]: result.data }));
+      else onError(result.message);
+    } catch (error) {
+      onError(error);
+    } finally {
+      setTesting(undefined);
+    }
+  }
   // LLM 测试：先保存当前草稿（含可能刚输入的 Key），再发最小对话验证全链路。
   async function testLlm() {
     setLlmTesting(true); setLlmResult(undefined);

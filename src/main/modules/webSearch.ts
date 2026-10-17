@@ -129,10 +129,16 @@ async function scrapeSogou(query: string, signal?: AbortSignal): Promise<SearchR
   return parseSogou(await response.text()).slice(0, MAX_RESULTS);
 }
 
-/** 解析 Bing 结果页：每条是 <li class="b_algo"><h2><a href>标题</a></h2>…<p>摘要</p>…</li>。导出以便单测。 */
+/**
+ * 解析 Bing 结果页：每条是 `<li class="b_algo …"><h2><a href>标题</a></h2>…<p>摘要</p>…</li>`。
+ *
+ * class 匹配必须宽容：Bing 实际输出常用**复合 class**（`b_algo b_algoBorder`）或单引号，
+ * 死认 `class="b_algo"` 会一条都解析不出来（实测 probe-bing-class：复合/单引号两种都 0 条）。
+ * 导出以便单测。
+ */
 export function parseBing(html: string): SearchResult[] {
   const items: SearchResult[] = [];
-  const block = /<li class="b_algo"[\s\S]*?<h2><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h2>([\s\S]*?)<\/li>/g;
+  const block = /<li[^>]*class=["'][^"']*\bb_algo\b[^"']*["'][^>]*>[\s\S]*?<h2><a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a><\/h2>([\s\S]*?)<\/li>/g;
   let match: RegExpExecArray | null;
   while ((match = block.exec(html)) !== null && items.length < MAX_RESULTS) {
     const snippet = /<p[^>]*>([\s\S]*?)<\/p>/.exec(match[3]);

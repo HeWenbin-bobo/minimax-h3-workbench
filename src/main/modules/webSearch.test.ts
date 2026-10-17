@@ -137,3 +137,27 @@ describe("searchWeb", () => {
     await expect(searchWeb("查询", {})).rejects.toThrow(/免 key 搜索未取到结果[\s\S]*配置搜索 API/);
   });
 });
+
+// 回归：Bing 实际输出常用**复合 class**（b_algo b_algoBorder）或单引号。
+// 死认 `class="b_algo"` 会一条都解析不出来（实测 probe-bing-class：两种都 0 条）。
+describe("parseBing class 匹配稳健性", () => {
+  const wrap = (li: string) => `<ol>${li}</ol>`;
+  const mk = (liOpen: string, hrefQuote = '"') =>
+    wrap(`<li ${liOpen}><h2><a href=${hrefQuote}https://x.com${hrefQuote}>标题</a></h2><p>摘要</p></li>`);
+
+  it("精确 class", () => {
+    expect(parseBing(mk('class="b_algo"'))).toHaveLength(1);
+  });
+  it("复合 class（b_algo b_algoBorder）", () => {
+    expect(parseBing(mk('class="b_algo b_algoBorder"'))).toHaveLength(1);
+  });
+  it("class 前带其它属性", () => {
+    expect(parseBing(mk('data-idx="1" class="b_algo"'))).toHaveLength(1);
+  });
+  it("单引号 class 与 href", () => {
+    expect(parseBing(mk("class='b_algo'", "'"))).toHaveLength(1);
+  });
+  it("b_algoExtra 这类近似名不误匹配", () => {
+    expect(parseBing(mk('class="b_algoxy"'))).toHaveLength(0);
+  });
+});

@@ -1185,6 +1185,16 @@ function registerIpc(
   // 渲染端只传文本与文件名，路径由主进程生成——渲染端无法指定任意位置写文件。
   // kind: html/csv/tsv/md 写文本；xlsx 用 SheetJS 把 CSV 文本转成真 Excel 二进制（双击可开）。
   handle("artifact:save", async (_event, payload: { sessionId: string; name: string; content: string; kind: string }) => {
+    // 入参来自 IPC（渲染端/可达调用方），类型没有保证：
+    // - `payload` 为 null/undefined 时 `payload.sessionId` 会抛英文
+    //   "Cannot read properties of undefined (reading 'sessionId')"；
+    // - `content` 非字符串时 `writeFile` 抛 ERR_INVALID_ARG_TYPE（同样英文）。
+    // 与 tasks:submit / secret:set 同一批修复口径：在边界翻成中文。
+    if (!payload || typeof payload !== "object") throw new Error("产物参数无效。");
+    if (typeof payload.sessionId !== "string") throw new Error("会话标识无效。");
+    if (typeof payload.name !== "string") throw new Error("文件名必须是文本。");
+    if (typeof payload.content !== "string") throw new Error("产物内容必须是文本。");
+    if (typeof payload.kind !== "string") throw new Error("产物类型无效。");
     return saveArtifactFile(payload.sessionId, payload.name, payload.content, payload.kind);
   });
   // 读取已落盘产物的文本内容：表格/文档预览用（html 走 h3preview 协议，不需要读文本）。

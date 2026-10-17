@@ -42,10 +42,12 @@ export class SshComfyAdapter implements GenerationAdapter {
   async test(signal?: AbortSignal): Promise<BackendTestResult> {
     const start = Date.now();
     try {
+      // 必须先建好隧道再 exec：`SshTunnel.exec` 在未连接时会抛「SSH 尚未连接」，
+      // 而 delegateFor() 内部才做 start()（上一版把 start 挪走后这里变成了必然失败）。
+      const delegate = await this.delegateFor();
       const hardware = await this.tunnel.exec(
         "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null || true; free -h 2>/dev/null | head -2; df -h . | tail -1"
       );
-      const delegate = await this.delegateFor();
       const comfy = await delegate.test(signal);
       return {
         ...comfy,

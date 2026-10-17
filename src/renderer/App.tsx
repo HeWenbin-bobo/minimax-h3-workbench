@@ -1805,7 +1805,7 @@ type ArtifactKind = "html" | "sheet" | "doc";
 
 /** 产物统一提取：html > 表格(csv/tsv) > 文档(markdown/docx 围栏)。一次消息只出一张卡片。
  * Word 决策：模型输出本就是纯文本/markdown——落盘 .md（卡片注明 Word 可开），真 .docx 二进制留作升级（加 docx npm 包）。 */
-function extractArtifact(content: string): { kind: ArtifactKind; content: string } | undefined {
+export function extractArtifact(content: string): { kind: ArtifactKind; content: string } | undefined {
   const html = extractHtmlArtifact(content);
   if (html) return { kind: "html", content: html };
   const fences = [...content.matchAll(/```(\w*)\r?\n([\s\S]*?)```/g)];
@@ -1817,7 +1817,11 @@ function extractArtifact(content: string): { kind: ArtifactKind; content: string
       const sep = /tsv/i.test(lang) ? "\t" : ",";
       if (code.split("\n").length >= 2 && code.includes(sep)) return { kind: "sheet", content: code };
     }
-    if (/^(markdown|docx|doc)$/i.test(lang)) return { kind: "doc", content: code };
+    // `md` 必须收下：它正是 create_file 的 kind 枚举值之一（html/csv/tsv/md），
+    // 模型自己写围栏时也最常用它。漏掉这条时，```md 的文档**一张卡片都挂不上**——
+    // 文件其实能落盘（走工具路径），但"模型直接在回复里给文档"的老路径静默失效，
+    // 用户只看到一大段代码块，和补 xlsx 别名之前那次是同一类问题。
+    if (/^(markdown|md|docx|doc)$/i.test(lang)) return { kind: "doc", content: code };
   }
   return undefined;
 }

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { renderMarkdown } from "./markdown";
-import { normalizeStoredSessions } from "./App";
+import { normalizeStoredSessions, extractArtifact } from "./App";
 import { PLAN_BLOCK_CLOSE, PLAN_BLOCK_OPEN } from "../shared/planMode";
 
 const render = (text: string) => renderToStaticMarkup(createElement("div", null, renderMarkdown(text)));
@@ -292,5 +292,34 @@ describe("normalizeStoredSessions 数组字段归一", () => {
     expect(msg.taskGroups).toEqual([["t1"]]);
     expect(msg.planSteps).toHaveLength(1);
     expect(msg.artifacts).toHaveLength(1);
+  });
+});
+
+// 产物围栏的语言标记必须收下 `md`：它是 create_file 的 kind 枚举值之一，
+// 也是模型手写围栏时最常用的标记。漏掉时文档卡片静默不出现（用户只看到代码块），
+// 与当年漏掉 `xlsx` 别名是同一类问题。
+describe("extractArtifact 围栏语言别名", () => {
+  it("```md 被识别为文档产物", () => {
+    expect(extractArtifact("说明：\n```md\n# 标题\n正文\n```")).toEqual({ kind: "doc", content: "# 标题\n正文" });
+  });
+
+  it("```markdown / ```docx / ```doc 仍然可用", () => {
+    for (const lang of ["markdown", "docx", "doc"]) {
+      expect(extractArtifact("```" + lang + "\n正文\n```")?.kind).toBe("doc");
+    }
+  });
+
+  it("```csv 有结构化数据时识别为表格，单行不成表", () => {
+    expect(extractArtifact("```csv\na,b\n1,2\n```")?.kind).toBe("sheet");
+    expect(extractArtifact("```csv\n只有一行\n```")).toBeUndefined();
+  });
+
+  it("```html 优先于其它围栏", () => {
+    const text = "```csv\na,b\n1,2\n```\n\n```html\n<!DOCTYPE html><p>x</p>\n```";
+    expect(extractArtifact(text)?.kind).toBe("html");
+  });
+
+  it("没有围栏的纯文本不产生产物", () => {
+    expect(extractArtifact("这是一段普通回答。")).toBeUndefined();
   });
 });

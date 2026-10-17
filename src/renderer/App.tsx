@@ -692,6 +692,11 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
       // 界面仍显示旧配置（与磁盘不一致），用户重开页面才发现其实已经存了。
       // 与 pickRoot() 同一口径：存了什么就显示什么。
       setSettings(saved);
+      // `draft` 也要跟着换成**主进程归一化后**的值。`draft` 只在挂载时从 props 初始化，
+      // 不写回的话表单会一直显示用户原始输入：例如端口填 99999 被归一成 22、
+      // 空的服务地址被回落成默认值——表单显示 A、磁盘是 B，且切页回来又变回 B，
+      // 用户完全无法判断哪个才是真的生效值。
+      setDraft(saved);
       if (apiKey) await must(window.h3.setSecret("minimaxApiKey", apiKey));
       if (sshPassword) await must(window.h3.setSecret("sshPassword", sshPassword));
       if (rbCardCode) await must(window.h3.setSecret("rbCardCode", rbCardCode));

@@ -133,8 +133,15 @@ export class LlmService {
       if (!response.ok) {
         return { ok: false, models: [], message: `该服务商不支持模型列表接口（HTTP ${response.status}），请手动填写模型名。` };
       }
-      const payload = (await response.json().catch(() => ({}))) as { data?: Array<{ id?: string }> };
-      const models = (payload.data ?? []).map((item) => item.id).filter((id): id is string => Boolean(id)).sort();
+      const payload = (await response.json().catch(() => ({}))) as { data?: unknown };
+      // `data` 必须是数组：部分中转在出错时返回 `{data:"..."}` 或 `{data:{...}}`，
+      // 不判的话 `(...).map is not a function` 会以英文技术错误透出，而这个按钮
+      // 只是"获取模型列表"的便利功能，失败应稳定落到"请手动填写"。
+      const entries = Array.isArray(payload.data) ? payload.data : [];
+      const models = entries
+        .map((item) => (item && typeof item === "object" ? (item as { id?: unknown }).id : undefined))
+        .filter((id): id is string => typeof id === "string" && Boolean(id))
+        .sort();
       if (models.length === 0) return { ok: false, models: [], message: "服务商返回了空模型列表，请手动填写模型名。" };
       return { ok: true, models, message: `获取到 ${models.length} 个模型。` };
     } catch (error) {

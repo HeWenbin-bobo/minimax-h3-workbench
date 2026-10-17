@@ -161,3 +161,33 @@ describe("parseBing class 匹配稳健性", () => {
     expect(parseBing(mk('class="b_algoxy"'))).toHaveLength(0);
   });
 });
+
+// 第三方搜索 API 的兼容实现质量参差：results 不是数组时会抛英文 TypeError，
+// 而且整条链路直接失败（本可当作"无结果"继续）。
+describe("searchWeb API 响应形状容错", () => {
+  it("results 是对象/字符串/null 时按无结果处理，不抛错", async () => {
+    for (const bad of [{}, "oops", null, 42]) {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ results: bad }), { status: 200 })));
+      const text = await searchWeb("查询", { apiBaseUrl: "https://search.test", apiKey: "k" });
+      expect(text, JSON.stringify(bad)).toBe("");
+    }
+  });
+
+  it("数组里的非对象元素被跳过，其余正常返回", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ results: [null, "x", { title: "T", url: "https://x", snippet: "S" }] }),
+      { status: 200 }
+    )));
+    const text = await searchWeb("查询", { apiBaseUrl: "https://search.test", apiKey: "k" });
+    expect(text).toContain("[1] T");
+  });
+
+  it("非字符串字段不会渲染成 [object Object]", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ results: [{ title: { a: 1 }, url: 42, snippet: ["x"] }] }),
+      { status: 200 }
+    )));
+    const text = await searchWeb("查询", { apiBaseUrl: "https://search.test", apiKey: "k" });
+    expect(text).not.toContain("[object Object]");
+  });
+});

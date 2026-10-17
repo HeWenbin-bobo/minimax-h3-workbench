@@ -102,13 +102,24 @@ async function searchViaApi(base: string, apiKey: string | undefined, query: str
   });
   if (!response.ok) throw new Error(`搜索请求失败：${response.status}`);
   const payload = (await response.json().catch(() => ({}))) as {
-    results?: Array<{ name?: string; title?: string; url?: string; snippet?: string; content?: string }>;
+    results?: unknown;
   };
-  return (payload.results ?? []).map((item) => ({
-    title: item.title || item.name || "",
-    url: item.url || "",
-    snippet: item.snippet || item.content || ""
-  }));
+  // `results` 必须是数组：第三方搜索 API 的兼容实现质量参差，返回 `{results:{...}}` 或字符串
+  // 都不罕见。不判的话 `(...).map is not a function` 会以英文技术错误透到界面，
+  // 而且整条搜索链路直接失败（本可当作"无结果"继续走降级）。
+  const items = Array.isArray(payload.results) ? payload.results : [];
+  return items
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({
+      title: str(item.title) || str(item.name),
+      url: str(item.url),
+      snippet: str(item.snippet) || str(item.content)
+    }));
+}
+
+/** 取字符串字段；非字符串一律当空（避免把数字/对象塞进标题后渲染出 "[object Object]"）。 */
+function str(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 async function scrapeBing(query: string, signal?: AbortSignal): Promise<SearchResult[]> {

@@ -115,6 +115,10 @@ export async function summarizeHistory(
   if (messages.length === 0) return "";
   try {
     const base = options.baseUrl.replace(/\/+$/, "");
+    // **摘要请求只带文字**：图片以 data URL 存在 images 里（一张 1MB 的图 ≈ 100 万字符），
+    // 摘要只是写交接说明，完全用不到图片。原样发送实测请求体达 0.95MB（probe-summarize-images），
+    // 既浪费带宽，也可能撞上上游请求体上限导致压缩失败。
+    const textOnly = messages.map((message) => ({ role: message.role, content: message.content }));
     const response = await fetch(`${base}${resolveChatPath(base)}`, {
       method: "POST",
       headers: {
@@ -123,7 +127,7 @@ export async function summarizeHistory(
       },
       body: JSON.stringify({
         model: options.model,
-        messages: [...messages, { role: "user", content: SUMMARIZATION_PROMPT }],
+        messages: [...textOnly, { role: "user", content: SUMMARIZATION_PROMPT }],
         stream: false,
         // 输出上限必须自己设（CLAUDE.md 纪律）：不设就用上游默认（实测该中转约 4096 token），
         // 大上下文的交接摘要可能被静默截断——而截断的摘要 = 丢信息，且用户毫不知情。

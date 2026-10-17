@@ -87,8 +87,12 @@ export function App() {
   }, []);
 
   // 删除/恢复后同步渲染端任务列表：删掉的从本地 state 移除，恢复的重新并入。
+  // 失败要报出来：用户刚点完删除/恢复，列表若保持旧值，会以为操作没生效而再点一次。
   useEffect(() => {
-    const onChanged = () => window.h3.listTasks().then((r) => { if (r.data) setTasks(r.data); }).catch(() => undefined);
+    const onChanged = () => window.h3.listTasks().then((r) => {
+      if (r.ok && r.data) setTasks(r.data);
+      else if (!r.ok) showError(r.message || "刷新任务列表失败");
+    }).catch(showError);
     window.addEventListener("h3-tasks-changed", onChanged);
     return () => window.removeEventListener("h3-tasks-changed", onChanged);
   }, []);

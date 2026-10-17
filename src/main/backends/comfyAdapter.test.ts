@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationRequest, GenerationTask } from "../../shared/types";
 import { ComfyAdapter } from "./comfyAdapter";
+import { inspectH3Readiness } from "./comfyReadiness";
 
 const request: GenerationRequest = {
   mode: "text",
@@ -32,6 +33,16 @@ const task: GenerationTask = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("ComfyAdapter readiness", () => {
+  // 三个调用方都直接喂 `await response.json()`。ComfyUI 前面若有反代/门户页/错误页，
+  // JSON 可能是字符串/数组/null——`"x" in "ok"` 会抛英文 TypeError 并透到界面。
+  it("object_info 返回非对象时按「没有 H3 节点」处理，不抛英文 TypeError", () => {
+    for (const bad of ["ok", 42, null, undefined, [], true]) {
+      const result = inspectH3Readiness(bad);
+      expect(result.hasH3Nodes).toBe(false);
+      expect(result.missingModels).toHaveLength(5);
+    }
+  });
+
   it("reports the exact missing H3 models instead of a false successful connection", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);

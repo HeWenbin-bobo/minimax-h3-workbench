@@ -112,9 +112,17 @@ export class MiniMaxAdapter implements GenerationAdapter {
       content.push({ type: "video_url", video_url: { url: await dataUri(request.sourceVideoPath) }, role: "reference_video" });
       return content;
     }
-    if (request.mode === "image" && request.sourceImagePath) {
-      content.push({ type: "image_url", image_url: { url: await dataUri(request.sourceImagePath) }, role: "first_frame" });
+    // **按模式取素材，不能把四个路径都发上去**：切换模式时界面只是不显示对应选择器，
+    // `request.*Path` 里的旧值仍在。都发的话会出现**两个 first_frame**
+    // （image 模式的 sourceImage 与 text 模式残留的 firstFrame），
+    // 云端对重复角色的处理未定义——实测本地构造确认会同时发出两个 first_frame。
+    if (request.mode === "image") {
+      if (request.sourceImagePath) {
+        content.push({ type: "image_url", image_url: { url: await dataUri(request.sourceImagePath) }, role: "first_frame" });
+      }
+      return content;
     }
+    // 文生视频：可选用首帧/尾帧控制。
     if (request.firstFramePath) {
       content.push({ type: "image_url", image_url: { url: await dataUri(request.firstFramePath) }, role: "first_frame" });
     }

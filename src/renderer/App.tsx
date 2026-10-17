@@ -1556,7 +1556,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [showPgTrash, setShowPgTrash] = useState(false);
   const [renamingId, setRenamingId] = useState<string>();
   const [renameDraft, setRenameDraft] = useState("");
-  const filteredSessions = sessionFilter === "全部" ? visibleSessions : visibleSessions.filter((s) => s.category === sessionFilter);
+  // 筛选值可能失效：把最后一个属于该分类的会话删掉/改分类后，
+  // `sessionFilter` 指向的分类已不在 `categories` 里——列表变空，而对应的筛选按钮
+  // 也没了，用户找不到"怎么变回去"的入口（工作台的分类筛选踩过同一次，见 activeCategoryFilter）。
+  // 用**派生值**兜住（不做 setState 同步，避免引入渲染循环）：失效时按"全部"显示。
+  const activeSessionFilter = sessionFilter === "全部" || categories.includes(sessionFilter) ? sessionFilter : "全部";
+  const filteredSessions = activeSessionFilter === "全部" ? visibleSessions : visibleSessions.filter((s) => s.category === activeSessionFilter);
   // 「分类 > 会话」二级分组（对齐 Codex Desktop 的 项目 > 对话 层级）。
   // 只在真的有分类时才分组——全未分类时保持扁平渲染，避免凭空多一层无信息量的标题。
   // 同组内沿用 filteredSessions 的最近使用顺序，跨组顺序按分类名。
@@ -1654,8 +1659,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     <div className="playground-layout">
       <aside className="pg-sessions">
         <div className="pg-session-filter">
-          <button className={sessionFilter === "全部" ? "on" : ""} onClick={() => setSessionFilter("全部")}>全部</button>
-          {categories.map((c) => <button key={c} className={sessionFilter === c ? "on" : ""} onClick={() => setSessionFilter(c)}>{c}</button>)}
+          <button className={activeSessionFilter === "全部" ? "on" : ""} onClick={() => setSessionFilter("全部")}>全部</button>
+          {categories.map((c) => <button key={c} className={activeSessionFilter === c ? "on" : ""} onClick={() => setSessionFilter(c)}>{c}</button>)}
           <button className={sessionFilter === "__trash" ? "on" : ""} onClick={() => setShowPgTrash(true)}>🗑 回收站{trashSessions.length > 0 ? ` (${trashSessions.length})` : ""}</button>
         </div>
         {filteredSessions.length === 0 && trashSessions.length === 0 && <p className="footnote">还没有对话。点击右上角"新对话"开始。</p>}

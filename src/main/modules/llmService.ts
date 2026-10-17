@@ -128,7 +128,12 @@ export class LlmService {
         content?: string;
       };
       return full.choices?.[0]?.message?.content ?? full.choices?.[0]?.text ?? full.content ?? undefined;
-    } catch {
+    } catch (error) {
+      // 用户取消必须**向上抛**：调用方按 `AbortError` 识别取消并静默收尾。
+      // 若在这里吞成 `undefined`，上层会抛"服务商未返回任何内容"——用户明明
+      // 点的是停止，却看到一条红色失败提示（与本轮修的"取消被当成搜索失败"同类）。
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      if (this.controller?.signal.aborted) throw new DOMException("对话已取消", "AbortError");
       return undefined;
     }
   }

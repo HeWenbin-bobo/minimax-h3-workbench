@@ -144,31 +144,14 @@ export class GenerationOrchestrator {
     // 于是 `count: 0` 会变成 4 路——云端按次计费时等于替用户多扣 4 次。
     // 给 0 的调用方（IPC 可达、智能体工具也会传）本意是"最少"，夹到 1 才对。
     const count = Math.max(1, Math.min(4, Math.round(request.count ?? 4)));
-    // **校验器允许缺省的字段必须在这里补上默认值**。
-    // `validateRequest` 对 baseSeed / width / height / ratio / resolution 都是
-    // "给了才校验类型"（`!== undefined`），但下游把它们当必有：
-    // - `request.baseSeed + index` → `undefined + 0` 是 **NaN**，写进任务记录与 ComfyUI 的
-    //   `noise_seed`（JSON 里变成 null），任务卡片显示 "Seed NaN"，且落盘后长期存在；
-    // - 缺 width/height 时 ComfyUI 工作流那两个必填输入会被 JSON.stringify 直接丢掉，
-    //   提交到 ComfyUI 才报参数错误（用户看到的是云端 400，与真实原因无关）；
-    // - ratio/resolution 缺省时 MiniMax 请求体里就没有这两个字段。
-    // 统一在一处补齐，并让**存进任务的 request 与实际使用值一致**（重试时才不会漂移）。
-    const baseSeed = Number.isFinite(request.baseSeed) ? request.baseSeed : Math.floor(Math.random() * 1_000_000);
-    const normalized: GenerationRequest = {
-      ...request,
-      baseSeed,
-      width: Number.isFinite(request.width) ? request.width : 1280,
-      height: Number.isFinite(request.height) ? request.height : 720,
-      // 白名单外的字符串（拼错的、数字、旧版本脏值）一律回落到最常用值，
-      // 而不是原样塞进云端请求体。
-      ratio: (["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"] as const).includes(request.ratio) ? request.ratio : "16:9",
-      resolution: request.resolution === "2K" ? "2K" : "768P"
-    };
+    // **校验器允许缺省的字段必须补上默认值**，见 normalizeRequest 的注释。
+    // 写进任务的 request 与传给 runTask 的必须是**同一份**（重试时才不会漂移）。
+    const normalized = normalizeRequest(request);
     const created = Array.from({ length: count }, (_, index): GenerationTask => ({
       id: randomUUID(),
       parentId,
       index,
-      seed: baseSeed + index,
+      seed: normalized.baseSeed + index,
       backend: request.backend,
       mode: request.mode,
       status: "queued",
@@ -208,30 +191,33 @@ export class GenerationOrchestrator {
     // - 非法的 duration/preset 组合会真的发到云端（失败照样扣卡密次数）。
     // 放在建任务之前：脏记录应当被明确拒绝，而不是先建一条注定失败、还会计费的任务。
     validateRequest(request);
+    // 和 submit 一样补齐可缺省字段：老记录（或手改过的 tasks.json）可能没有
+    // width/height/ratio/resolution，直接透传会让工作流缺必填输入。
+    const normalized = normalizeRequest(request);
     const parentId = randomUUID();
     const now = new Date().toISOString();
     const created: GenerationTask = {
       id: randomUUID(),
       parentId,
       index: task.index,
-      seed: request.baseSeed,
-      backend: request.backend,
-      mode: request.mode,
+      seed: normalized.baseSeed,
+      backend: normalized.backend,
+      mode: normalized.mode,
       status: "queued",
       progress: 0,
-      prompt: request.prompt.trim(),
+      prompt: normalized.prompt.trim(),
       createdAt: now,
       updatedAt: now,
       message: "等待重试",
       // 存**本次实际使用**的请求（含新 baseSeed），不能存 task.request（旧种子）——
       // 否则任务自报 seed=新值、存档 request.baseSeed=旧值，两者矛盾（实测复现）。
-      request
+      request: normalized
     };
     this.tasks.unshift(created);
     this.trimHistory();
     await this.store.save(this.tasks);
     this.listener({ ...created });
-    void runPool([created], request.backend === "minimax" ? 2 : 1, (item) => this.runTask(request, item)).catch(() => undefined);
+    void runPool([created], normalized.backend === "minimax" ? 2 : 1, (item) => this.runTask(normalized, item)).catch(() => undefined);
     return created;
   }
 
@@ -333,6 +319,34 @@ export class GenerationOrchestrator {
     });
     return task;
   }
+}
+
+/**
+ * 补齐「校验器允许缺省、但下游当必有」的字段。**submit 与 retry 共用这一处**。
+ *
+ * `validateRequest` 对 baseSeed / width / height / ratio / resolution 都是
+ * "给了才校验类型"（`!== undefined`），但下游把它们当必有：
+ * - `baseSeed + index` → `undefined + 0` 是 **NaN**，写进任务记录与 ComfyUI 的
+ *   `noise_seed`（JSON 里变成 null），任务卡片显示 "Seed NaN"，且落盘后长期存在；
+ * - 缺 width/height 时 ComfyUI 工作流那两个必填输入会被 JSON.stringify 直接丢掉，
+ *   提交到 ComfyUI 才报参数错误（用户看到的是云端 400，与真实原因无关）；
+ * - ratio/resolution 缺省时 MiniMax 请求体里就没有这两个字段。
+ *
+ * 返回的新对象要**同时**用于「写进任务的 request」与「传给 runTask」——
+ * 两处不同源会让重试读到未补默认值的旧对象（种子/尺寸与实际执行不一致）。
+ */
+function normalizeRequest(request: GenerationRequest): GenerationRequest {
+  const baseSeed = Number.isFinite(request.baseSeed) ? request.baseSeed : Math.floor(Math.random() * 1_000_000);
+  return {
+    ...request,
+    baseSeed,
+    width: Number.isFinite(request.width) ? request.width : 1280,
+    height: Number.isFinite(request.height) ? request.height : 720,
+    // 白名单外的字符串（拼错的、数字、旧版本脏值）一律回落到最常用值，
+    // 而不是原样塞进云端请求体。
+    ratio: (["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"] as const).includes(request.ratio) ? request.ratio : "16:9",
+    resolution: request.resolution === "2K" ? "2K" : "768P"
+  };
 }
 
 function validateRequest(request: GenerationRequest): void {

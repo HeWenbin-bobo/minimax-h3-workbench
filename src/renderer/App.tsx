@@ -584,6 +584,11 @@ function sessionRecency(session: PlaygroundSession): string {
  * ⚠️ 名额只由**在役**会话竞争：若把回收站也算进 room，回收站积累到 50 条以上时
  * room 会被压成 0，**所有活跃会话反而全被淘汰**（我第一版就这么写的，实测复现）。
  * 体积仍有界：过期回收站会话由启动时的 7 天清理移除。
+ *
+ * ⚠️ **什么都没裁时必须返回原引用**：调用方用 `capped !== sessions` 判断要不要
+ * setSessions。回收站会话让总数长期 > 上限、但一个都不该裁时，若返回新数组就会
+ * 每次渲染都 setSessions → effect 重跑 → **无限渲染循环**（实测：空闲 3 秒写入 1 万次，
+ * probe-cap-loop 抓到）。
  */
 export function capSessions(sessions: PlaygroundSession[], generatingIds: string[]): PlaygroundSession[] {
   if (sessions.length <= PG_SESSION_CAP) return sessions;
@@ -592,7 +597,9 @@ export function capSessions(sessions: PlaygroundSession[], generatingIds: string
   const rest = sessions.filter((s) => !exempt(s)).sort((a, b) => sessionRecency(b).localeCompare(sessionRecency(a)));
   // 名额只看在役会话，与 pinned 数量无关（否则回收站一多就把活跃的清空）。
   const kept = new Set([...pinned.map((s) => s.id), ...rest.slice(0, PG_SESSION_CAP).map((s) => s.id)]);
-  return sessions.filter((s) => kept.has(s.id));
+  const next = sessions.filter((s) => kept.has(s.id));
+  // 一条都没裁掉 → 原样返回（引用相同），避免调用方误判"需要更新"而陷入死循环。
+  return next.length === sessions.length ? sessions : next;
 }
 
 function loadSessions(): PlaygroundSession[] {

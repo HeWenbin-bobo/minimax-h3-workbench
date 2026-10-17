@@ -9,8 +9,12 @@ export interface LlmServiceOptions {
   systemPrompt: string;
   searchBaseUrl?: string;
   searchApiKey?: string;
-  /** 搜索的浏览器渲染回退（由主进程注入；模块本身不 import electron，保持可单测）。 */
-  searchRenderHtml?: (url: string) => Promise<string>;
+  /**
+   * 搜索的浏览器渲染回退（由主进程注入；模块本身不 import electron，保持可单测）。
+   * 带 `signal`：用户点「停止」时要能立刻中断渲染——浏览器渲染最长 25 秒，
+   * 不接取消信号的话停止按钮看起来毫无反应。
+   */
+  searchRenderHtml?: (url: string, signal?: AbortSignal) => Promise<string>;
   /** 智能体模式（chatAgent）使用的框架版本——由 updateChecker 独立检查更新。 */
   frameworkVersion?: string;
 }

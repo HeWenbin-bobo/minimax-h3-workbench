@@ -379,7 +379,9 @@ function registerIpc(
       systemPrompt: settings.llm.systemPrompt,
       searchBaseUrl: settings.searchApi.baseUrl || undefined,
       searchApiKey: await settingsStore.getSecret("searchApiKey"),
-      searchRenderHtml: renderHtml
+      // 适配签名：`renderHtml(url, timeoutMs, signal)`，而 options 期望 `(url, signal)`。
+      // 直接传 renderHtml 会把 signal 当成 timeoutMs（超时值变成对象 → 立即超时）。
+      searchRenderHtml: (url, signal) => renderHtml(url, undefined, signal)
     });
     return llm;
   };
@@ -395,7 +397,7 @@ function registerIpc(
       systemPrompt: settings.llm.systemPrompt,
       searchBaseUrl: settings.searchApi.baseUrl || undefined,
       searchApiKey: await settingsStore.getSecret("searchApiKey"),
-      searchRenderHtml: renderHtml
+      searchRenderHtml: (url, signal) => renderHtml(url, undefined, signal)
     });
     sessionServices.set(sessionId, service);
     return service;
@@ -780,7 +782,8 @@ function registerIpc(
         webSearch: async (query: string) => searchWeb(query, {
           apiBaseUrl: turn.value.searchBaseUrl || undefined,
           apiKey: turn.value.searchApiKey,
-          renderHtml,
+          // 适配签名：searchWeb 期望 `(url, signal)`，renderHtml 是 `(url, timeoutMs, signal)`。
+          renderHtml: (url, signal) => renderHtml(url, undefined, signal),
           browserOnly: turn.value.browserOnly
         }, controller.signal),
         generateVideo: async (params: { prompt: string; duration: number; count: number }) => {

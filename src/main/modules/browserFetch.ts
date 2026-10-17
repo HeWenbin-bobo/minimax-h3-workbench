@@ -38,9 +38,9 @@ function harden(win: BrowserWindow, ses: Electron.Session): void {
 // 隐藏窗口是重资源：串行执行，避免并发开一堆窗口把内存打满。
 let chain: Promise<void> = Promise.resolve();
 
-/** 用隐藏窗口加载 url 并返回渲染后的 HTML。串行执行；超时/加载失败会抛中文错误。 */
-export function renderHtml(url: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
-  return enqueue(() => renderOnce(url, timeoutMs, "html"));
+/** 用隐藏窗口加载 url 并返回渲染后的 HTML。串行执行；超时/加载失败/取消会抛中文错误。 */
+export function renderHtml(url: string, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
+  return enqueue(() => renderOnce(url, timeoutMs, "html", signal));
 }
 
 /**
@@ -53,8 +53,8 @@ export function renderHtml(url: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise
  *
  * 搜索解析（parseBing/parseSogou）必须看 HTML 结构，所以两条路分开、各取所需。
  */
-export function renderPageText(url: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
-  return enqueue(() => renderOnce(url, timeoutMs, "text"));
+export function renderPageText(url: string, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
+  return enqueue(() => renderOnce(url, timeoutMs, "text", signal));
 }
 
 function enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -64,7 +64,7 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
   return task;
 }
 
-async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text"): Promise<string> {
+async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text", signal?: AbortSignal): Promise<string> {
   const ses = session.fromPartition(PARTITION);
   const win = new BrowserWindow({
     show: false,
@@ -90,6 +90,7 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text")
         win.webContents.removeListener("did-fail-load", onFail);
         win.webContents.removeListener("will-redirect", onRedirect);
         win.webContents.removeListener("will-navigate", onNavigate);
+        signal?.removeEventListener("abort", onAbort);
         error ? reject(error) : resolve();
       };
       const onLoad = () => done();
@@ -137,6 +138,12 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text")
       win.webContents.on("did-fail-load", onFail);
       win.webContents.on("will-redirect", onRedirect);
       win.webContents.on("will-navigate", onNavigate);
+      // 取消信号：用户点「停止」时立刻结束渲染并销毁隐藏窗口。
+      // 不接这个的话，浏览器渲染最长要跑满 timeoutMs（25–45 秒），
+      // 停止按钮看起来毫无反应（搜索链路尤其明显）。
+      const onAbort = () => done(new DOMException("渲染已取消", "AbortError"));
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener("abort", onAbort, { once: true });
       // 失败会走 did-fail-load，这里吞掉 loadURL 自身的 rejection，避免未处理拒绝告警。
       void win.loadURL(url).catch(() => undefined);
     });

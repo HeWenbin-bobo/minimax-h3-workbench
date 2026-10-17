@@ -13,8 +13,9 @@ export interface WebSearchOptions {
   /**
    * 浏览器渲染抓取（依赖注入，由主进程传入复用 Electron 自带 Chromium 的实现）。
    * 纯 HTTP 抓取全部失败时用它做最后回退——不在这里直接 import electron，模块才能被单测覆盖。
+   * 带 `signal`：用户点「停止」时要能立刻中断渲染（浏览器渲染最长 25 秒）。
    */
-  renderHtml?: (url: string) => Promise<string>;
+  renderHtml?: (url: string, signal?: AbortSignal) => Promise<string>;
   /**
    * 「浏览器搜索」模式（游乐场的可选联网项）：只允许应用自带 Chromium 渲染抓取，
    * 明确跳过第三方 API 与 HTTP 直抓。实测 HTTP 直抓 Bing 会间歇性返回降级 SERP
@@ -50,7 +51,7 @@ export async function searchWeb(query: string, options: WebSearchOptions, signal
       ["搜狗", parseSogou, sogouSearchUrl(query)]
     ] as const) {
       try {
-        const results = parse(await options.renderHtml(url)).slice(0, MAX_RESULTS);
+        const results = parse(await options.renderHtml(url, signal)).slice(0, MAX_RESULTS);
         if (results.length > 0) return formatResults(results);
         failures.push(`${name}（浏览器渲染）未返回结果`);
       } catch (error) {

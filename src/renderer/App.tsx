@@ -921,11 +921,23 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     setGeneratingIds((all) => all.includes(sessionId) ? all : [...all, sessionId]);
     streamBuffers.current.set(sessionId, "");
     taskIdBuffers.current.delete(sessionId);
-    const result = await window.h3.chatLlm(history, webSearch, agentMode, sessionId, browserSearch, planArg);
-    if (!result.ok) {
+    // IPC 调用本身可能**抛异常**（主进程 handler 崩了、通道被销毁），而不只是返回 ok:false。
+    // 不兜住的话 sendingRef / generatingIds 永远留着 → 该会话之后再也发不出消息
+    // （界面停在「停止」、发送按钮禁用，实测 probe-send-deadlock 复现）。
+    try {
+      const result = await window.h3.chatLlm(history, webSearch, agentMode, sessionId, browserSearch, planArg);
+      if (!result.ok) {
+        setGeneratingIds((all) => all.filter((id) => id !== sessionId));
+        sendingRef.current.delete(sessionId);
+        setSessions((all) => patchLast(all, sessionId, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
+      }
+    } catch (error) {
+      // 失败必须让人看见（CLAUDE.md）：气泡里写明原因，同时把守卫清干净。
       setGeneratingIds((all) => all.filter((id) => id !== sessionId));
       sendingRef.current.delete(sessionId);
-      setSessions((all) => patchLast(all, sessionId, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
+      planTurnRef.current.delete(sessionId);
+      setSessions((all) => patchLast(all, sessionId, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${describeError(error, "未知错误")}` })));
+      onError(error);
     }
   }
 
@@ -953,11 +965,19 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     setGeneratingIds((all) => all.includes(target.id) ? all : [...all, target.id]);
     streamBuffers.current.set(target.id, "");
     taskIdBuffers.current.delete(target.id);
-    const result = await window.h3.chatLlm(history, webSearch, agentMode, target.id, browserSearch, "execute");
-    if (!result.ok) {
+    // 与 send() 同理：IPC 抛异常时必须清守卫，否则该会话永久发不出消息。
+    try {
+      const result = await window.h3.chatLlm(history, webSearch, agentMode, target.id, browserSearch, "execute");
+      if (!result.ok) {
+        setGeneratingIds((all) => all.filter((id) => id !== target.id));
+        sendingRef.current.delete(target.id);
+        setSessions((all) => patchLast(all, target.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
+      }
+    } catch (error) {
       setGeneratingIds((all) => all.filter((id) => id !== target.id));
       sendingRef.current.delete(target.id);
-      setSessions((all) => patchLast(all, target.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
+      setSessions((all) => patchLast(all, target.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${describeError(error, "未知错误")}` })));
+      onError(error);
     }
   }
 

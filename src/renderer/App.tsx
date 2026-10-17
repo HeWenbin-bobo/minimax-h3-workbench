@@ -846,6 +846,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 会持续产生大量临时对象（我第一版就是这么写的，属自引入的性能回归）。
   const activeRef = useRef(active);
   activeRef.current = active;
+  // 启动时的一次性清理 effect 需要读当前会话快照，但不能把副作用写进 setSessions 的 updater。
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   const threadRef = useRef<ChatMessage[]>([]);
   useEffect(() => {
     if (!activeId) return;
@@ -1097,17 +1100,20 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 会话回收站过期清理：启动时清除超过 7 天的已删除会话，**并删掉它们的产物目录**。
   // 只删会话记录的话，userData/artifacts/<sessionId>/ 会永久留盘：
   // 界面里再也看不到、也无法重新打开，但磁盘上那些 HTML/Excel/文档一直在。
+  //
+  // 注意 updater 必须是**纯函数**：React 在开发模式会重复调用它，
+  // 把 IPC 写在 `setSessions(all => …)` 里会重复发起删除请求。
+  // 所以先基于当前快照算出过期名单，再分别做「删记录」与「删目录」两件事。
   useEffect(() => {
     const now = Date.now();
-    setSessions((all) => {
-      const expired = all.filter((s) => s.deletedAt && now - new Date(s.deletedAt).getTime() > 7 * 86_400_000);
-      for (const session of expired) {
-        // 失败不该打断清理：目录可能本就不存在（从没生成过产物）。
-        void window.h3.purgeSessionArtifacts(session.id).catch(() => undefined);
-      }
-      if (expired.length === 0) return all;
-      return all.filter((s) => !expired.includes(s));
-    });
+    const expired = sessionsRef.current.filter((s) => s.deletedAt && now - new Date(s.deletedAt).getTime() > 7 * 86_400_000);
+    if (expired.length === 0) return;
+    const ids = new Set(expired.map((s) => s.id));
+    setSessions((all) => all.filter((s) => !ids.has(s.id)));
+    for (const session of expired) {
+      // 失败不该打断清理：目录可能本就不存在（从没生成过产物）。
+      void window.h3.purgeSessionArtifacts(session.id).catch(() => undefined);
+    }
   }, []);
 
   function patchLast(all: PlaygroundSession[], id: string, patch: (msg: PlaygroundMessage) => PlaygroundMessage): PlaygroundSession[] {

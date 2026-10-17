@@ -18,6 +18,14 @@ function wire(): void {
   if (wired) return;
   wired = true;
   autoUpdater.autoDownload = false; // 用户点“立即更新”才开始下载，避免后台偷偷拉 100MB+ 安装包
+  // **必须常驻 error 监听器**：electron-updater 的 `dispatchError()` 走的是
+  // `this.emit("error", e, …)`。EventEmitter 在没有任何 error 监听器时会把 emit 变成
+  // 同步抛出——而 `checkForUpdates()` 的 catch 里就调它（AppUpdater.js:271），
+  // `doInstall()` 也在 try/catch 外调。那等于把"更新检查失败"升级成未捕获异常。
+  // 这里只记录，真正的错误仍由各调用点的返回值/异常路径呈现给用户。
+  autoUpdater.on("error", (error) => {
+    console.warn("[update] 更新器错误：", error instanceof Error ? error.message : String(error));
+  });
   autoUpdater.on("download-progress", (progress) => {
     const info = { percent: progress.percent, transferredBytes: progress.transferred, totalBytes: progress.total };
     for (const listener of listeners) listener(info);

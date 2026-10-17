@@ -828,7 +828,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         ? current.messages.filter((m) => !m.error && !m.notice).map((m) => ({ role: m.role, content: m.content, images: m.images }))
         : [];
       const history = threadRef.current;
-      if (!history.length) return;
+      // 空会话要**清空**占用：直接 return 的话会保留上一个会话的数值，
+      // 切到新对话时顶部仍显示「📦 上下文 59%」——那个数字属于别的会话（实测复现）。
+      if (!history.length) { if (!cancelled) setContextStatus(undefined); return; }
       void window.h3.getContextStatus(history, activeId).then((response) => { if (!cancelled) setContextStatus(response.data); }).catch(() => {});
     };
     probe();

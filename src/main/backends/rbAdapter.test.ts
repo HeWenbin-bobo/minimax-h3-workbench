@@ -125,6 +125,34 @@ describe("RbAdapter.buildJobBody", () => {
     expect(result.outputPath).toContain("t3.mp4");
   });
 
+  // 直链 `/video` 走的是 fetch：网络层失败（连接被拒/超时）时旧实现直接跳出，
+  // 那个专为"直链不可用"准备的 `video_url` 回落永远轮不到——卡密已扣、成片拿不到。
+  // 这里锁定：直链抛错也要继续走回落。
+  it("直链网络失败时仍回落到 video_url（不把已扣费的任务判死）", async () => {
+    const fetchMock = (async (url: string | URL) => {
+      const target = String(url);
+      if (target.endsWith("/api/v1/jobs")) {
+        return new Response(JSON.stringify({ job: { id: "job-fb" } }), { status: 200 });
+      }
+      if (target.endsWith("/api/v1/jobs/job-fb/video")) {
+        const error = new Error("fetch failed");
+        (error as { cause?: unknown }).cause = { code: "ECONNRESET" };
+        throw error;
+      }
+      if (target === "https://cdn.test/out.mp4") {
+        return new Response(new Uint8Array([0, 0, 0, 1]), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        job: { id: "job-fb", status: "done", has_video: true, video_url: "https://cdn.test/out.mp4" }
+      }), { status: 200 });
+    }) as typeof fetch;
+    globalThis.fetch = fetchMock;
+    const task = { id: "t-fb", seed: 1, prompt: base.prompt } as never;
+    const result = await adapter().generate(base, task, () => undefined);
+    expect(result.outputPath).toContain("t-fb.mp4");
+    expect(result.outputUrl).toBe("https://cdn.test/out.mp4");
+  });
+
   it("连续查询全部失败时才报错，并提示任务可能仍在云端", async () => {
     const fetchMock = (async (url: string | URL) => {
       const target = String(url);

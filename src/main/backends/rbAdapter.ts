@@ -351,13 +351,23 @@ export class RbAdapter implements GenerationAdapter {
   // 结果下载：/video 直链失败时回落查询接口给的 video_url（官网两种形态都出现过）。
   // video_url 来自远端响应，属不可信输入——落回下载前必须过 SSRF 校验（见 assertSafeResultUrl）。
   private async downloadVideo(jobId: string, taskId: string, videoUrl: string | undefined, signal?: AbortSignal): Promise<string> {
-    let response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/video`, {
-      headers: this.headers()
-    }, 300_000, signal);
-    if (!response.ok && videoUrl) {
+    // **网络层失败也要能回落**：旧写法把直链请求放在 if 外，`fetchWithRetry` 抛异常时
+    // 直接跳出函数，那个专门为"直链不可用"准备的 video_url 回落永远轮不到。
+    // 云端任务此刻已扣卡密次数，成片却拿不到——与"轮询一次抖动就判死"同一类损失。
+    // 用户主动取消仍要原样抛出（不能被回落当成"直链失败"继续下载）。
+    let response: Response | undefined;
+    try {
+      response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/video`, {
+        headers: this.headers()
+      }, 300_000, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+    }
+    if ((!response || !response.ok) && videoUrl) {
       const safeUrl = assertSafeResultUrl(videoUrl);
       response = await this.fetchWithRetry(safeUrl.toString(), { redirect: "manual" }, 300_000, signal);
     }
+    if (!response) throw new Error("生成结果下载失败：无法连接瞬映下载地址，且任务没有返回可用的直链。");
     if (!response.ok) {
       // 带上服务端响应片段：定位是 404（产物未就绪）还是鉴权/网关问题。
       const detail = (await response.text().catch(() => "")).slice(0, 200);

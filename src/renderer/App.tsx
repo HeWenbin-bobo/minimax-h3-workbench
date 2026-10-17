@@ -186,14 +186,27 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   );
   const shownCount = currentTasks.length;
   async function choose(kind: "image" | "video", field: keyof GenerationRequest) { const response = await window.h3.selectFile(kind); if (response.data) setRequest((r) => ({ ...r, [field]: response.data })); }
+  // 同步守卫：submitting 是异步 state，同一 tick 内双击会双双读到 false → 提交两次。
+  // 云端后端每次提交都**真实扣费**，重复提交等于白扣（实测 probe-studio-double-submit：
+  // 双击建出 2 个项目组、ComfyUI /prompt 被命中 2 次）。
+  const submittingRef = useRef(false);
   async function submit() {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
-    const response = await window.h3.submitGeneration(request);
-    setSubmitting(false);
-    if (!response.ok) { onError(response.message); return; }
-    // 提交成功：切到新项目（submitGeneration 创建的任务组排在最前）。
-    if (response.data?.[0]) setActiveProjectId(response.data[0].parentId);
-    onNotice(`已创建 ${request.count} 个生成任务，可继续提交新任务并行生成`);
+    try {
+      const response = await window.h3.submitGeneration(request);
+      if (!response.ok) { onError(response.message); return; }
+      // 提交成功：切到新项目（submitGeneration 创建的任务组排在最前）。
+      if (response.data?.[0]) setActiveProjectId(response.data[0].parentId);
+      onNotice(`已创建 ${request.count} 个生成任务，可继续提交新任务并行生成`);
+    } catch (error) {
+      // IPC 抛异常也必须让人看见，并解锁按钮（否则再也点不动）。
+      onError(error);
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   }
   const rbDurationOptions = durationOptionsFor("rb", rbPreset);
   const [showTrash, setShowTrash] = useState(false);

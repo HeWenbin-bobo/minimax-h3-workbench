@@ -270,6 +270,20 @@ export interface AgentRunResult {
   usage?: { inputTokens: number };
 }
 
+/**
+ * 把 AI SDK 拼出的对话 URL 改写成该上游真正使用的端点。
+ *
+ * SDK 固定拼 `baseURL + /chat/completions`；MiniMax 官方却是 `/text/chatcompletion_v2`。
+ * 普通对话路径早按 resolveChatPath 推导，智能体此前没有 → 同一 baseUrl 下两条路径打到
+ * 不同端点（实测 probe-agent-endpoint），用 MiniMax 官方预设开智能体必然 404。
+ * 只改末尾端点、保留查询串；非默认路径时才调用（默认路径无需改写）。
+ */
+export function rewriteChatEndpoint(url: string, baseUrl: string): string {
+  const chatPath = resolveChatPath(baseUrl);
+  if (chatPath === "/chat/completions") return url;
+  return url.replace(/\/chat\/completions(?=\?|$)/, chatPath);
+}
+
 export async function chatAgent(
   options: LlmServiceOptions,
   messages: ChatMessage[],
@@ -295,11 +309,24 @@ export async function chatAgent(
     import("@ai-sdk/openai-compatible"),
     import("zod")
   ] as const);
+  // 智能体路径的对话端点：AI SDK 固定拼 `baseURL + /chat/completions`，
+  // 但部分上游并不用这个路径（MiniMax 官方是 /text/chatcompletion_v2）。
+  // 普通对话早已按 resolveChatPath 推导，智能体此前没有——同一个 baseUrl 下
+  // 两条路径打到**不同端点**（实测 probe-agent-endpoint），用 MiniMax 官方预设
+  // 开智能体必然 404。SDK 没有自定义 path 的选项，故用 fetch 中间件改写。
   const provider = createOpenAICompatible({
     name: "workbench-llm",
     baseURL: options.baseUrl,
     apiKey: options.apiKey || undefined,
-    headers: options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : undefined
+    headers: options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : undefined,
+    ...(resolveChatPath(options.baseUrl) === "/chat/completions"
+      ? {}
+      : {
+          fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+            return fetch(rewriteChatEndpoint(url, options.baseUrl!), init);
+          }
+        })
   });
   const model = provider.chatModel(options.model);
   const toModelMessages = (list: ChatMessage[]) => list.map((message) => {

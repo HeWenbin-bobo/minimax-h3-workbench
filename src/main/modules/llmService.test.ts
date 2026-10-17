@@ -11,7 +11,7 @@ vi.mock("@ai-sdk/openai-compatible", () => ({
   createOpenAICompatible: () => ({ chatModel: (id: string) => ({ id }) })
 }));
 
-import { consumeSse, chatAgent, type LlmServiceOptions } from "./llmService";
+import { consumeSse, chatAgent, rewriteChatEndpoint, type LlmServiceOptions } from "./llmService";
 
 // 构造一个 ReadableStream，把字符串分块推送（模拟网络分包边界不齐）。
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
@@ -169,5 +169,24 @@ describe("chatAgent 工具暴露", () => {
     }));
     const result = await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, false);
     expect(result.toolCalls).toBe(3);
+  });
+});
+
+// 智能体路径端点：AI SDK 固定拼 /chat/completions，但 MiniMax 官方是 /text/chatcompletion_v2。
+// 普通对话早按 resolveChatPath 推导，智能体此前没有 → 同一 baseUrl 下两条路径打到不同端点。
+describe("rewriteChatEndpoint", () => {
+  it("MiniMax 官方 baseUrl → 改写为 /text/chatcompletion_v2", () => {
+    expect(rewriteChatEndpoint("https://api.minimax.io/v1/chat/completions", "https://api.minimax.io/v1"))
+      .toBe("https://api.minimax.io/v1/text/chatcompletion_v2");
+  });
+
+  it("中转/自定义 baseUrl → 保持 /chat/completions 不变", () => {
+    const url = "https://relay.example/v1/chat/completions";
+    expect(rewriteChatEndpoint(url, "https://relay.example/v1")).toBe(url);
+  });
+
+  it("保留查询串", () => {
+    expect(rewriteChatEndpoint("https://api.minimax.io/v1/chat/completions?x=1", "https://api.minimax.io/v1"))
+      .toBe("https://api.minimax.io/v1/text/chatcompletion_v2?x=1");
   });
 });

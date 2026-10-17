@@ -39,6 +39,14 @@ describe("normalizeHistory", () => {
     expect(result.messages[0].content).toContain("不支持图片输入");
   });
 
+  it("视觉模型下纯图片消息的占位文案不能说「不支持图片输入」（图还在，会误导模型拒答）", () => {
+    const result = normalizeHistory([msg("user", "", ["data:image/png;base64,AAA"])], { model: "gpt-4o" });
+    expect(result.messages[0].images).toHaveLength(1);
+    expect(result.messages[0].content).not.toContain("不支持图片输入");
+    // 仍须是非空 content（部分上游拒绝空 content）
+    expect(result.messages[0].content.trim().length).toBeGreaterThan(0);
+  });
+
   it("allowImages=false 时即便模型支持也剥图", () => {
     const result = normalizeHistory([msg("user", "看", ["img"])], { model: "gpt-4o", allowImages: false });
     expect(result.messages[0].images).toBeUndefined();

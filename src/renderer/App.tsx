@@ -1643,6 +1643,14 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
   // 拖拽中的最新宽度：松手时用它落盘（不依赖闭包里过期的 width）。
   const latestWidthRef = useRef(width);
   latestWidthRef.current = width;
+  // 拖拽期间挂在 window 上的清理函数。组件在拖拽途中被卸载（切会话会关预览、
+  // 也可能直接点关闭）时 mouseup 永远不会触发，监听器会永久残留：
+  // 之后每次鼠标移动都在对一个已卸载组件的 setState 里跑，且拖拽状态永远不复位。
+  const dragCleanupRef = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => () => {
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = undefined;
+  }, []);
   function onDragStart(e: React.MouseEvent) {
     e.preventDefault();
     dragRef.current = { startX: e.clientX, startWidth: width };
@@ -1654,13 +1662,20 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
       const mainWidth = document.querySelector(".pg-main")?.getBoundingClientRect().width ?? 0;
       onResize(Math.max(360, Math.min(available, Math.max(360, mainWidth - 30))));
     };
+    const detach = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      dragCleanupRef.current = undefined;
+    };
     const up = () => {
       dragRef.current = undefined;
       // 松手时才写盘：拖拽时 mousemove 每秒上百次，逐次同步写 localStorage 会卡。
       savePreviewWidth(latestWidthRef.current);
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
+      detach();
     };
+    // 重复触发 onDragStart（前一次还没松手）时先摘掉旧监听器，避免叠多份。
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = detach;
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   }

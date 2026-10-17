@@ -691,12 +691,22 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [compacting, setCompacting] = useState(false);
   // 轮询闭包必须读**最新**历史：effect 只依赖消息**条数**，而流式期间条数不变、内容在涨。
   // 若闭包捕获旧的 active，回复结束后 chip 仍显示开头的占用（实测：真实 59% 时 chip 停在 0%）。
+  //
+  // 注意这里只存**会话引用**（一次赋值），历史在 probe 里现算：
+  // 若每次渲染都 filter+map 整个消息列表，流式期间每秒几十次渲染、几百条消息，
+  // 会持续产生大量临时对象（我第一版就是这么写的，属自引入的性能回归）。
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const threadRef = useRef<ChatMessage[]>([]);
-  threadRef.current = active ? active.messages.filter((m) => !m.error && !m.notice).map((m) => ({ role: m.role, content: m.content, images: m.images })) : [];
   useEffect(() => {
     if (!activeId) return;
     let cancelled = false;
     const probe = () => {
+      // notice 是纯界面提示（如"上下文已压缩"），不能进历史——否则模型会把系统提示当自己说过的话复述。
+      const current = activeRef.current;
+      threadRef.current = current
+        ? current.messages.filter((m) => !m.error && !m.notice).map((m) => ({ role: m.role, content: m.content, images: m.images }))
+        : [];
       const history = threadRef.current;
       if (!history.length) return;
       void window.h3.getContextStatus(history, activeId).then((response) => { if (!cancelled) setContextStatus(response.data); }).catch(() => {});

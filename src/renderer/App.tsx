@@ -861,8 +861,15 @@ function loadSessions(): PlaygroundSession[] {
 }
 
 function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
-  const [sessions, setSessions] = useState<PlaygroundSession[]>(loadSessions);
-  const [activeId, setActiveId] = useState<string>(() => loadSessions().find((s) => !s.deletedAt)?.id || "");
+  // **只解析一次 localStorage**：此前 `useState(loadSessions)` 与
+  // `useState(() => loadSessions().find(...))` 各读一遍，等于把整份会话
+  // （带图时可达 2MB+）JSON.parse 两次、还多构造一整份对象树。
+  const [initial] = useState(() => {
+    const loaded = loadSessions();
+    return { sessions: loaded, activeId: loaded.find((s) => !s.deletedAt)?.id || "" };
+  });
+  const [sessions, setSessions] = useState<PlaygroundSession[]>(initial.sessions);
+  const [activeId, setActiveId] = useState<string>(initial.activeId);
   const active = sessions.find((s) => s.id === activeId);
   const [input, setInput] = useState("");
   // HTML 产物侧栏预览（WorkBuddy 形态）：文件卡片「预览」触发，产物落盘 userData/artifacts/。

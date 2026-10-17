@@ -283,7 +283,10 @@ export class GenerationOrchestrator {
 
   private update(task: GenerationTask, status: TaskStatus, progress: number, message?: string): GenerationTask {
     task.status = status;
-    task.progress = Math.max(0, Math.min(100, Math.round(progress)));
+    // `Math.max(0, Math.min(100, Math.round(NaN)))` 仍是 NaN —— 夹取对 NaN 无效。
+    // 适配器若传了 NaN（算错、上游字段缺失），进度条宽度会变成 `NaN%`，
+    // 卡片布局错乱且落盘后长期存在（下次启动读回仍是 NaN）。
+    task.progress = Number.isFinite(progress) ? Math.max(0, Math.min(100, Math.round(progress))) : task.progress || 0;
     task.updatedAt = new Date().toISOString();
     task.message = message;
     this.listener({ ...task });

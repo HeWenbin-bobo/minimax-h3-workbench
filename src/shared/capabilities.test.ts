@@ -94,4 +94,19 @@ describe("classifyEnvironment 磁盘读数未知", () => {
     const result = classifyEnvironment({ ...base, diskFreeBytes: 20 * 1024 ** 3, comfyReachable: false, comfyHasH3Nodes: false });
     expect(result.recommendations.some((r) => r.includes("70GB"))).toBe(true);
   });
+
+  // 磁盘读不到时不能把一台够用的机器判成 D 级：C 级门槛原来直接比
+  // `diskFreeBytes >= 45 GiB`，0 会把它挡在门外，结论变成"当前硬件低于量化实验配置"——
+  // 硬件明明够（24GB 显存 + 64GB 内存），结论却正好相反。
+  it("磁盘读数未知时仍按硬件判 C 级，并提示自行确认空间", () => {
+    const result = classifyEnvironment({
+      gpus: [{ vendor: "NVIDIA", model: "RTX 4090", vramBytes: 24 * 1024 ** 3 }],
+      memoryTotalBytes: 64 * 1024 ** 3,
+      diskFreeBytes: 0,
+      comfyReachable: true,
+      comfyHasH3Nodes: true
+    });
+    expect(result.grade).toBe("C");
+    expect(result.recommendations.some((r) => r.includes("45GB"))).toBe(true);
+  });
 });

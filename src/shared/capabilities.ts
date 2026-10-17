@@ -60,6 +60,11 @@ export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentRep
   // 会把 `diskFreeBytes` 置为 0。若照常判定，用户会看到「至少释放 70GB 磁盘空间」，
   // 而他的磁盘可能一块都没满——这种假告警比不提示更误导。
   // 真正的 0 字节可用与"读不到"在语义上都无法生成，故统一按"未知"处理。
+  //
+  // **C 级门槛同样要按"未知"放行**：那里原来直接写 `diskFreeBytes >= 45 GiB`，
+  // 于是读不到磁盘时，一块 24GB 显存的机器会被判成 D 级并显示
+  // "当前硬件低于量化实验配置"——硬件明明够，结论却相反（与 70GB 告警同一类错误）。
+  // 读不到就不作为否决条件，改为提示用户自行确认空间。
   const diskKnown = input.diskFreeBytes > 0;
   if (diskKnown && input.diskFreeBytes < 70 * GiB) recommendations.push("至少释放 70GB 磁盘空间后再安装完整创作包。 ");
 
@@ -74,7 +79,11 @@ export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentRep
     };
   }
 
-  if (nvidia.length >= 1 && totalVram >= 12 * GiB && input.memoryTotalBytes >= 32 * GiB && input.diskFreeBytes >= 45 * GiB) {
+  // 磁盘门槛在"读不到"时放行（`!diskKnown || …`）：读不到不等于没空间。
+  // 放行后补一条提示，让用户自己确认，而不是悄悄按"够用"处理。
+  const diskEnough = !diskKnown || input.diskFreeBytes >= 45 * GiB;
+  if (nvidia.length >= 1 && totalVram >= 12 * GiB && input.memoryTotalBytes >= 32 * GiB && diskEnough) {
+    if (!diskKnown) recommendations.push("未能读取磁盘剩余空间，请自行确认至少留出 45GB 再开始。 ");
     if (!input.comfyReachable) recommendations.push("安装或启动 ComfyUI 0.30.0+，然后重新检测。 ");
     if (input.comfyReachable && !input.comfyHasH3Nodes) recommendations.push("更新 ComfyUI，当前实例缺少 MiniMax H3 原生节点。 ");
     if (input.comfyHasH3Nodes && input.comfyMissingH3Models?.length) recommendations.push(`安装缺少的 ${input.comfyMissingH3Models.length} 个 H3 模型文件，然后完全重启 ComfyUI。`);

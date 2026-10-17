@@ -66,7 +66,16 @@ export function App() {
         if (r.data) setResources(r.data);
         if (t.data) setTasks(t.data);
       }).catch(showError);
-    const offTask = window.h3.onTaskUpdate((item) => setTasks((all) => upsert(all, item)));
+    // 任务推送：**已软删除的任务要移除，不能 upsert**。
+    // 删除流程是先给 sibling 打 `deletedAt`、再 `cancel()`，而 `cancel()` 会走
+    // `update()` → `listener` 推一条 `task:update`（对象里已带 deletedAt）。
+    // 旧实现无条件 upsert，于是刚删掉的项目会借着这条推送"复活"回工作台列表，
+    // 直到下一次 `listTasks()` 才消失——中间这段时间用户会以为删除失败又点一次。
+    // 与主进程 `orchestrator.list()`（只返回未删除任务）保持同一语义。
+    const offTask = window.h3.onTaskUpdate((item) => setTasks((all) => {
+      if (item.deletedAt) return all.filter((task) => task.id !== item.id);
+      return upsert(all, item);
+    }));
     window.h3.checkForUpdates().then((response) => {
       if (!response.data) return;
       setUpdateInfo(response.data);

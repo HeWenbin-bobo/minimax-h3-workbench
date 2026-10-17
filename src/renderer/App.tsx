@@ -637,7 +637,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 落盘上限 50：内存态一并裁剪，否则 UI 显示得出来、重启后却凭空少几个（用户可感知的静默丢失）。
   // 按"最近使用"裁剪，且绝不丢弃正在生成回复的会话——否则一段正在跑的对话会被静默砍掉。
   useEffect(() => {
-    const capped = sessions.length > 50 ? capSessions(sessions, generatingIds) : sessions;
+    const capped = sessions.length > PG_SESSION_CAP ? capSessions(sessions, generatingIds) : sessions;
     if (capped !== sessions) setSessions(capped);
     // 空对话不落盘：关软件即"永久删除"（用户要求——空状态只是临时草稿）；正在生成回复的空壳除外（防截断）。
     const persistable = capped.filter((s) => s.messages.length > 0 || generatingIds.includes(s.id));

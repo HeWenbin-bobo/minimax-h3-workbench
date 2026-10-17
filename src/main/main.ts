@@ -630,6 +630,21 @@ function registerIpc(
     // 密钥只存内存快照、绝不打印（CLAUDE.md 红线）。非智能体路径不需要这些
     // （LlmService 自己读），故按 agent 条件读，不白做一次 safeStorage 解密。
     const turnSettings = await settingsStore.get();
+    // 从这里到分支入口之间还有若干可能抛错的 await（读密钥、历史规范化）。
+    // 而 `sessionAborters` 已在上面登记了本会话——不兜住的话，任何一处抛错都会让
+    // 那个控制器**永远留在表里**，同会话之后每次发送都撞上"上一轮回复还在进行中"，
+    // 用户只能重启应用。密钥解不开（换机器 / Local State 丢失）正好会走到这条路径。
+    let llmApiKey = "";
+    let searchApiKey = "";
+    try {
+      if (agent) {
+        llmApiKey = await settingsStore.getSecret("llmApiKey");
+        searchApiKey = await settingsStore.getSecret("searchApiKey");
+      }
+    } catch (error) {
+      sessionAborters.delete(session);
+      throw error;
+    }
     const turn = freezeTurn({
       model: turnSettings.llm.model,
       browserOnly,
@@ -639,8 +654,8 @@ function registerIpc(
       systemPrompt: agent ? turnSettings.llm.systemPrompt : "",
       searchBaseUrl: agent ? turnSettings.searchApi.baseUrl || "" : "",
       defaultBackend: agent ? turnSettings.defaultBackend : "local",
-      llmApiKey: agent ? await settingsStore.getSecret("llmApiKey") : "",
-      searchApiKey: agent ? await settingsStore.getSecret("searchApiKey") : ""
+      llmApiKey,
+      searchApiKey
     });
     // 历史规范化：丢空白残留、剥掉模型收不下的图片、修掉非法的首条 assistant。
     // 放在压缩之后——压缩会改写历史，规范化必须作用在**真正要发出去的那份**上。

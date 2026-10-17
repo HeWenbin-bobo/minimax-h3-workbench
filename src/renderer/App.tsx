@@ -323,12 +323,23 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
   </section>;
 }
 
-function TaskCard({ task, index, onError }: { task?: GenerationTask; index: number; onError: (e: unknown) => void }) {
+/**
+ * 任务卡。
+ *
+ * `allowDemoPlaceholder`（默认 true）：task 为空时渲染**内置示例视频**充当占位。
+ * 这只在工作台「新建任务」视图下有意义（还没提交，展示成品效果）。
+ *
+ * 对话气泡必须传 false：那里 task 为空意味着**任务已被删除/淘汰**，
+ * 再拿示例视频顶上就是"把 demo 冒充成用户生成的结果"（实测：删除任务后气泡里
+ * 出现「结果 1 · 4 秒 · 480P · 已生成 · 就绪」的假结果）。
+ */
+function TaskCard({ task, index, onError, allowDemoPlaceholder = true }: { task?: GenerationTask; index: number; onError: (e: unknown) => void; allowDemoPlaceholder?: boolean }) {
   const canCancel = task && !["succeeded","failed","cancelled","interrupted"].includes(task.status);
   const canRetry = task && ["failed","cancelled","interrupted"].includes(task.status);
+  const showDemo = !task && allowDemoPlaceholder;
   const bundledMedia = `${import.meta.env.BASE_URL}demo-videos/showcase-0${index + 1}.mp4`;
   const bundledPoster = `${import.meta.env.BASE_URL}demo-videos/showcase-0${index + 1}.jpg`;
-  const media = task?.outputPath ? `h3media://local/file?path=${encodeURIComponent(task.outputPath)}` : task ? "" : bundledMedia;
+  const media = task?.outputPath ? `h3media://local/file?path=${encodeURIComponent(task.outputPath)}` : task ? "" : showDemo ? bundledMedia : "";
   const [retrying, setRetrying] = useState(false);
   async function retry() {
     if (!task || retrying) return;
@@ -336,6 +347,9 @@ function TaskCard({ task, index, onError }: { task?: GenerationTask; index: numb
     const response = await window.h3.retryTask(task.id);
     setRetrying(false);
     if (!response.ok) onError(response.message || "重试失败");
+  }
+  if (!task && !allowDemoPlaceholder) {
+    return <article className="task-card missing"><div className="task-placeholder"><span>0{index + 1}</span><i>任务已不存在</i></div><div className="task-meta"><div><strong>结果 {index + 1}</strong><small>该任务已被删除，可在工作台回收站恢复</small></div></div></article>;
   }
   return <article className={`task-card ${task?.status || "ready"}`}>{media ? <video src={media} poster={task ? undefined : bundledPoster} controls preload="metadata" /> : <div className="task-placeholder"><span>0{index + 1}</span><i>{statusLabel(task!.status)}</i></div>}<div className="task-meta"><div><strong>{task ? `Seed ${task.seed}` : `结果 ${index + 1}`}</strong><small>{task?.message || "4 秒 · 480P · 已生成"}</small></div>{task ? <em>{task.progress}%</em> : <em>就绪</em>}</div>{task && <div className="progress"><i style={{ width: `${task.progress}%` }}/></div>}{task?.outputPath && <button className="text-button" onClick={() => window.h3.showItem(task.outputPath!)}>在文件夹中显示</button>}{canRetry && <button className="cancel-button" disabled={retrying} onClick={retry}>{retrying ? "重试中…" : "重试"}</button>}{canCancel && <button className="cancel-button" onClick={() => window.h3.cancelTask(task.id)}>取消</button>}</article>;
 }
@@ -1135,7 +1149,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
                 <button className="pg-plan-run" disabled={generating} onClick={executePlan} title="按上面的计划开始执行（会把这份计划原样交给模型接着做）">▶ 继续执行</button>
                 <span className="pg-plan-hint">确认后才会真正创建视频/文件</span>
               </div>}
-              {msg.taskGroups && msg.taskGroups.length > 0 && msg.taskGroups.map((group, gi) => group.length > 0 && <div key={`${msg.id}-${gi}`} className="result-grid pg-task-grid">{group.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} />)}</div>)}
+              {msg.taskGroups && msg.taskGroups.length > 0 && msg.taskGroups.map((group, gi) => group.length > 0 && <div key={`${msg.id}-${gi}`} className="result-grid pg-task-grid">{group.map((taskId, i) => <TaskCard key={taskId} task={activeTasks.get(taskId)} index={i % 4} onError={onError} allowDemoPlaceholder={false} />)}</div>)}
             </div>)}
           <div ref={bottomRef} />
         </div>

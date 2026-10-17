@@ -48,7 +48,7 @@ export function estimateTokens(text: string): number {
  * 而 `content` 里没有它。旧实现只按文本估 → 带图会话的占用被严重低估
  * （实测：1MB 图片只算 7 token），压缩永远触发不了，直到上游报"上下文超窗"。
  */
-const TOKENS_PER_IMAGE = 1_000;
+export const TOKENS_PER_IMAGE = 1_000;
 
 /** 消息列表的估算总量（含角色开销的粗算，每条消息 +4 token；图片按张计）。 */
 export function estimateMessagesTokens(

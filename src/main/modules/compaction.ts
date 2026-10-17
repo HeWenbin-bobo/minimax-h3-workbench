@@ -9,7 +9,7 @@
  */
 
 import type { ChatMessage } from "../../shared/types";
-import { estimateTokens } from "./contextBudget";
+import { estimateTokens, TOKENS_PER_IMAGE } from "./contextBudget";
 import type { LlmServiceOptions } from "./llmService";
 import { resolveChatPath } from "./llmService";
 
@@ -75,7 +75,11 @@ export function buildCompactedHistory(
   let remaining = maxUserTokens;
   for (const message of [...userMessages].reverse()) {
     if (remaining <= 0) break;
-    const tokens = estimateTokens(message.content);
+    // 预算必须把**图片**算进去。只按 content 估会把一张大图当"几乎免费"整体保留，
+    // 压完仍然超预算——压缩就白做了。
+    // 注意：只加图片成本，不加 estimateMessagesTokens 的每条 +4 开销——
+    // 这里的预算语义是"用户文本内容的 token 量"，改变它会破坏既有阈值（单测已覆盖）。
+    const tokens = estimateTokens(message.content) + (message.images?.length ?? 0) * TOKENS_PER_IMAGE;
     if (tokens <= remaining) {
       // 图片附件一并保留（Codex 在超预算时才丢非文本 part，预算内整体保留）。
       selected.push(message);

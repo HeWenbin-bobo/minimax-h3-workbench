@@ -132,7 +132,7 @@ export function App() {
       {page === "ready" && <ReadyPage report={report} busy={detecting} onDetect={detect} onNavigate={setPage} />}
       {page === "studio" && <StudioPage settings={settings} tasks={tasks} onError={showError} onNotice={(text) => setNotice({ text })} />}
       {page === "playground" && <PlaygroundPage settings={settings} tasks={tasks} onError={showError} onNotice={(text) => setNotice({ text })} onNavigate={setPage} />}
-      {page === "downloads" && <ResourcesPage resources={resources} settings={settings} onSettingsChange={setSettings} />}
+      {page === "downloads" && <ResourcesPage resources={resources} settings={settings} onSettingsChange={setSettings} onError={showError} />}
       {page === "guide" && <GuidePage />}
       {page === "connections" && <ConnectionsPage settings={settings} setSettings={setSettings} onError={showError} onNotice={(text) => setNotice({ text })} />}
     </main>
@@ -367,13 +367,33 @@ function TaskCard({ task, index, onError, allowDemoPlaceholder = true }: { task?
       setRetrying(false);
     }
   }
+  // 「在文件夹中显示」与「取消」此前完全忽略返回值：路径被白名单拒绝、任务已被淘汰时
+  // 点了毫无反应，用户不知道是没生效还是点错了（CLAUDE.md「出错必须让人看见」）。
+  async function reveal() {
+    if (!task?.outputPath) return;
+    try {
+      const response = await window.h3.showItem(task.outputPath);
+      if (!response.ok) onError(response.message || "无法打开所在文件夹");
+    } catch (error) {
+      onError(error);
+    }
+  }
+  async function cancel() {
+    if (!task) return;
+    try {
+      const response = await window.h3.cancelTask(task.id);
+      if (!response.ok) onError(response.message || "取消失败");
+    } catch (error) {
+      onError(error);
+    }
+  }
   if (!task && !allowDemoPlaceholder) {
     return <article className="task-card missing"><div className="task-placeholder"><span>0{index + 1}</span><i>任务已不存在</i></div><div className="task-meta"><div><strong>结果 {index + 1}</strong><small>该任务已被删除，可在工作台回收站恢复</small></div></div></article>;
   }
-  return <article className={`task-card ${task?.status || "ready"}`}>{media ? <video src={media} poster={task ? undefined : bundledPoster} controls preload="metadata" /> : <div className="task-placeholder"><span>0{index + 1}</span><i>{statusLabel(task!.status)}</i></div>}<div className="task-meta"><div><strong>{task ? `Seed ${task.seed}` : `结果 ${index + 1}`}</strong><small>{task?.message || "4 秒 · 480P · 已生成"}</small></div>{task ? <em>{task.progress}%</em> : <em>就绪</em>}</div>{task && <div className="progress"><i style={{ width: `${task.progress}%` }}/></div>}{task?.outputPath && <button className="text-button" onClick={() => window.h3.showItem(task.outputPath!)}>在文件夹中显示</button>}{canRetry && <button className="cancel-button" disabled={retrying} onClick={retry}>{retrying ? "重试中…" : "重试"}</button>}{canCancel && <button className="cancel-button" onClick={() => window.h3.cancelTask(task.id)}>取消</button>}</article>;
+  return <article className={`task-card ${task?.status || "ready"}`}>{media ? <video src={media} poster={task ? undefined : bundledPoster} controls preload="metadata" /> : <div className="task-placeholder"><span>0{index + 1}</span><i>{statusLabel(task!.status)}</i></div>}<div className="task-meta"><div><strong>{task ? `Seed ${task.seed}` : `结果 ${index + 1}`}</strong><small>{task?.message || "4 秒 · 480P · 已生成"}</small></div>{task ? <em>{task.progress}%</em> : <em>就绪</em>}</div>{task && <div className="progress"><i style={{ width: `${task.progress}%` }}/></div>}{task?.outputPath && <button className="text-button" onClick={reveal}>在文件夹中显示</button>}{canRetry && <button className="cancel-button" disabled={retrying} onClick={retry}>{retrying ? "重试中…" : "重试"}</button>}{canCancel && <button className="cancel-button" onClick={cancel}>取消</button>}</article>;
 }
 
-function ResourcesPage({ resources, settings, onSettingsChange }: { resources: ResourceLink[]; settings: AppSettings; onSettingsChange: (s: AppSettings) => void }) {
+function ResourcesPage({ resources, settings, onSettingsChange, onError }: { resources: ResourceLink[]; settings: AppSettings; onSettingsChange: (s: AppSettings) => void; onError: (e: unknown) => void }) {
   const labels: Record<ResourceLink["category"], string> = { model: "MODEL", comfyui: "APP", workflow: "JSON", docs: "DOCS" };
   const models = resources.filter((item) => item.category === "model");
   const supporting = resources.filter((item) => item.category !== "model");
@@ -407,11 +427,20 @@ function ResourcesPage({ resources, settings, onSettingsChange }: { resources: R
     setChecking(false);
     if (response.data) setModelStatus(response.data); else setModelStatus([]);
   }
+  // 打开外链可能被主进程拒绝（只允许 HTTPS）或失败；不兜住的话按钮点了毫无反应。
+  async function open(url: string) {
+    try {
+      const response = await window.h3.openExternal(url);
+      if (!response.ok) onError(response.message || "无法打开链接");
+    } catch (error) {
+      onError(error);
+    }
+  }
   const statusById = useMemo(() => new Map((modelStatus ?? []).map((item) => [item.id, item])), [modelStatus]);
 
   const renderItems = (items: ResourceLink[]) => <div className="download-list">{items.map((item) => {
     const status = item.category === "model" && root ? statusById.get(item.id) : undefined;
-    return <article key={item.id}><div className="download-icon">{labels[item.category]}</div><div className="download-info"><span>{item.action === "download" ? `${formatBytes(item.sizeBytes)} · ${item.targetDirectory}` : "官方外部资源"}{status && <em className={status.present ? "model-present" : "model-missing"}>{status.present ? "✓ 已就位" : "✗ 未找到"}</em>}</span><strong>{item.label}</strong><small>{status?.present ? status.fullPath : item.description}</small></div><button className="primary" onClick={() => window.h3.openExternal(item.url)}>{item.action === "download" ? "下载模型 ↓" : "打开官网 ↗"}</button></article>;
+    return <article key={item.id}><div className="download-icon">{labels[item.category]}</div><div className="download-info"><span>{item.action === "download" ? `${formatBytes(item.sizeBytes)} · ${item.targetDirectory}` : "官方外部资源"}{status && <em className={status.present ? "model-present" : "model-missing"}>{status.present ? "✓ 已就位" : "✗ 未找到"}</em>}</span><strong>{item.label}</strong><small>{status?.present ? status.fullPath : item.description}</small></div><button className="primary" onClick={() => open(item.url)}>{item.action === "download" ? "下载模型 ↓" : "打开官网 ↗"}</button></article>;
   })}</div>;
   return <section className="page"><div className="page-title"><div><span className="eyebrow">OFFICIAL MODELS</span><h1>模型下载</h1></div><button className="secondary" onClick={checkRoot} disabled={!root || checking}>{checking ? "检查中…" : "重新检查"}</button></div>
     <div className="light-note"><strong>本机 ComfyUI 目录</strong><span>指定你自己的 ComfyUI 安装目录后，这里会逐个检查 5 个模型文件是否已放到正确位置。</span></div>

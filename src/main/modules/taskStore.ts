@@ -91,16 +91,35 @@ export class TaskStore {
           message: "应用上次退出时任务尚未完成，请重新提交。"
         };
       });
-      if (changed) await this.save(recovered);
+      // 回写归一化结果：**失败不能影响"读到了什么"**。
+      // `save()` 现在会把写盘失败抛出来（供能 await 的调用方感知），若让它冒到
+      // 外层 catch，`load()` 会返回 [] —— 磁盘满时反而把已读到的好数据全丢光。
+      if (changed) {
+        await this.save(recovered).catch((error) => {
+          console.error("[tasks] 回写归一化结果失败：", error instanceof Error ? error.message : error);
+        });
+      }
       return recovered;
     } catch {
       return [];
     }
   }
 
+  /**
+   * 落盘。
+   *
+   * **失败必须让调用方知道**：旧实现是
+   * `this.pending = this.pending.then(...).catch(() => undefined)`，
+   * 于是 `await save()` 永远 resolve —— 磁盘满（视频产物很容易占满）、目录只读时，
+   * 任务历史一直写不进去，命令却全部"成功"，用户重启后发现这一批记录全没了。
+   *
+   * 现在：返回值把这次写入的真实结果交给调用方（IPC 层会翻成中文），
+   * 队列本身仍不被单次失败污染（后续写入照常进行）。
+   */
   async save(tasks: GenerationTask[]): Promise<void> {
-    this.pending = this.pending.then(() => this.write(tasks)).catch(() => undefined);
-    return this.pending;
+    const run = this.pending.then(() => this.write(tasks));
+    this.pending = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   private async write(tasks: GenerationTask[]): Promise<void> {

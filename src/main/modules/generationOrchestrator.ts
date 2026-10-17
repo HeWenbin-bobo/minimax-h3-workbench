@@ -263,7 +263,11 @@ export class GenerationOrchestrator {
         (providerTaskId) => {
           // 云后端提交成功即回传 ID：中途取消时 cancel()/abort 监听才能通知云端终止（云任务按次计费）。
           task.providerTaskId = providerTaskId;
-          void this.store.save(this.tasks);
+          // `save()` 现在会把写盘失败抛出来（供能 await 的调用方感知），
+          // 这里是 fire-and-forget 回调，必须自己兜住，否则变成未处理的 rejection。
+          void this.store.save(this.tasks).catch((error) => {
+            console.error("[tasks] 保存任务失败（providerTaskId 回传）：", error instanceof Error ? error.message : error);
+          });
         }
       );
       Object.assign(task, result);
@@ -293,7 +297,11 @@ export class GenerationOrchestrator {
     task.updatedAt = new Date().toISOString();
     task.message = message;
     this.listener({ ...task });
-    void this.store.save(this.tasks);
+    // 同上：`update()` 是同步方法，无法 await，写盘失败只能记录。
+    // 真正需要让用户看见的失败点在下单/删除等能返回结果的调用上（它们 `await save()`）。
+    void this.store.save(this.tasks).catch((error) => {
+      console.error("[tasks] 保存任务进度失败：", error instanceof Error ? error.message : error);
+    });
     return task;
   }
 }

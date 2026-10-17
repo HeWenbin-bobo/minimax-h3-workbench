@@ -90,8 +90,14 @@ async function renderOnce(url: string, timeoutMs: number): Promise<string> {
        * 实测（probe openpage-redirect-ssrf）：公网入口 302 到 `http://127.0.0.1:<port>/object_info`
        * 后，内网内容被完整读回。搜索抓取（Bing/搜狗）虽然目标是固定的公网域名，
        * 但结果页本身也可能被劫持后跳内网，所以这道闸门对两条链路都必要。
+       *
+       * 只拦**会读数据的主框架导航**：内部 scheme（about:blank、chrome-error: 等）
+       * 读不到内网资源，放开以免误伤真实网页的正常跳转；file:/data:/javascript: 必须拒绝。
        */
       const guardNavigation = (target: string): boolean => {
+        let protocol = "";
+        try { protocol = new URL(target).protocol; } catch { /* 非法 URL 走下面的拒绝分支 */ }
+        if (protocol === "about:" || protocol === "chrome-error:" || protocol === "devtools:") return true;
         try {
           assertPublicHttpUrl(target);
           return true;

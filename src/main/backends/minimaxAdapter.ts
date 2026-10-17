@@ -118,8 +118,13 @@ export class MiniMaxAdapter implements GenerationAdapter {
     // （image 模式的 sourceImage 与 text 模式残留的 firstFrame），
     // 云端对重复角色的处理未定义——实测本地构造确认会同时发出两个 first_frame。
     if (request.mode === "image") {
-      if (request.sourceImagePath) {
-        content.push({ type: "image_url", image_url: { url: await dataUri(request.sourceImagePath) }, role: "first_frame" });
+      // 图生视频的素材来源：`sourceImagePath`（界面上的「参考图片」）优先，
+      // 没有则回落到 `firstFramePath`——`validateRequest` 明确允许后者
+      // （"图生视频模式必须选择一张图片"是 `!sourceImagePath && !firstFramePath`）。
+      // 只读 sourceImagePath 会让这类合法请求变成一个纯文本请求。
+      const imagePath = request.sourceImagePath || request.firstFramePath;
+      if (imagePath) {
+        content.push({ type: "image_url", image_url: { url: await dataUri(imagePath) }, role: "first_frame" });
       }
       return content;
     }

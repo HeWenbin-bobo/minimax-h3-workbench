@@ -142,7 +142,10 @@ export class ComfyAdapter implements GenerationAdapter {
     // stale last 后照样生成 lastImage 节点与 last_frame 输入）——首帧来自参考图、
     // 尾帧却来自上次文生视频残留的文件，生成结果与用户预期完全不符。
     if (request.mode === "image") {
-      const sourceImage = request.sourceImagePath ? await this.upload(request.sourceImagePath, signal) : undefined;
+      // 与 MiniMax 同一个边界：`validateRequest` 允许图生视频只设 `firstFramePath`,
+      // 只读 `sourceImagePath` 会让这类请求变成"没带图的文生视频"。
+      const imagePath = request.sourceImagePath || request.firstFramePath;
+      const sourceImage = imagePath ? await this.upload(imagePath, signal) : undefined;
       return buildFl2vaWorkflow(request, seed, { sourceImage });
     }
     // 文生视频：可选首帧/尾帧。

@@ -918,7 +918,10 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   const safeSession = !sessionDirName || /^\.+$/.test(sessionDirName) ? "unknown" : sessionDirName;
   const dir = path.join(app.getPath("userData"), "artifacts", safeSession);
   await mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, safeName);
+  // 同名不覆盖：同一会话里连着生成两份"报告.md"时，后者会把前者顶掉，
+  // 于是**两张卡片指向同一个文件**、都显示第二版内容（实测 probe-dup-artifact）。
+  // 这里探测重名并加 " (2)" / " (3)" 后缀，保证每次落盘都是独立文件。
+  const filePath = await uniqueArtifactPath(dir, safeName);
   if (kind === "xlsx") {
     // SheetJS：CSV 文本 → 工作簿 → xlsx 二进制。用户点名要"能保存成 .xlsx"，纯 CSV 落盘达不到。
     const XLSX = await loadXlsx();
@@ -937,6 +940,28 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
  * 该字段会被错切成多列，xlsx 里的数据从落盘那一刻就是错的。 */
 function parseCsvRows(content: string): string[][] {
   return content.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => parseCsvRow(line));
+}
+
+/**
+ * 在目录内找一个不冲突的文件名：`报告.md` → `报告 (2).md` → `报告 (3).md`…
+ *
+ * 为什么需要：同一会话里连着让模型产出两份同名文件是常事（"再改一版报告"）。
+ * 直接覆盖会让**两张卡片指向同一个路径**，点第一张看到的是第二版内容（实测复现）。
+ * 上限 100 次，极端情况下退回带时间戳的名字，避免死循环。
+ */
+async function uniqueArtifactPath(dir: string, fileName: string): Promise<string> {
+  const ext = path.extname(fileName);
+  const stem = fileName.slice(0, fileName.length - ext.length);
+  for (let n = 1; n <= 100; n += 1) {
+    const candidate = path.join(dir, n === 1 ? fileName : `${stem} (${n})${ext}`);
+    try {
+      await stat(candidate);
+      continue; // 已存在，试下一个
+    } catch {
+      return candidate; // 不存在 → 可用
+    }
+  }
+  return path.join(dir, `${stem} (${Date.now()})${ext}`);
 }
 
 /**

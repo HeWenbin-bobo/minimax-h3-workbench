@@ -1995,6 +1995,10 @@ function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: 
   retentionDays: number;
 }) {
   const daysLeft = (iso: string) => Math.max(0, Math.ceil((retentionDays * 86_400_000 - (Date.now() - new Date(iso).getTime())) / 86_400_000));
+  // 二次确认用**内联两段式**而不是 window.confirm：
+  // confirm 在 Electron 里会弹阻塞式原生对话框，且自动化（CDP）会被挂住；
+  // 本项目对 prompt 已有同样教训（"prompt() is not supported"），统一步调。
+  const [confirmingId, setConfirmingId] = useState<string>();
   return <div className="pg-trash-overlay" onClick={onClose}>
     <section className="pg-trash" onClick={(e) => e.stopPropagation()}>
       <header><strong>会话回收站</strong><small>删除的会话保留 {retentionDays} 天，到期自动清除</small><button className="text-button" onClick={onClose}>关闭</button></header>
@@ -2004,7 +2008,14 @@ function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: 
           <small>{session.messages.length} 条消息 · {session.deletedAt ? `${daysLeft(session.deletedAt)} 天后自动清除` : ""}</small></div>
         <div className="trash-actions">
           <button className="text-button" onClick={() => onRestore(session)}>恢复</button>
-          <button className="text-button danger" onClick={() => onPurge(session)}>彻底删除</button>
+          {/* 彻底删除不可逆（会话记录 + 产物目录一起删）。第一次点击变成确认态，
+              避免误触后没有挽回途径；点别处或再点「取消」即退出确认态。 */}
+          {confirmingId === session.id
+            ? <>
+                <button className="text-button danger" onClick={() => { setConfirmingId(undefined); onPurge(session); }}>确认删除</button>
+                <button className="text-button" onClick={() => setConfirmingId(undefined)}>取消</button>
+              </>
+            : <button className="text-button danger" onClick={() => setConfirmingId(session.id)}>彻底删除</button>}
         </div>
       </article>)}
     </section>

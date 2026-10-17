@@ -78,8 +78,16 @@ export async function checkFrameworkUpdate(
   }
 }
 
-function normalizeVersion(value?: string): string | undefined {
-  const normalized = value?.trim().replace(/^v/i, "");
+/**
+ * 版本号归一化。
+ *
+ * 参数类型必须是 `unknown` 而不是 `string`：上游 JSON 只是"我们以为"的形状，
+ * GitHub 的 `tag_name` 或 npm 的 `version` 返回数字/对象时，直接 `.trim()`
+ * 会抛 "value.trim is not a function"（英文技术错误直接透到界面上）。
+ */
+function normalizeVersion(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().replace(/^v/i, "");
   return normalized && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(normalized) ? normalized : undefined;
 }
 

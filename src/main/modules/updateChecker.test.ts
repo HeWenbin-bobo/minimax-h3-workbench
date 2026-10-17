@@ -115,3 +115,26 @@ describe("预发布版本比较", () => {
     await expect(latestIsNewer("0.3.0", "0.3.0")).resolves.toBe(false);
   });
 });
+
+// 上游 JSON 只是"我们以为"的形状：tag_name / version 可能是数字或对象。
+// 直接 `.trim()` 会抛 "value.trim is not a function"（英文错误透到界面）。
+describe("版本号类型容错", () => {
+  it("tag_name 为数字/对象/null 时不抛错，按无有效版本处理", async () => {
+    for (const bad of [5, {}, null, [], true]) {
+      const fetcher = vi.fn(async () => json({
+        tag_name: bad,
+        html_url: "https://github.com/HeWenbin-bobo/minimax-h3-workbench/releases/tag/v1",
+        published_at: "2026-10-01T00:00:00Z"
+      }));
+      await expect(checkForUpdates("0.2.1", fetcher)).rejects.toThrow("更新服务器没有返回有效版本号");
+    }
+  });
+
+  it("npm version 为数字时给出可读失败信息而非英文 TypeError", async () => {
+    const fetcher = vi.fn(async () => json({ version: 5 }));
+    const result = await checkFrameworkUpdate("5.0.0", fetcher);
+    expect(result.updateAvailable).toBe(false);
+    expect(result.message).toContain("未返回有效版本号");
+    expect(result.message).not.toMatch(/trim is not a function/);
+  });
+});

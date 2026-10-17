@@ -618,8 +618,11 @@ function registerIpc(
     // 而摘要本身至少几百 token。实测一段 21 token 的对话压完变成 375 token——
     // 不但没省，还白花一次摘要请求（真实计费）。
     // 门槛取"摘要的保守长度"：低于它时压缩不可能有净收益。
+    //
+    // **但 forceCompact 必须豁免**：上游已明确报过超窗，说明本地估算（含这条
+    // "历史很短"的判断）在这条会话上不可信。此时再跳过压缩，下一轮会撞同一堵墙。
     const MIN_COMPACT_TOKENS = 2_000;
-    if (active < MIN_COMPACT_TOKENS) {
+    if (!budget.window.forceCompact && active < MIN_COMPACT_TOKENS) {
       if (trigger === "manual") {
         // 手动触发要给反馈，否则用户点了「立即压缩」看不到任何反应。
         const info = { before: active, after: active, windowNumber: budget.window.windowNumber, reason: "历史较短，无需压缩" };

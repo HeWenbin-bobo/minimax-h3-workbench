@@ -763,6 +763,12 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
     Boolean(session) && typeof session === "object" && typeof (session as PlaygroundSession).id === "string"
   ).map((session) => ({
     ...session,
+    // `createdAt` / `updatedAt` 必须是字符串：会话列表用
+    // `sessionRecency(...).localeCompare(...)` 排序，数字（时间戳）会抛
+    // "recency(...).localeCompare is not a function" —— 整个会话列表打不开。
+    // 缺失或脏值统一归一成当前时刻（至少排在合理位置，而不是崩溃）。
+    createdAt: typeof session.createdAt === "string" && session.createdAt ? session.createdAt : new Date().toISOString(),
+    updatedAt: typeof session.updatedAt === "string" && session.updatedAt ? session.updatedAt : undefined,
     // toolSteps 与 streaming 同理是瞬态：流式途中关闭应用会残留，读取时强制剥离。
     // 旧数据迁移：扁平 taskIds → 单组 taskGroups（旧消息没有分组结构）。
     messages: (Array.isArray(session.messages) ? session.messages : []).filter(Boolean).map((msg) => {

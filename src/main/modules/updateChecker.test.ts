@@ -76,3 +76,42 @@ describe("checkFrameworkUpdate", () => {
 function json(value: unknown): Response {
   return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
 }
+
+// semver 预发布语义：normalizeVersion 明确允许 `-beta.1` 这类后缀，
+// 所以比较逻辑不能把它丢掉（原实现 `split("-")[0]` 会让 beta.1 与 beta.2 判为相等）。
+describe("预发布版本比较", () => {
+  async function latestIsNewer(current: string, latest: string): Promise<boolean> {
+    const fetcher = vi.fn(async () => json({
+      tag_name: `v${latest}`,
+      name: `v${latest}`,
+      html_url: `https://github.com/HeWenbin-bobo/minimax-h3-workbench/releases/tag/v${latest}`,
+      published_at: "2026-10-01T00:00:00Z"
+    }));
+    return (await checkForUpdates(current, fetcher)).updateAvailable;
+  }
+
+  it("beta.2 比 beta.1 新", async () => {
+    await expect(latestIsNewer("0.3.0-beta.1", "0.3.0-beta.2")).resolves.toBe(true);
+  });
+
+  it("正式版比同号 beta 新（用户不该停在 beta）", async () => {
+    await expect(latestIsNewer("0.3.0-beta.1", "0.3.0")).resolves.toBe(true);
+  });
+
+  it("beta 不比同号正式版新", async () => {
+    await expect(latestIsNewer("0.3.0", "0.3.0-beta.1")).resolves.toBe(false);
+  });
+
+  it("beta.10 按数值比较（不是字典序）", async () => {
+    await expect(latestIsNewer("0.3.0-beta.9", "0.3.0-beta.10")).resolves.toBe(true);
+  });
+
+  it("主版本号更大时，预发布也照样算新", async () => {
+    await expect(latestIsNewer("0.2.1", "0.3.0-beta.1")).resolves.toBe(true);
+  });
+
+  it("相同版本不算更新", async () => {
+    await expect(latestIsNewer("0.3.0-beta.1", "0.3.0-beta.1")).resolves.toBe(false);
+    await expect(latestIsNewer("0.3.0", "0.3.0")).resolves.toBe(false);
+  });
+});

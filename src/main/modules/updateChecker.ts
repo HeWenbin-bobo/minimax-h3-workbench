@@ -83,11 +83,45 @@ function normalizeVersion(value?: string): string | undefined {
   return normalized && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(normalized) ? normalized : undefined;
 }
 
+/**
+ * 版本比较，按 semver 语义处理预发布标签。
+ *
+ * 原实现直接 `split("-")[0]` 把预发布段丢掉，于是：
+ * - `0.3.0-beta.2` 与 `0.3.0-beta.1` 判为相等 → **永远不会提示预发布版更新**
+ * - `0.3.0` 与 `0.3.0-beta.1` 判为相等 → 正式版发布后不提示升级（用户停在 beta）
+ * `normalizeVersion` 明确允许 `-beta.1` 这类后缀，两处语义必须一致。
+ */
 function compareVersions(left: string, right: string): number {
-  const leftParts = left.split("-")[0].split(".").map(Number);
-  const rightParts = right.split("-")[0].split(".").map(Number);
+  const parse = (value: string) => {
+    const [core, ...pre] = value.split("-");
+    return { core: core.split(".").map(Number), pre: pre.join("-") };
+  };
+  const a = parse(left);
+  const b = parse(right);
   for (let index = 0; index < 3; index += 1) {
-    if (leftParts[index] !== rightParts[index]) return leftParts[index] > rightParts[index] ? 1 : -1;
+    const x = a.core[index] ?? 0;
+    const y = b.core[index] ?? 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  // 主版本号相同：没有预发布标签的版本**更高**（semver：1.0.0 > 1.0.0-rc.1）。
+  if (!a.pre && !b.pre) return 0;
+  if (!a.pre) return 1;
+  if (!b.pre) return -1;
+  // 两边都有预发布标签：逐段比较，数字段按数值比、其余按字典序（semver 11.4）。
+  const partsA = a.pre.split(".");
+  const partsB = b.pre.split(".");
+  for (let index = 0; index < Math.max(partsA.length, partsB.length); index += 1) {
+    const x = partsA[index];
+    const y = partsB[index];
+    if (x === undefined) return -1; // 前缀更短的更小（1.0.0-alpha < 1.0.0-alpha.1）
+    if (y === undefined) return 1;
+    if (x === y) continue;
+    const nx = /^\d+$/.test(x) ? Number(x) : NaN;
+    const ny = /^\d+$/.test(y) ? Number(y) : NaN;
+    if (!Number.isNaN(nx) && !Number.isNaN(ny)) return nx > ny ? 1 : -1;
+    if (!Number.isNaN(nx)) return -1; // 数字段小于字母段
+    if (!Number.isNaN(ny)) return 1;
+    return x > y ? 1 : -1;
   }
   return 0;
 }

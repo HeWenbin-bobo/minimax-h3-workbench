@@ -445,8 +445,10 @@ button { cursor: pointer; }
 .toast { position: fixed; right: 24px; bottom: 24px; z-index: 4; background: var(--brand-gradient); color: #fff; border: 0; border-radius: 12px; padding: 14px 18px; box-shadow: 0 18px 55px rgba(255, 74, 82, 0.26); font-size: 11px; max-width: 430px; text-align: left; }
 .toast.error { background: linear-gradient(118deg, #c92a4a, #ef6a53); }
 .toast span { float: right; margin-left: 20px; }
-.splash { height: 100vh; display: grid; place-content: center; justify-items: center; color: var(--muted); background: var(--surface-sunken); }
+.splash { height: 100vh; display: grid; place-content: center; justify-items: center; gap: 10px; color: var(--muted); background: var(--surface-sunken); }
 .splash p { font-size: 11px; }
+/* 启动失败时的详情：错误文案可能较长，限宽并允许换行，别把布局撑出屏幕。 */
+.splash-detail { max-width: 460px; text-align: center; line-height: 1.7; color: var(--danger); word-break: break-word; }
 
 .pg-session.active { background: var(--brand-wash-strong); box-shadow: inset 2px 0 0 var(--pink); }
 .pg-main { display: flex; flex-direction: row; align-items: stretch; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); overflow: hidden; }

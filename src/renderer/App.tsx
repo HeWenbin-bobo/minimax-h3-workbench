@@ -166,7 +166,18 @@ export function App() {
       setCheckingUpdate(false);
     }
   }
-  if (!settings) return <div className="splash"><div className="brand-mark">H3</div><p>正在启动工作台…</p></div>;
+  // **启动失败必须让人看见**：`settings` 为空时界面只渲染 splash，而提示条（toast）
+  // 挂在 app-shell 里、此时根本不在 DOM 中——`showError` 写进了 state 却没人显示，
+  // 用户看到的是"一直在启动…"，永远等不到任何解释，也没有重试入口。
+  // 这里把提示条与重试按钮一并放进 splash。
+  if (!settings) return <div className="splash">
+    <div className="brand-mark">H3</div>
+    <p>{notice?.error ? "读取设置失败：" : "正在启动工作台…"}</p>
+    {notice?.error && <>
+      <p className="splash-detail">{notice.text}</p>
+      <button className="primary" onClick={() => window.location.reload()}>重试</button>
+    </>}
+  </div>;
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand"><div className="brand-mark">H3</div><div><strong>MiniMax H3</strong><span>视频生成工作台</span></div></div>
       <nav>{pages.map((item) => <button key={item.id} data-page={item.id} className={page === item.id ? "active" : ""} onClick={() => setPage(item.id)}><i>{item.eyebrow}</i><span>{item.label}</span></button>)}</nav>

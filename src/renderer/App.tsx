@@ -602,6 +602,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 用户是否贴在底部：流式期间只有贴底才自动跟随。否则用户往上翻看历史时，
   // 每个 chunk 都会把他拽回底部（注释此前就写着"仅在用户接近底部时跟随"，但代码没实现）。
   const stickToBottomRef = useRef(true);
+  // 存储写满只提示一次（不然每个 chunk 都会弹一次 toast）。写成功后自动复位。
+  const storageWarnedRef = useRef(false);
   const searchReady = Boolean(settings.searchApi.baseUrl);
   const generating = generatingIds.includes(activeId);
   // 计划模式：下一次发送只出方案。
@@ -633,8 +635,19 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     if (capped !== sessions) setSessions(capped);
     // 空对话不落盘：关软件即"永久删除"（用户要求——空状态只是临时草稿）；正在生成回复的空壳除外（防截断）。
     const persistable = capped.filter((s) => s.messages.length > 0 || generatingIds.includes(s.id));
-    localStorage.setItem(pgSessionsKey, JSON.stringify(persistable));
-  }, [sessions, generatingIds]);
+    // 写盘失败必须兜住：localStorage 有配额（约 5–10MB，长会话很容易顶到）。
+    // 不兜的话 effect 直接抛异常 → 整个 PlaygroundPage 崩溃、界面塌成空白，用户还不知道
+    // 会话其实没存下来（实测复现）。按 CLAUDE.md「出错必须让人看见」，这里如实提示一次。
+    try {
+      localStorage.setItem(pgSessionsKey, JSON.stringify(persistable));
+      storageWarnedRef.current = false; // 写成功即复位，下次真失败时还能再提醒一次
+    } catch {
+      if (!storageWarnedRef.current) {
+        storageWarnedRef.current = true;
+        onNotice("本地存储空间不足，最近的对话可能无法保存。建议删除一些旧会话或清空回收站。");
+      }
+    }
+  }, [sessions, generatingIds, onNotice]);
   useEffect(() => {
     // 流式事件按事件里带的 sessionId 路由：多会话并发时各写各的气泡，不会互相覆盖。
     // 极端时序下事件可能早于 React 提交新会话+消息到达，此时把分块暂存进缓冲区，收尾时统一写回。

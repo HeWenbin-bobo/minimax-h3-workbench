@@ -852,26 +852,54 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 不补的话 chip 要等最多 20 秒才追上真实占用。
   }, [activeId, generating]);
 
+  // 落盘节流：流式回复期间每个 chunk 都会改 sessions，而每次写盘都要把**全部会话**
+  // stringify 一遍（实测 10 个会话 + 2 张 1MB 图 ≈ 2.2MB / 每次 2.9ms）。
+  // 不节流时每秒 20 个 chunk 就是约 44MB/秒的同步写盘 + 主线程持续占用，
+  // 长会话带图时会明显卡顿。
+  // 400ms 足够短（异常退出最多丢 0.4 秒内容），又能把写盘次数压下一个量级。
+  const persistPendingRef = useRef<PlaygroundSession[] | undefined>(undefined);
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // onNotice 是父组件每次渲染新建的函数，用 ref 持有以免它变化就重建 flush。
+  const onNoticeRef = useRef(onNotice);
+  onNoticeRef.current = onNotice;
+  const flushPersist = useCallback(() => {
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = undefined;
+    }
+    const data = persistPendingRef.current;
+    if (!data) return;
+    persistPendingRef.current = undefined;
+    // 写盘失败必须兜住：localStorage 有配额（约 5–10MB，长会话很容易顶到）。
+    // 不兜的话 effect 直接抛异常 → 整个 PlaygroundPage 崩溃、界面塌成空白，
+    // 用户还不知道会话其实没存下来（实测复现）。
+    try {
+      localStorage.setItem(pgSessionsKey, JSON.stringify(data));
+      storageWarnedRef.current = false; // 写成功即复位，下次真失败时还能再提醒一次
+    } catch {
+      if (!storageWarnedRef.current) {
+        storageWarnedRef.current = true;
+        onNoticeRef.current("本地存储空间不足，最近的对话可能无法保存。建议删除一些旧会话或清空回收站。");
+      }
+    }
+  }, []);
+  // 卸载前把待写数据落盘，否则最后 400ms 的回复会丢（用户关掉游乐场页就消失）。
+  useEffect(() => () => flushPersist(), [flushPersist]);
   // 落盘上限 50：内存态一并裁剪，否则 UI 显示得出来、重启后却凭空少几个（用户可感知的静默丢失）。
   // 按"最近使用"裁剪，且绝不丢弃正在生成回复的会话——否则一段正在跑的对话会被静默砍掉。
   useEffect(() => {
     const capped = sessions.length > PG_SESSION_CAP ? capSessions(sessions, generatingIds) : sessions;
     if (capped !== sessions) setSessions(capped);
     // 空对话不落盘：关软件即"永久删除"（用户要求——空状态只是临时草稿）；正在生成回复的空壳除外（防截断）。
-    const persistable = capped.filter((s) => s.messages.length > 0 || generatingIds.includes(s.id));
-    // 写盘失败必须兜住：localStorage 有配额（约 5–10MB，长会话很容易顶到）。
-    // 不兜的话 effect 直接抛异常 → 整个 PlaygroundPage 崩溃、界面塌成空白，用户还不知道
-    // 会话其实没存下来（实测复现）。按 CLAUDE.md「出错必须让人看见」，这里如实提示一次。
-    try {
-      localStorage.setItem(pgSessionsKey, JSON.stringify(persistable));
-      storageWarnedRef.current = false; // 写成功即复位，下次真失败时还能再提醒一次
-    } catch {
-      if (!storageWarnedRef.current) {
-        storageWarnedRef.current = true;
-        onNotice("本地存储空间不足，最近的对话可能无法保存。建议删除一些旧会话或清空回收站。");
-      }
-    }
-  }, [sessions, generatingIds, onNotice]);
+    persistPendingRef.current = capped.filter((s) => s.messages.length > 0 || generatingIds.includes(s.id));
+    // 已有排期就只更新待写数据（run-once timer），避免每个 chunk 都重置计时器
+    // 导致流式期间永远写不下去。
+    if (persistTimerRef.current) return;
+    persistTimerRef.current = setTimeout(() => {
+      persistTimerRef.current = undefined;
+      flushPersist();
+    }, 400);
+  }, [sessions, generatingIds, flushPersist]);
   useEffect(() => {
     // 流式事件按事件里带的 sessionId 路由：多会话并发时各写各的气泡，不会互相覆盖。
     // 极端时序下事件可能早于 React 提交新会话+消息到达，此时把分块暂存进缓冲区，收尾时统一写回。

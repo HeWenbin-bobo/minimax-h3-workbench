@@ -42,13 +42,36 @@ export class MiniMaxAdapter implements GenerationAdapter {
       });
       // 401 与 403 都算鉴权失败：403 常见于 Key 被禁用/无该模型权限/地区限制，
       // 只认 401 会把这类"实际不可用"误报成"已通过鉴权"（与 RbAdapter 的判定保持一致）。
-      const authenticated = response.status !== 401 && response.status !== 403;
+      //
+      // 另一半同样重要：**5xx / 429 不能算通过**。这里查的是一个不存在的任务，
+      // 正常响应应是 404（Key 有效、任务不存在）。若网关返回 500/502/503 或限流 429，
+      // 说明服务此刻不可用——旧逻辑会显示"API Key 已通过鉴权检查"，用户据此以为配置没问题，
+      // 实际生成时才失败。这类终态必须如实报告为"服务不可用"。
+      const status = response.status;
+      if (status === 401 || status === 403) {
+        return {
+          ok: false,
+          label: "MiniMax 云 API",
+          latencyMs: Date.now() - start,
+          details: { httpStatus: status },
+          message: `API Key 无效、已失效或无访问权限（HTTP ${status}）。`
+        };
+      }
+      if (status === 429 || status >= 500) {
+        return {
+          ok: false,
+          label: "MiniMax 云 API",
+          latencyMs: Date.now() - start,
+          details: { httpStatus: status },
+          message: `服务商暂时不可用（HTTP ${status}），无法确认鉴权状态，请稍后重试。`
+        };
+      }
       return {
-        ok: authenticated,
+        ok: true,
         label: "MiniMax 云 API",
         latencyMs: Date.now() - start,
-        details: { httpStatus: response.status },
-        message: authenticated ? "API Key 已通过鉴权检查。" : `API Key 无效、已失效或无访问权限（HTTP ${response.status}）。`
+        details: { httpStatus: status },
+        message: "API Key 已通过鉴权检查。"
       };
     } catch (error) {
       return {

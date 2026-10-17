@@ -58,15 +58,33 @@ export class RbAdapter implements GenerationAdapter {
       const response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs?limit=1`, {
         headers: this.headers()
       }, 15_000, signal);
-      const authenticated = response.status !== 401 && response.status !== 403;
+      // 401/403 = 卡密问题；5xx/429 = 服务此刻不可用（不能报成"卡密有效"）。
+      // 用一个正常请求（列 1 条任务）探活，非鉴权类成功即视为通过。
+      const status = response.status;
+      if (status === 401 || status === 403) {
+        return {
+          ok: false,
+          label: "瞬映 RB 云生成",
+          latencyMs: Date.now() - start,
+          details: { httpStatus: status },
+          message: `卡密无效或已失效（HTTP ${status}）。`
+        };
+      }
+      if (status === 429 || status >= 500) {
+        return {
+          ok: false,
+          label: "瞬映 RB 云生成",
+          latencyMs: Date.now() - start,
+          details: { httpStatus: status },
+          message: `瞬映服务暂时不可用（HTTP ${status}），无法确认卡密状态，请稍后重试。`
+        };
+      }
       return {
-        ok: authenticated,
+        ok: true,
         label: "瞬映 RB 云生成",
         latencyMs: Date.now() - start,
-        details: { httpStatus: response.status },
-        message: authenticated
-          ? "卡密已通过鉴权检查。"
-          : `卡密无效或已失效（HTTP ${response.status}）。`
+        details: { httpStatus: status },
+        message: "卡密已通过鉴权检查。"
       };
     } catch (error) {
       return {

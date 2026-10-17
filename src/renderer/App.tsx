@@ -3,6 +3,7 @@ import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMess
 import { LLM_PROVIDERS, MAX_PROMPT_LENGTH } from "../shared/types";
 import { parseCsvRows } from "../shared/csv";
 import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities";
+import { resolveDimensions } from "../shared/dimensions";
 import { describeError } from "../shared/errors";
 import { looksLikePlan, type PlanMode } from "../shared/planMode";
 import { applyTheme, loadThemeChoice, saveThemeChoice, systemPrefersDark, themeLabel, type ThemeChoice } from "./theme";
@@ -214,7 +215,13 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      const response = await window.h3.submitGeneration(request);
+      // 画幅/分辨率必须在这里换算成实际像素：本地/SSH 的 ComfyUI 工作流与 RB 后端
+      // 读的是 width/height，而两个下拉只改 ratio/resolution 字符串。不换算的话
+      // 用户选 9:16 或 2K 都不生效，出片永远是初始的 1280×720（实测两个 onChange 都没碰这两个字段）。
+      // 放在提交时现算而不是 onChange 里维护状态：少一处会漂移的副本，
+      // 且历史任务里存的 request.width/height 与实际提交值天然一致。
+      const payload = { ...request, ...resolveDimensions(request.ratio, request.resolution) };
+      const response = await window.h3.submitGeneration(payload);
       if (!response.ok) { onError(response.message); return; }
       // 提交成功：切到新项目（submitGeneration 创建的任务组排在最前）。
       if (response.data?.[0]) setActiveProjectId(response.data[0].parentId);

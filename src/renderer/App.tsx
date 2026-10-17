@@ -955,7 +955,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // generating 从"全局"改为"按会话"：多会话可并发生成，每个会话各有自己的发送守卫与流缓冲。
   const [generatingIds, setGeneratingIds] = useState<string[]>([]);
   const [showVideoForm, setShowVideoForm] = useState(false);
-  const [videoRequest, setVideoRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
+  // **不能复用工作台的 initialRequest**：它带着一整段英文 demo 提示词（工作台用它当示例）。
+  // 游乐场表单里那条「留空则使用下方聊天输入内容」的承诺因此永远不成立——
+  // 用户不填描述、直接在输入框里写需求，点提交后发出去的其实是 demo 文案。
+  const [videoRequest, setVideoRequest] = useState<GenerationRequest>({ ...initialRequest, prompt: "", backend: settings.defaultBackend });
   // 与工作台共用同一份合法时长定义：RB 的 reference/tail_frame 只收 4/6/8 秒，
   // 若这里仍放开 10/12/15，非法 seconds+preset 组合会真的发到云端——失败也照样扣卡密次数。
   const videoDurationOptions = durationOptionsFor(videoRequest.backend, videoRequest.preset);

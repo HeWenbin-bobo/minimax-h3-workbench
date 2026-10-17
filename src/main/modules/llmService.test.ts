@@ -11,7 +11,7 @@ vi.mock("@ai-sdk/openai-compatible", () => ({
   createOpenAICompatible: () => ({ chatModel: (id: string) => ({ id }) })
 }));
 
-import { consumeSse, chatAgent, rewriteChatEndpoint, type LlmServiceOptions } from "./llmService";
+import { consumeSse, chatAgent, resolveChatPath, rewriteChatEndpoint, type LlmServiceOptions } from "./llmService";
 
 // 构造一个 ReadableStream，把字符串分块推送（模拟网络分包边界不齐）。
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
@@ -188,5 +188,28 @@ describe("rewriteChatEndpoint", () => {
   it("保留查询串", () => {
     expect(rewriteChatEndpoint("https://api.minimax.io/v1/chat/completions?x=1", "https://api.minimax.io/v1"))
       .toBe("https://api.minimax.io/v1/text/chatcompletion_v2?x=1");
+  });
+});
+
+// 官方有两个域名：国际站 api.minimax.io、中国站 api.minimaxi.com，都用 /text/chatcompletion_v2。
+// 只认 .io 会让中国站用户走 /chat/completions（该路径不存在 → 404）。
+describe("resolveChatPath", () => {
+  it("国际站与中国站都用官方私有端点", () => {
+    expect(resolveChatPath("https://api.minimax.io/v1")).toBe("/text/chatcompletion_v2");
+    expect(resolveChatPath("https://api.minimaxi.com/v1")).toBe("/text/chatcompletion_v2");
+  });
+
+  it("中转/其他上游用标准端点", () => {
+    expect(resolveChatPath("https://relay.example/v1")).toBe("/chat/completions");
+    expect(resolveChatPath("https://api.deepseek.com/v1")).toBe("/chat/completions");
+  });
+
+  it("相似域名不误命中（按 hostname 精确比对）", () => {
+    expect(resolveChatPath("https://api.minimax.io.evil.com/v1")).toBe("/chat/completions");
+  });
+
+  it("非法 baseUrl 不抛错", () => {
+    expect(resolveChatPath("not-a-url")).toBe("/chat/completions");
+    expect(resolveChatPath("")).toBe("/chat/completions");
   });
 });

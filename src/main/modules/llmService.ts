@@ -184,8 +184,15 @@ export class LlmService {
 
 // 对话端点按域名运行时推导：MiniMax 官方域名走其私有端点，其余（中转/自定义）一律标准 OpenAI 路径。
 // 不存储在设置里——彻底避免改 baseUrl 后残留旧端点的脏状态。
+//
+// 官方有两个域名：国际站 api.minimax.io、中国站 api.minimaxi.com，两者都用 /text/chatcompletion_v2。
+// 只认 .io 会让中国站用户走 /chat/completions（该站不存在此路径 → 404）。
+// 用 hostname 精确比对，避免 api.minimax.io.evil.com 这类相似域名误命中。
 export function resolveChatPath(baseUrl: string): string {
-  return /api\.minimax\.io/i.test(baseUrl) ? "/text/chatcompletion_v2" : "/chat/completions";
+  let host = "";
+  try { host = new URL(baseUrl).hostname.toLowerCase(); } catch { host = ""; }
+  const isOfficialMinimax = host === "api.minimax.io" || host === "api.minimaxi.com";
+  return isOfficialMinimax ? "/text/chatcompletion_v2" : "/chat/completions";
 }
 
 // ---------- 智能体模式（Vercel AI SDK 工具循环，Codex/Claude Code 形态） ----------

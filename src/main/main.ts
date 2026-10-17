@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
-import { readFile, stat, writeFile, unlink, mkdir, rm, realpath } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink, mkdir, rm, realpath, open } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -1158,6 +1158,24 @@ function registerIpc(
       }
     }
     if (!/\.(html?|csv|tsv|md|txt|json)$/i.test(resolved)) throw new Error("该文件类型不支持文本预览。");
+    // 文本预览也要有上限：整份读进内存再随 IPC 传给渲染端，异常大的文件
+    // （手工替换、别的工具写进来）会让主进程与渲染进程同时吃力。
+    // **只读前 1MB**，而不是"先全读再截断"——后者内存压力一点没省。
+    // 预览是只读展示用途，截断比卡死好；xlsx 走 SheetJS 自己的解析路径（不受此限）。
+    const MAX_PREVIEW_BYTES = 1024 * 1024;
+    const textInfo = await stat(resolved).catch(() => undefined);
+    if (textInfo && textInfo.size > MAX_PREVIEW_BYTES) {
+      const handle = await open(resolved, "r");
+      try {
+        const buffer = Buffer.alloc(MAX_PREVIEW_BYTES);
+        const { bytesRead } = await handle.read(buffer, 0, MAX_PREVIEW_BYTES, 0);
+        // 只截到完整字符边界：末尾可能被砍在多字节字符中间。
+        const head = buffer.subarray(0, bytesRead).toString("utf8").replace(/�+$/, "");
+        return `${head}\n\n（文件较大，预览仅显示前 ${Math.round(MAX_PREVIEW_BYTES / 1024 / 1024 * 10) / 10}MB；完整内容可在文件夹中打开）`;
+      } finally {
+        await handle.close();
+      }
+    }
     return readFile(resolved, "utf8");
   });
   /**

@@ -1034,13 +1034,22 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       setSessions((all) => [session as PlaygroundSession, ...all]);
       setActiveId(session.id);
     }
-    const result = await window.h3.submitGeneration({ ...videoRequest, prompt: videoRequest.prompt || input.trim() });
+    // 表单提示词留空时用聊天框内容兜底——摘要与气泡必须用**实际提交的那个**，
+    // 否则用户看到的"已提交视频生成：___"是空的，事后无法核对提交了什么（实测 probe-submit-video-prompt）。
+    const effectivePrompt = videoRequest.prompt || input.trim();
+    let result;
+    try {
+      result = await window.h3.submitGeneration({ ...videoRequest, prompt: effectivePrompt });
+    } catch (error) {
+      onError(error);
+      return;
+    }
     if (!result.ok) { onError(result.message); return; }
     const taskIds = result.data?.map((task) => task.id) ?? [];
-    const summary = `已提交视频生成（${backendLabel(videoRequest.backend)}${videoRequest.preset ? ` · ${rbPresetLabel(videoRequest.preset)}` : ""}）：${videoRequest.prompt.slice(0, 60)}${videoRequest.prompt.length > 60 ? "…" : ""}`;
+    const summary = `已提交视频生成（${backendLabel(videoRequest.backend)}${videoRequest.preset ? ` · ${rbPresetLabel(videoRequest.preset)}` : ""}）：${effectivePrompt.slice(0, 60)}${effectivePrompt.length > 60 ? "…" : ""}`;
     const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: summary, taskGroups: taskIds.length ? [taskIds] : undefined };
     const stamp = new Date().toISOString();
-    setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, updatedAt: stamp, messages: [...s.messages, { id: crypto.randomUUID(), role: "user" as const, content: `🎬 生成视频：${videoRequest.prompt.slice(0, 80)}` }, assistantMsg] } : s));
+    setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, updatedAt: stamp, messages: [...s.messages, { id: crypto.randomUUID(), role: "user" as const, content: `🎬 生成视频：${effectivePrompt.slice(0, 80)}` }, assistantMsg] } : s));
     setShowVideoForm(false);
     onNotice(`已创建 ${videoRequest.count} 个生成任务`);
   }

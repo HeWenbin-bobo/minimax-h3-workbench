@@ -210,13 +210,16 @@ app.whenReady().then(async () => {
     }
   });
 
-  // 回收站过期清理：删除超过 7 天的任务，连同输出目录内的视频文件一并清除（安全删除白名单内）。
+  // 回收站过期清理：删除超过 7 天的任务，连同输出文件一并清除。
+  // 白名单口径与 tasks:purge 一致：当前输出目录 **或** 任务记录里记着的本应用结果路径
+  // （用户改过输出目录后，历史视频留在旧目录——只认当前目录会留下永久孤儿文件）。
   void orchestrator.purgeExpired(async (filePath) => {
     const settings = await settingsStore.get();
     const resolved = path.resolve(filePath);
     const root = path.resolve(settings.outputDirectory);
     const relative = path.relative(root, resolved);
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return; // 仅限输出目录内
+    const insideCurrent = Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+    if (!insideCurrent && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) return;
     await unlink(resolved).catch(() => undefined);
   });
   registerIpc(settingsStore, adapters, orchestrator);
@@ -519,11 +522,16 @@ function registerIpc(
   handle("tasks:listDeleted", () => orchestrator.listDeleted());
   handle("tasks:purge", async (_event, ids: string[]) => {
     const settings = await settingsStore.get();
+    // 删文件的白名单：当前输出目录 **或** 任务记录里记着的、由本应用写出的结果路径。
+    // 只认当前目录会让"改过输出目录"的用户留下孤儿视频——界面写着
+    // 「已彻底删除（含视频文件）」，实际文件还躺在旧目录里（静默失败）。
+    // 与 h3media / showItem 的放行口径保持一致（那里早就按任务记录放行历史结果）。
+    const root = path.resolve(settings.outputDirectory);
     const safeDelete = async (filePath: string) => {
       const resolved = path.resolve(filePath);
-      const root = path.resolve(settings.outputDirectory);
       const relative = path.relative(root, resolved);
-      if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return; // 仅限输出目录内
+      const insideCurrent = Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+      if (!insideCurrent && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) return;
       await unlink(resolved).catch(() => undefined);
     };
     return orchestrator.purgeTasks(Array.isArray(ids) ? ids : [], safeDelete);

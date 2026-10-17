@@ -41,13 +41,13 @@ export class LlmService {
     if (!this.options.apiKey && !/127\.0\.0\.1|localhost/.test(this.baseUrl)) {
       throw new Error("请先在连接设置中保存游乐场 LLM 的 API Key。");
     }
-    const payload = await this.buildPayload(messages, webSearch, browserOnly);
-    // 保留一份**本地引用**：`abort()` 会立刻把 this.controller 置空（让 busy 立即放开），
-    // 之后旧一轮的 finally 若无条件 `this.controller = undefined`，就会把**新一轮**的
-    // controller 误清掉——新一轮从此停不下来，busy 也一直误报 false。
+    // 控制器必须**先建**再准备载荷：`buildPayload` 里含联网搜索（浏览器渲染可达数十秒），
+    // 期间若 busy 仍是 false，同会话并发守卫失效（用户能再发一条，两股流抢同一个气泡）；
+    // 用户点「停止」也没有 controller 可中止，只能干等搜索跑完。
     const controller = new AbortController();
     this.controller = controller;
     try {
+      const payload = await this.buildPayload(messages, webSearch, browserOnly, controller.signal);
       const response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
         method: "POST",
         headers: {
@@ -158,16 +158,16 @@ export class LlmService {
   // 联网搜索：优先用户配置的搜索 API；未配置时由 searchWeb 回落免 key 直抓 Bing/搜狗。
   // browserOnly=true 走「浏览器搜索」：只用应用自带 Chromium 渲染，跳过 API 与 HTTP 直抓。
   // 结果拼接为参考段落注入本轮 system 消息。
-  private async search(query: string, browserOnly = false): Promise<string> {
+  private async search(query: string, browserOnly = false, signal?: AbortSignal): Promise<string> {
     return searchWeb(query, {
       apiBaseUrl: this.options.searchBaseUrl,
       apiKey: this.options.searchApiKey,
       renderHtml: this.options.searchRenderHtml,
       browserOnly
-    });
+    }, signal);
   }
 
-  private async buildPayload(messages: ChatMessage[], webSearch: boolean, browserOnly = false): Promise<Array<Record<string, unknown>>> {
+  private async buildPayload(messages: ChatMessage[], webSearch: boolean, browserOnly = false, signal?: AbortSignal): Promise<Array<Record<string, unknown>>> {
     const system: Record<string, unknown> = {
       role: "system",
       content: this.options.systemPrompt || "你是 MiniMax H3 视频工作台内置的智能助手。"
@@ -176,7 +176,10 @@ export class LlmService {
       const lastUser = [...messages].reverse().find((m) => m.role === "user");
       if (lastUser?.content) {
         try {
-          const results = await this.search(lastUser.content.slice(0, 200), browserOnly);
+          // 把本轮取消信号透给搜索：否则用户点「停止」后，搜索仍会跑完
+          // （浏览器渲染可达数十秒）才轮到下面的 fetch —— 停止看起来没反应。
+          const results = await this.search(lastUser.content.slice(0, 200), browserOnly, signal);
+          if (signal?.aborted) throw new DOMException("对话已取消", "AbortError");
           // 空串（配置了搜索 API 但对端返回 0 条）必须**明确告知**，不能什么都不追加。
           // 不告知的话模型以为自己检索过了，直接凭训练知识作答——正是本项目反复踩到的
           // "凭旧知识回答实时问题"。免 key 路径在没有结果时会抛错走下面的 catch，

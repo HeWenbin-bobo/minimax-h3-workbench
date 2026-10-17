@@ -70,16 +70,25 @@ export function App() {
   const tasksRef = useRef<GenerationTask[]>([]);
   useEffect(() => {
     const prev = tasksRef.current;
+    // 通知是**尽力而为**：`new Notification()` 在权限被拒（用户关掉了系统通知、
+    // 或被策略禁用）时会按规范抛 TypeError。这行在 effect 里、没有兜底，
+    // 一场任务完成就能把整个应用组件树打崩（白屏）。通知失败不该影响主流程。
+    const notify = (body: string) => {
+      try {
+        const notification = new Notification("MiniMax H3", { body });
+        notification.onclick = () => window.focus();
+      } catch {
+        // 无通知权限：界面内的任务卡片已经反映了状态，静默即可。
+      }
+    };
     for (const task of tasks) {
       const before = prev.find((t) => t.id === task.id);
       if (!before) continue; // 首次见到的任务不算"刚刚完成"（历史加载 / 已在别的路径通知过）
       const entered = (status: GenerationTask["status"]) => before.status !== status && task.status === status;
       if (entered("succeeded")) {
-        const notification = new Notification("MiniMax H3", { body: `视频生成完成：${task.prompt.slice(0, 40)}` });
-        notification.onclick = () => window.focus();
+        notify(`视频生成完成：${task.prompt.slice(0, 40)}`);
       } else if (entered("failed")) {
-        const notification = new Notification("MiniMax H3", { body: `生成失败：${task.prompt.slice(0, 40)}（${task.message?.slice(0, 60) || "未知错误"}）` });
-        notification.onclick = () => window.focus();
+        notify(`生成失败：${task.prompt.slice(0, 40)}（${task.message?.slice(0, 60) || "未知错误"}）`);
       }
     }
     tasksRef.current = tasks;

@@ -221,3 +221,42 @@ describe("submit 的数量夹取", () => {
     await expect(b.orchestrator.submit(makeRequest(-3))).resolves.toHaveLength(1);
   });
 });
+
+// `validateRequest` 对 baseSeed / width / height / ratio / resolution 是"给了才校验类型"，
+// 但 submit 把它们当必有：`undefined + 0` 是 NaN（写进任务记录与 ComfyUI 的 noise_seed），
+// 缺 width/height 会让工作流的必填输入在序列化时直接消失。
+// 这里锁定"校验器允许的调用方式，下游也能正常执行"。
+describe("submit 对可缺省字段补默认值", () => {
+  it("缺 baseSeed 时 seed 是有限数（不是 NaN）", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    const [task] = await orchestrator.submit({
+      mode: "text", backend: "local", prompt: "测试", duration: 4,
+      ratio: "16:9", resolution: "768P", width: 1280, height: 720, count: 2
+    } as never);
+    expect(Number.isFinite(task.seed)).toBe(true);
+    // 组内按 index 递增，且与存进任务的 request.baseSeed 一致（重试不会漂移）。
+    const all = orchestrator.list();
+    expect(all[0].seed + 1).toBe(all[1].seed);
+    expect(task.request?.baseSeed).toBe(task.seed);
+  });
+
+  it("缺 width/height 时按 720P 16:9 补齐", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    const [task] = await orchestrator.submit({
+      mode: "text", backend: "local", prompt: "测试", duration: 4,
+      ratio: "16:9", resolution: "768P", count: 1, baseSeed: 1
+    } as never);
+    expect(task.request?.width).toBe(1280);
+    expect(task.request?.height).toBe(720);
+  });
+
+  it("非法 ratio/resolution 回落到 16:9 / 768P", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    const [task] = await orchestrator.submit({
+      mode: "text", backend: "local", prompt: "测试", duration: 4,
+      ratio: "99:1", resolution: "4K", width: 1280, height: 720, count: 1, baseSeed: 1
+    } as never);
+    expect(task.request?.ratio).toBe("16:9");
+    expect(task.request?.resolution).toBe("768P");
+  });
+});

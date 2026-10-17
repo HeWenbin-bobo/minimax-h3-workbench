@@ -144,11 +144,31 @@ export class GenerationOrchestrator {
     // 于是 `count: 0` 会变成 4 路——云端按次计费时等于替用户多扣 4 次。
     // 给 0 的调用方（IPC 可达、智能体工具也会传）本意是"最少"，夹到 1 才对。
     const count = Math.max(1, Math.min(4, Math.round(request.count ?? 4)));
+    // **校验器允许缺省的字段必须在这里补上默认值**。
+    // `validateRequest` 对 baseSeed / width / height / ratio / resolution 都是
+    // "给了才校验类型"（`!== undefined`），但下游把它们当必有：
+    // - `request.baseSeed + index` → `undefined + 0` 是 **NaN**，写进任务记录与 ComfyUI 的
+    //   `noise_seed`（JSON 里变成 null），任务卡片显示 "Seed NaN"，且落盘后长期存在；
+    // - 缺 width/height 时 ComfyUI 工作流那两个必填输入会被 JSON.stringify 直接丢掉，
+    //   提交到 ComfyUI 才报参数错误（用户看到的是云端 400，与真实原因无关）；
+    // - ratio/resolution 缺省时 MiniMax 请求体里就没有这两个字段。
+    // 统一在一处补齐，并让**存进任务的 request 与实际使用值一致**（重试时才不会漂移）。
+    const baseSeed = Number.isFinite(request.baseSeed) ? request.baseSeed : Math.floor(Math.random() * 1_000_000);
+    const normalized: GenerationRequest = {
+      ...request,
+      baseSeed,
+      width: Number.isFinite(request.width) ? request.width : 1280,
+      height: Number.isFinite(request.height) ? request.height : 720,
+      // 白名单外的字符串（拼错的、数字、旧版本脏值）一律回落到最常用值，
+      // 而不是原样塞进云端请求体。
+      ratio: (["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"] as const).includes(request.ratio) ? request.ratio : "16:9",
+      resolution: request.resolution === "2K" ? "2K" : "768P"
+    };
     const created = Array.from({ length: count }, (_, index): GenerationTask => ({
       id: randomUUID(),
       parentId,
       index,
-      seed: request.baseSeed + index,
+      seed: baseSeed + index,
       backend: request.backend,
       mode: request.mode,
       status: "queued",
@@ -157,7 +177,7 @@ export class GenerationOrchestrator {
       createdAt: now,
       updatedAt: now,
       message: "等待生成",
-      request
+      request: normalized
     }));
     this.tasks.unshift(...created);
     this.trimHistory();
@@ -168,7 +188,9 @@ export class GenerationOrchestrator {
     // `runTask` 内部有 try/catch，但 `finally` 里的 `store.save` 与 `update()` 里的
     // `listener`（向窗口推送）仍在保护范围外。裸 `void runPool(...)` 会让那类失败
     // 变成未处理的 rejection（Electron 主进程会直接退出）。
-    void runPool(created, concurrency, (task) => this.runTask(request, task)).catch(() => undefined);
+    // 用 `normalized` 而不是原始 request：后端读的是 request.width/height/duration 等，
+    // 与实际写进任务记录、并在重试时复用的那份必须同源（否则重试会退回未补默认值的版本）。
+    void runPool(created, concurrency, (task) => this.runTask(normalized, task)).catch(() => undefined);
     return created;
   }
 

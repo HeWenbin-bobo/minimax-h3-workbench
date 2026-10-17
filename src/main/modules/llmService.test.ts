@@ -64,6 +64,27 @@ describe("consumeSse", () => {
     ]), (event) => received.push(event));
     expect(received).toEqual([{ seq: 1, delta: "x" }]);
   });
+
+  // 回归：流结束时缓冲区里的最后一行不能丢。服务端最后一帧之后不一定带换行，
+  // 旧实现在 done 时直接 return，那一帧内容整段丢失（实测：单帧流返回空内容 → "空回复"）。
+  it("流末尾没有换行时，最后一帧仍被解析（不丢内容）", async () => {
+    const received: string[] = [];
+    const got = await consumeSse(streamOf([
+      'data: {"choices":[{"delta":{"content":"末"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"帧"}}]}'
+    ]), (event) => received.push(event.delta));
+    expect(received.join("")).toBe("末帧");
+    expect(got).toBe(true);
+  });
+
+  it("只有一帧且无换行时也算收到内容（不误判为空回复）", async () => {
+    const received: string[] = [];
+    const got = await consumeSse(streamOf([
+      'data: {"choices":[{"delta":{"content":"唯一"}}]}'
+    ]), (event) => received.push(event.delta));
+    expect(received.join("")).toBe("唯一");
+    expect(got).toBe(true);
+  });
 });
 
 describe("chatAgent 工具暴露", () => {

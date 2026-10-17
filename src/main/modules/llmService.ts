@@ -596,6 +596,26 @@ export async function consumeSse(body: ReadableStream<Uint8Array>, send: ChunkSe
   let buffer = "";
   let seq = 0;
   let received = false;
+  // 处理一行 data: 载荷。返回 true 表示遇到 [DONE]（调用方应结束）。
+  const handleLine = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return false;
+    const data = trimmed.slice(5).trim();
+    if (data === "[DONE]") return true;
+    try {
+      const parsed = JSON.parse(data) as {
+        choices?: Array<{ delta?: { content?: string } }>;
+      };
+      const delta = parsed.choices?.[0]?.delta?.content;
+      if (delta) {
+        received = true;
+        send({ seq: (seq += 1), delta });
+      }
+    } catch {
+      // 忽略不完整/非 JSON 行（如注释心跳）。
+    }
+    return false;
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -604,24 +624,14 @@ export async function consumeSse(body: ReadableStream<Uint8Array>, send: ChunkSe
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === "[DONE]") return received;
-        try {
-          const parsed = JSON.parse(data) as {
-            choices?: Array<{ delta?: { content?: string } }>;
-          };
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
-            received = true;
-            send({ seq: (seq += 1), delta });
-          }
-        } catch {
-          // 忽略不完整/非 JSON 行（如注释心跳）。
-        }
+        if (handleLine(line)) return received;
       }
     }
+    // 流结束：缓冲区里可能还剩**最后一行/半行**（服务端最后一帧之后不带换行）。
+    // 旧实现直接丢弃 → 最后一帧内容丢失（实测复现：含单帧数据的流返回空内容）。
+    // 先冲刷解码器的残留字节（多字节字符被切断时），再把残余当一行处理。
+    buffer += decoder.decode();
+    if (buffer.trim() && handleLine(buffer)) return received;
     return received;
   } finally {
     reader.releaseLock();

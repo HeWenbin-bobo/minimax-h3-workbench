@@ -908,7 +908,10 @@ function registerIpc(
         // 截到 8 万字符后关键事实已被脚本挤掉，模型拿到的是一堆代码噪声。
         openPage: async (url: string) => {
           const parsed = assertPublicHttpUrl(url);
-          const raw = await renderPageText(parsed.toString(), 45_000);
+          // **必须传本轮取消信号**：`renderPageText(url, timeoutMs, signal)` 不传 signal 时
+          // 用户点「停止」后隐藏窗口仍会跑满 45 秒（搜索链路早已接上信号，这里漏了）。
+          // 期间该会话的取消器一直被占着，界面停在"正在打开网页"。
+          const raw = await renderPageText(parsed.toString(), 45_000, controller.signal);
           const text = raw.trim();
           // 纯 canvas / 纯图片 / PDF 预览页的 innerText 可能是空的（或只有几个空白的换行）。
           // 直接返回空串会让模型以为"打开了但什么都没有"，接着凭记忆编内容。

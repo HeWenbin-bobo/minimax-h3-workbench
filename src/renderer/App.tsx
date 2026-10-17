@@ -220,7 +220,14 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       // 用户选 9:16 或 2K 都不生效，出片永远是初始的 1280×720（实测两个 onChange 都没碰这两个字段）。
       // 放在提交时现算而不是 onChange 里维护状态：少一处会漂移的副本，
       // 且历史任务里存的 request.width/height 与实际提交值天然一致。
-      const payload = { ...request, ...resolveDimensions(request.ratio, request.resolution) };
+      //
+      // RB 固定按 768P 换算：它的界面**不显示**分辨率下拉，但 request.resolution 会保留
+      // 用户在其它后端选过的值（比如 2K）。不夹的话切到 RB 会把 2560×1440 发过去，
+      // 而该后端的预设只保证 4/6/8 秒、宽高可传，没有 2K 能力承诺。
+      const payload = {
+        ...request,
+        ...resolveDimensions(request.ratio, isRb ? "768P" : request.resolution)
+      };
       const response = await window.h3.submitGeneration(payload);
       if (!response.ok) { onError(response.message); return; }
       // 提交成功：切到新项目（submitGeneration 创建的任务组排在最前）。

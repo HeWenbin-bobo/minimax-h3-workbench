@@ -634,6 +634,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const streamBuffers = useRef(new Map<string, string>());
   const taskIdBuffers = useRef(new Map<string, string[]>());
   const sendingRef = useRef(new Set<string>());
+  // 首条消息的会话尚未创建时的同步守卫（见 send()：active 为空时按 id 守卫会失效）。
+  const creatingSessionRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // 用户是否贴在底部：流式期间只有贴底才自动跟随。否则用户往上翻看历史时，
@@ -825,6 +827,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   }, [active?.messages.length, active?.messages[active.messages.length - 1]?.content]);
   // 切会话时回到"贴底"：新打开的会话应显示最新消息，而不是沿用上一个会话的滚动位置状态。
   useEffect(() => { stickToBottomRef.current = true; }, [activeId]);
+  // 新会话创建完成后释放"正在建会话"哨兵（此时 active 已就绪，守卫由 sendingRef 接管）。
+  useEffect(() => { if (activeId) creatingSessionRef.current = false; }, [activeId]);
   const onMessagesScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -894,14 +898,26 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
 
   async function send() {
     const text = input.trim();
-    // generating 是异步 React state：同一 tick 内连发两次（快速连按 Enter）会双双读到 false，
-    // 于是重复落用户消息与空气泡、两条流抢同一个缓冲区。用 Set 做同步守卫（按会话粒度，不影响其它会话并发）。
-    const targetSessionId = active?.id;
-    if ((!text && attachments.length === 0) || (targetSessionId ? generatingIds.includes(targetSessionId) : false) || (targetSessionId ? sendingRef.current.has(targetSessionId) : false)) return;
+    // generating 是异步 React state：同一 tick 内连发两次（快速连按 Enter/双击发送）会双双读到 false，
+    // 于是重复落用户消息、两条流抢同一个缓冲区。用 Set 做同步守卫（按会话粒度，不影响其它会话并发）。
+    //
+    // ⚠️ 首条消息时会话还不存在（active 为 undefined），按会话 id 守卫会短路成 false——
+    // 实测双击「新对话」的首条消息会建出**两个会话、发两次请求**（probe-single-vs-double）。
+    // 故无 active 时用 creatingSessionRef 这个同步哨兵挡住第二次点击。
+    if (!text && attachments.length === 0) return;
+    if (active) {
+      if (generatingIds.includes(active.id) || sendingRef.current.has(active.id)) return;
+    } else if (creatingSessionRef.current) {
+      // 第一次点击已经进入"新建会话"流程，第二次点击必须被挡住。
+      // 这个哨兵要**一直保持到 activeId 真正切换**（见下面重置的 useEffect），
+      // 不能在 send() 里立即复位——React 是异步提交，同 tick 内 active 仍是 undefined。
+      return;
+    }
     if (!settings.llm.baseUrl) { onError(new Error("请先在连接设置中配置游乐场 LLM。")); return; }
     // 无会话时先本地创建会话对象再继续（不 return），避免首条消息被丢弃。
     let session = active;
     if (!session) {
+      creatingSessionRef.current = true;
       session = { id: crypto.randomUUID(), title: text.slice(0, 20) || "新对话", messages: [], createdAt: new Date().toISOString() };
       setSessions((all) => [session as PlaygroundSession, ...all]);
       setActiveId(session.id);

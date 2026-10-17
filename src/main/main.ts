@@ -657,7 +657,11 @@ function registerIpc(
     // 这里统一用本地估算器比较（同一把尺子），方向判断才是可靠的。
     const localBefore = activeContextTokens(effective, undefined);
     const afterTokens = activeContextTokens(compacted, undefined);
-    if (afterTokens >= localBefore) {
+    // **上游明确报过超窗时不能跳过**：`forceCompact` 是"本地窗口表估小了、上游已经拒绝过"
+    // 的唯一补救信号。此时哪怕这次压缩没有净收益，不提交也只会让下一轮继续撞同一堵墙
+    // （用户看到的是"怎么发都不行"）。宁可换成摘要，也要让请求能发出去。
+    const forced = budget.window.forceCompact === true;
+    if (!forced && afterTokens >= localBefore) {
       if (trigger === "manual") {
         // 手动触发必须给反馈，否则用户点了「立即压缩」看不到任何反应。
         const info = { before: localBefore, after: localBefore, windowNumber: budget.window.windowNumber, reason: "压缩无收益（历史以你的消息为主），已保持原样" };

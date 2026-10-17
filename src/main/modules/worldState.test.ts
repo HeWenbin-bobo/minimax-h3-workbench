@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./worldState";
 
-const NOW = new Date("2026-03-14T10:30:00");
+// 固定用 UTC 字面量：北京时间 = UTC+8，写成 "2026-03-14T10:30:00"（无时区）
+// 会随宿主时区解析出不同时刻，CI（UTC）与开发机（+8）断言就会不一致。
+const NOW = new Date("2026-03-14T02:30:00Z"); // 北京时间 10:30
 const baseInput = { webSearch: true, browserSearch: true, searchApiReady: true, artifactKinds: ["html", "xlsx", "md"], now: NOW };
 
 describe("section 正文", () => {
@@ -68,7 +70,7 @@ describe("diffWorldState 注入", () => {
 
   it("时间变化被节流：正文沿用旧值（保持 system 前缀稳定），但**仍在场**", () => {
     const first = diffWorldState(buildSections(baseInput), undefined);
-    const later = new Date("2026-03-14T10:45:00");
+    const later = new Date("2026-03-14T02:45:00Z"); // 北京时间 10:45（同一天）
     const result = diffWorldState(buildSections({ ...baseInput, now: later }), first.snapshot);
     // 同一天：正文不刷新（沿用 10:30），但 section 必须仍出现在注入块里。
     expect(result.text).toContain("# 当前时间");
@@ -80,7 +82,7 @@ describe("diffWorldState 注入", () => {
 
   it("跨天必须刷新正文（否则模型一直拿着昨天的日期，还被告知以此为准）", () => {
     const first = diffWorldState(buildSections(baseInput), undefined);
-    const nextDay = new Date("2026-03-15T09:05:00");
+    const nextDay = new Date("2026-03-15T01:05:00Z"); // 北京时间 3月15日 09:05
     const { text } = diffWorldState(buildSections({ ...baseInput, now: nextDay }), first.snapshot);
     expect(text).toContain("# 当前时间");
     expect(text).toContain("3月15日");
@@ -173,5 +175,23 @@ describe("injectWorldState", () => {
   it("空/空白文本原样返回，不产生多余空消息", () => {
     expect(injectWorldState(history, "")).toBe(history);
     expect(injectWorldState(history, "   \n ")).toBe(history);
+  });
+});
+
+// 时间必须按北京时间显示，且**与宿主时区无关**。
+// 旧实现用 `date.getHours()`（本机时区）却固定写「北京时间」：
+// 本机不在 UTC+8 时模型会拿到错的时间，而它被明确告知要以此为准。
+describe("当前时间固定按北京时间渲染", () => {
+  it("UTC 02:30 渲染成北京时间 10:30（不受宿主时区影响）", () => {
+    const text = buildSections({ ...baseInput, now: new Date("2026-03-14T02:30:00Z") })[0].render();
+    expect(text).toContain("2026年3月14日");
+    expect(text).toContain("10:30");
+    expect(text).toContain("北京时间");
+  });
+
+  it("UTC 前一天的 20:00 已跨到北京时间次日", () => {
+    const text = buildSections({ ...baseInput, now: new Date("2026-03-14T20:00:00Z") })[0].render();
+    expect(text).toContain("3月15日");
+    expect(text).toContain("04:00");
   });
 });

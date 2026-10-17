@@ -66,11 +66,20 @@ export interface WorldStateInput {
   now?: Date;
 }
 
-/** ISO 风格时间戳 → 中文可读时刻（含星期）。模型对绝对日期才有用，故不带时区缩写歧义。 */
+/**
+ * ISO 风格时间戳 → 中文可读时刻（含星期）。模型对绝对日期才有用，故不带时区缩写歧义。
+ *
+ * **必须显式换算到 UTC+8，不能用 `date.getHours()`**：后者取的是**本机时区**，
+ * 而文案固定写「北京时间」。本机不在 UTC+8 时（海外用户、改过系统时区、
+ * CI/容器里 UTC），模型会拿到错的时间却被告知这是北京时间——
+ * 它据此回答"最新/今年/上个月"这类问题，一错就是一整天。
+ * 用 `getTime() + 8h` 再读 UTC 字段，得到与宿主时区无关的固定结果。
+ */
 function formatClock(date: Date): string {
-  const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
+  const beijing = new Date(date.getTime() + 8 * 60 * 60 * 1_000);
+  const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][beijing.getUTCDay()];
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${weekday} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${beijing.getUTCFullYear()}年${beijing.getUTCMonth() + 1}月${beijing.getUTCDate()}日 ${weekday} ${pad(beijing.getUTCHours())}:${pad(beijing.getUTCMinutes())}`;
 }
 
 /** 从渲染文本里取出日期部分（"2026年3月14日"）。用于判断是否跨天。 */

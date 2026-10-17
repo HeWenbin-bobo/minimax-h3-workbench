@@ -1644,9 +1644,13 @@ function PgToolSteps({ steps, running }: { steps: string[]; running: boolean }) 
   // streaming 期间强制展开（实时过程可见）；结束后用户自己控制折叠。
   const expanded = running ? true : open;
   const last = steps[steps.length - 1] || "";
+  // 「N 步工具调用」要数**调用次数**，不是日志行数：每次调用会追加两条
+  //（start 的 "→ …" 与 end 的 "✓ …"）。直接 steps.length 会把 1 次 create_file 说成 2 步
+  //（实测：真实 key 跑一次 create_file，标题显示"已执行 2 步工具调用"）。
+  const callCount = steps.filter((step) => step.startsWith("→")).length;
   return <div className="pg-tool-steps-wrap">
     {!running && <button className="pg-tool-steps-toggle" onClick={() => setOpen((v) => !v)} title={expanded ? "收起执行过程" : "展开执行过程"}>
-      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {steps.length} 步工具调用<span className="pg-tool-steps-last">· {last.length > 40 ? `${last.slice(0, 40)}…` : last}</span>
+      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {callCount || steps.length} 步工具调用<span className="pg-tool-steps-last">· {last.length > 40 ? `${last.slice(0, 40)}…` : last}</span>
     </button>}
     {expanded && <div className="pg-tool-steps">{steps.map((step, i) => <div key={i} className="pg-tool-step">{step}</div>)}</div>}
   </div>;

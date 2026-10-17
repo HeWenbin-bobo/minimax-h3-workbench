@@ -236,6 +236,8 @@ export interface WorkbenchApi {
    * 只允许 userData/artifacts/ 内的文件——与 h3preview 协议同一套路径白名单。
    */
   readArtifactText(filePath: string): Promise<ApiResponse<string>>;
+  /** 会话被彻底删除时清掉它的产物目录（userData/artifacts/<sessionId>/），避免永久占盘。 */
+  purgeSessionArtifacts(sessionId: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
   /**
    * 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。agent=true 走 AI SDK 工具循环。

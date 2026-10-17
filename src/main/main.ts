@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
-import { readFile, stat, writeFile, unlink, mkdir } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -1032,6 +1032,36 @@ function registerIpc(
     if (!/\.(html?|csv|tsv|md|txt|json)$/i.test(resolved)) throw new Error("该文件类型不支持文本预览。");
     return readFile(resolved, "utf8");
   });
+  /**
+   * 会话被彻底删除（用户点「彻底删除」或回收站 7 天到期）时清掉它的产物目录。
+   *
+   * 没有这一步的话 `userData/artifacts/<sessionId>/` 会**永久留盘**：
+   * 会话记录已经从 localStorage 消失，界面里再也看不到、也无法重新打开，
+   * 但磁盘上那些 HTML/Excel/文档一直在（模型生成一份 3D 页面就是几百 KB）。
+   * 目录名走 `sessionDirName()`——与落盘同一套规则，保证删的正是写进去的那个。
+   */
+  handle("artifact:purgeSession", async (_event, sessionId: string) => {
+    const root = path.join(app.getPath("userData"), "artifacts");
+    const target = path.join(root, sessionDirName(String(sessionId || "")));
+    // 再兜一层：resolve 后必须仍在 artifacts 根之下（规则若被改动，这里也不会越界）。
+    const relative = path.relative(root, path.resolve(target));
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+    await rm(target, { recursive: true, force: true }).catch(() => undefined);
+    return true;
+  });
+}
+
+/**
+ * 产物落盘的会话目录名。**落盘与清理必须共用这一处**，否则两边算出的目录不一致，
+ * 清理会漏（或误删别的会话）。
+ *
+ * sessionId 来自渲染端（可构造）。只取 basename 不够：`path.basename("..")` 仍返回 ".."，
+ * join 后会把产物目录**抬到 userData 根**（实测复现）。这里再把危险字符与纯点段滤掉，
+ * 保证落点始终在 artifacts 之下。
+ */
+function sessionDirName(sessionId: string): string {
+  const name = path.basename(String(sessionId || "unknown")).replace(/[\\/:*?"<>|]/g, "_").trim();
+  return !name || /^\.+$/.test(name) ? "unknown" : name;
 }
 
 /** 产物落盘共享逻辑（artifact:save IPC 与 create_file 工具两路复用）：
@@ -1049,12 +1079,8 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   let base = path.basename(String(name || "")).replace(/[\\/:*?"<>|]/g, "_").trim();
   base = base.replace(/\.(html?|csv|tsv|md|xlsx)$/i, "").trim();
   const safeName = `${base || "artifact"}${ext}`;
-  // sessionId 来自渲染端（可构造）。只取 basename 不够：`path.basename("..")` 仍返回 ".."，
-  // join 后会把产物目录**抬到 userData 根**（实测复现）。这里再把危险字符与纯点段滤掉，
-  // 保证落点始终在 artifacts 之下。
-  const sessionDirName = path.basename(String(sessionId || "unknown")).replace(/[\\/:*?"<>|]/g, "_").trim();
-  const safeSession = !sessionDirName || /^\.+$/.test(sessionDirName) ? "unknown" : sessionDirName;
-  const dir = path.join(app.getPath("userData"), "artifacts", safeSession);
+  // 目录名规则与清理共用同一函数（见 sessionDirName 的注释）。
+  const dir = path.join(app.getPath("userData"), "artifacts", sessionDirName(sessionId));
   await mkdir(dir, { recursive: true });
   // 同名不覆盖：同一会话里连着生成两份"报告.md"时，后者会把前者顶掉，
   // 于是**两张卡片指向同一个文件**、都显示第二版内容（实测 probe-dup-artifact）。

@@ -28,6 +28,7 @@ const api: WorkbenchApi = {
   showItem: (filePath) => invoke("shell:showItem", filePath),
   saveArtifact: (sessionId, name, content, kind) => invoke("artifact:save", { sessionId, name, content, kind }),
   readArtifactText: (filePath) => invoke("artifact:read", filePath),
+  purgeSessionArtifacts: (sessionId) => invoke("artifact:purgeSession", sessionId),
   openExternal: (url) => invoke("shell:openExternal", url),
   chatLlm: (messages, webSearch, agent, sessionId, browserSearch, planMode) => invoke("llm:chat", messages, webSearch, Boolean(agent), String(sessionId || ""), Boolean(browserSearch), planMode),
   checkAgentFrameworkUpdate: () => invoke("update:checkFramework"),

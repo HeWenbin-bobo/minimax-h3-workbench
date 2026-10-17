@@ -1094,12 +1094,19 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
   };
 
-  // 会话回收站过期清理：启动时清除超过 7 天的已删除会话。
+  // 会话回收站过期清理：启动时清除超过 7 天的已删除会话，**并删掉它们的产物目录**。
+  // 只删会话记录的话，userData/artifacts/<sessionId>/ 会永久留盘：
+  // 界面里再也看不到、也无法重新打开，但磁盘上那些 HTML/Excel/文档一直在。
   useEffect(() => {
     const now = Date.now();
     setSessions((all) => {
-      const kept = all.filter((s) => !s.deletedAt || now - new Date(s.deletedAt).getTime() <= 7 * 86_400_000);
-      return kept.length === all.length ? all : kept;
+      const expired = all.filter((s) => s.deletedAt && now - new Date(s.deletedAt).getTime() > 7 * 86_400_000);
+      for (const session of expired) {
+        // 失败不该打断清理：目录可能本就不存在（从没生成过产物）。
+        void window.h3.purgeSessionArtifacts(session.id).catch(() => undefined);
+      }
+      if (expired.length === 0) return all;
+      return all.filter((s) => !expired.includes(s));
     });
   }, []);
 
@@ -1403,6 +1410,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   }
   function purgeSession(session: PlaygroundSession) {
     setSessions((all) => all.filter((s) => s.id !== session.id));
+    // 顺带清掉磁盘上的产物目录：会话记录一删，那些产物在界面里再也打不开，
+    // 却会一直占着 userData/artifacts/<sessionId>/（模型生成一份 3D 页面就是几百 KB）。
+    // 失败不打断删除动作——目录可能本就不存在。
+    void window.h3.purgeSessionArtifacts(session.id).catch(() => undefined);
   }
   function commitRename() {
     if (!renamingId) return;

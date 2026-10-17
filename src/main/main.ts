@@ -1295,10 +1295,11 @@ function registerIpc(
    */
   handle("artifact:purgeSession", async (_event, sessionId: string) => {
     const id = String(sessionId || "");
-    // 顺带释放该会话的内存态：这三张表按 sessionId 建条目，
+    // 顺带释放该会话的内存态：这几张表按 sessionId 建条目，
     // 只有"改配置/换模型"才会整体清空。会话被删掉之后条目仍在 →
     // 长期使用（反复新建/删除对话）会持续累积 LlmService 与快照对象。
     sessionServices.delete(id);
+    sessionServicesGeneration.delete(id);
     sessionBudgets.delete(id);
     sessionWorldState.delete(id);
     const root = path.join(app.getPath("userData"), "artifacts");

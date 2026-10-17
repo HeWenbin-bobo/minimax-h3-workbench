@@ -29,7 +29,18 @@ export interface VolumeInfo {
 export function pickVolumeForOutput(volumes: VolumeInfo[], outputDirectory?: string): VolumeInfo | undefined {
   if (volumes.length === 0) return undefined;
   const dir = outputDirectory?.toLowerCase();
-  const matched = dir ? volumes.find((item) => dir.startsWith(String(item.mount).toLowerCase())) : undefined;
+  // 必须按**路径前缀边界**匹配，不能裸 startsWith：mount 是 "/home" 时，
+  // "/homepage/out" 也会命中，于是磁盘指标读错卷（实测 probe-volume 复现）。
+  // 合法边界：目录恰好等于 mount，或 mount 之后紧跟路径分隔符
+  //（Windows 的 "C:" 天然以 "C:\" 或 "C:/" 继续，也走这条）。
+  const matchesMount = (pathDir: string, mount: string): boolean => {
+    if (!mount) return false;
+    if (pathDir === mount) return true;
+    if (!pathDir.startsWith(mount)) return false;
+    const next = pathDir.charAt(mount.length);
+    return next === "/" || next === "\\";
+  };
+  const matched = dir ? volumes.find((item) => matchesMount(dir, String(item.mount).toLowerCase())) : undefined;
   const freeOf = (item: VolumeInfo) => Number(item.size) - Number(item.used);
   return matched ?? volumes.reduce((best, item) => (freeOf(item) > freeOf(best) ? item : best), volumes[0]);
 }

@@ -30,8 +30,8 @@ export class ComfyAdapter implements GenerationAdapter {
     const start = Date.now();
     try {
       const [statsResponse, nodesResponse] = await Promise.all([
-        fetch(`${this.baseUrl}/system_stats`, { signal: signal ?? AbortSignal.timeout(8_000) }),
-        fetch(`${this.baseUrl}/object_info`, { signal: signal ?? AbortSignal.timeout(12_000) })
+        fetch(`${this.baseUrl}/system_stats`, { signal: requestSignal(signal, 8_000) }),
+        fetch(`${this.baseUrl}/object_info`, { signal: requestSignal(signal, 12_000) })
       ]);
       if (!statsResponse.ok || !nodesResponse.ok) throw new Error(`ComfyUI 返回 ${statsResponse.status}/${nodesResponse.status}`);
       const stats = (await statsResponse.json()) as Record<string, unknown>;
@@ -80,7 +80,7 @@ export class ComfyAdapter implements GenerationAdapter {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: workflow, client_id: task.id }),
-      signal
+      signal: requestSignal(signal, 30_000)
     });
     if (!response.ok) throw new Error(`ComfyUI 提交失败：${response.status} ${await response.text()}`);
     const submitted = (await response.json()) as { prompt_id?: string; error?: { message?: string } };
@@ -143,7 +143,7 @@ export class ComfyAdapter implements GenerationAdapter {
     form.append("image", new Blob([new Uint8Array(bytes)]), path.basename(filePath));
     form.append("type", "input");
     form.append("overwrite", "true");
-    const response = await fetch(`${this.baseUrl}/upload/image`, { method: "POST", body: form, signal });
+    const response = await fetch(`${this.baseUrl}/upload/image`, { method: "POST", body: form, signal: requestSignal(signal, 120_000) });
     if (!response.ok) throw new Error(`素材上传失败：${response.status} ${await response.text()}`);
     return (await response.json()) as UploadedMedia;
   }
@@ -159,7 +159,7 @@ export class ComfyAdapter implements GenerationAdapter {
     for (;;) {
       if (signal?.aborted) throw new DOMException("任务已取消", "AbortError");
       if (Date.now() - startedAt > timeoutMs) throw new Error("等待 ComfyUI 生成超过 30 分钟，已超时终止。请检查 ComfyUI 是否正常运行。");
-      const response = await fetch(`${this.baseUrl}/history/${encodeURIComponent(promptId)}`, { signal });
+      const response = await fetch(`${this.baseUrl}/history/${encodeURIComponent(promptId)}`, { signal: requestSignal(signal, 20_000) });
       if (response.ok) {
         const history = (await response.json()) as Record<string, unknown>;
         const entry = history[promptId] as { outputs?: unknown; status?: { status_str?: string; messages?: unknown[] } } | undefined;
@@ -186,7 +186,7 @@ export class ComfyAdapter implements GenerationAdapter {
       subfolder: output.subfolder || "",
       type: output.type || "output"
     });
-    const response = await fetch(`${this.baseUrl}/view?${query.toString()}`, { signal });
+    const response = await fetch(`${this.baseUrl}/view?${query.toString()}`, { signal: requestSignal(signal, 300_000) });
     if (!response.ok) throw new Error(`结果下载失败：${response.status}`);
     await writeFile(target, Buffer.from(await response.arrayBuffer()));
     return target;
@@ -219,6 +219,20 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
       reject(new DOMException("任务已取消", "AbortError"));
     }, { once: true });
   });
+}
+
+/**
+ * 单次请求超时，与调用方取消信号合并。
+ *
+ * 为什么必须有：`signal ?? AbortSignal.timeout(x)` 只在调用方**没传** signal 时才有超时，
+ * 而编排层传的恰恰是取消信号（用户点「停止」才 abort）——它本身永不到期。
+ * 于是 ComfyUI 卡住时（模型加载、队列死锁、连接半开）请求无限挂着，任务永远停在
+ * "正在提交/正在采样"，用户只能重启应用。
+ * CLAUDE.md 明令：「外部调用必须自己加超时……不要让 fetch 裸等」。
+ */
+function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 class BunlessFile {

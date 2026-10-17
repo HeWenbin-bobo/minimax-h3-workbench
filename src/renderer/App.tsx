@@ -715,16 +715,20 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
   }
   // 两处「选择」按钮此前直接把 IPC 的 Promise 丢掉：抛异常时变成未处理的 rejection，
   // 点了没有任何反馈（同 7492191 / 69028e2 那批）。
+  // 补 try/catch 后仍只判 `data`：`ok:false`（主进程 handler 抛错，如对话框无法打开）
+  // 依然表现为"点了没反应"，所以这里同时判 ok。
   async function pickOutputDirectory() {
     try {
       const x = await window.h3.selectDirectory();
-      if (x.data) setDraft({ ...draft, outputDirectory: x.data });
+      if (!x.ok) onError(x.message || "无法打开目录选择器");
+      else if (x.data) setDraft({ ...draft, outputDirectory: x.data });
     } catch (e) { onError(e); }
   }
   async function pickPrivateKey() {
     try {
       const x = await window.h3.selectFile("key");
-      if (x.data) setSsh({ privateKeyPath: x.data });
+      if (!x.ok) onError(x.message || "无法打开文件选择器");
+      else if (x.data) setSsh({ privateKeyPath: x.data });
     } catch (e) { onError(e); }
   }
   return <section className="page connections"><div className="page-title"><div><span className="eyebrow">CONNECT</span><h1>连接设置</h1></div><button className="primary" onClick={save}>保存全部设置</button></div>

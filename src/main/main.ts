@@ -973,7 +973,7 @@ function registerIpc(
   });
 
   handle("attachment:read", async (_event, filePath: string) => {
-    if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
+    if (!isAbsolutePath(filePath)) throw new Error("文件路径无效。");
     const extension = path.extname(filePath).toLowerCase();
     const name = path.basename(filePath);
     // 附件大小上限：图片 15MB、文本 2MB——base64 进内存且随 IPC 传输，超大文件会卡死渲染端。
@@ -1003,7 +1003,7 @@ function registerIpc(
     return { kind: "other", name };
   });
   handle("shell:showItem", async (_event, filePath: string) => {
-    if (!path.isAbsolute(filePath)) throw new Error("文件路径无效。");
+    if (!isAbsolutePath(filePath)) throw new Error("文件路径无效。");
     // 与 h3media 同类防护：只允许在输出目录、ComfyUI 模型目录或本应用产出过的结果路径内定位。
     const settings = await settingsStore.get();
     const roots = [settings.outputDirectory, settings.comfyuiRoot, path.join(app.getPath("userData"), "artifacts")]
@@ -1201,6 +1201,17 @@ function knownOutputPaths(orchestrator: GenerationOrchestrator): Set<string> {
 function normalizeForCompare(filePath: string): string {
   const resolved = path.resolve(filePath);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * `path.isAbsolute` 的安全版本。
+ *
+ * Node 的 `path.isAbsolute(123)` 会抛 `ERR_INVALID_ARG_TYPE`（英文），
+ * 而 `attachment:read` / `shell:showItem` 的入参直接来自 IPC，
+ * 类型没有保证。先判字符串，再交给 path。
+ */
+function isAbsolutePath(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && path.isAbsolute(value);
 }
 
 /**

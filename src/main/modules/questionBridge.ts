@@ -34,8 +34,16 @@ export function formatAnswers(
   if (questions.length === 0) return "未获得用户回答。";
   const lines: string[] = [];
   for (const question of questions) {
-    const picked = answers[question.id];
-    if (!picked || picked.length === 0) {
+    // `answers` 来自 IPC（`llm:answer`），值类型没有保证：可能是字符串、数字或对象。
+    // 旧实现直接 `picked.map(...)`，非数组会抛 "picked.map is not a function"——
+    // 而这里跑在工具循环的 resolve 路径上，抛错会让整轮对话挂掉（实测确认）。
+    const raw = (answers as Record<string, unknown> | undefined)?.[question.id];
+    const picked = Array.isArray(raw)
+      ? raw.filter((id): id is string => typeof id === "string")
+      : typeof raw === "string"
+        ? [raw]
+        : [];
+    if (picked.length === 0) {
       // 单题未答：如实说，让模型对这道题按最佳判断继续，而不是替用户编一个答案。
       lines.push(`【${question.header}】用户未作答——请按你认为最合理的方式处理，并说明你采用的默认值。`);
       continue;

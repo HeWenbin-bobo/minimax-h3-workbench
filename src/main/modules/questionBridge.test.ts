@@ -111,3 +111,35 @@ describe("QuestionBridge", () => {
     expect(bridge.hasPending()).toBe(false);
   });
 });
+
+// `answers` 来自 IPC（llm:answer），值类型没有保证。
+// 旧实现对非数组值直接 `.map()` → "picked.map is not a function"，
+// 而这里跑在工具循环的 resolve 路径上，会把整轮对话打挂。
+describe("formatAnswers 入参容错", () => {
+  const questions = [{
+    id: "q1", header: "时长", question: "多久？",
+    options: [{ id: "a", label: "8 秒", description: "标准" }]
+  }];
+
+  it("字符串答案按单选处理", () => {
+    expect(formatAnswers(questions, { q1: "a" } as never)).toContain("8 秒");
+  });
+
+  it("数字/对象答案视为未作答，不抛错", () => {
+    for (const bad of [42, { x: 1 }, true]) {
+      const text = formatAnswers(questions, { q1: bad } as never);
+      expect(text).toContain("用户未作答");
+    }
+  });
+
+  it("数组里混入非字符串项被过滤", () => {
+    const text = formatAnswers(questions, { q1: ["a", 42, null, {}] } as never);
+    expect(text).toContain("8 秒");
+    expect(text).not.toContain("[object Object]");
+  });
+
+  it("answers 整体缺失/为 null 时按未作答处理", () => {
+    expect(formatAnswers(questions, undefined as never)).toContain("用户未作答");
+    expect(formatAnswers(questions, null as never)).toContain("用户未作答");
+  });
+});

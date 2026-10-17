@@ -614,6 +614,21 @@ function registerIpc(
 
     if (trigger === "auto" && !decision.compact) return { messages: effective };
 
+    // **历史太短就别压**：压缩产物是「保留的最近 user 消息 + 摘要」，
+    // 而摘要本身至少几百 token。实测一段 21 token 的对话压完变成 375 token——
+    // 不但没省，还白花一次摘要请求（真实计费）。
+    // 门槛取"摘要的保守长度"：低于它时压缩不可能有净收益。
+    const MIN_COMPACT_TOKENS = 2_000;
+    if (active < MIN_COMPACT_TOKENS) {
+      if (trigger === "manual") {
+        // 手动触发要给反馈，否则用户点了「立即压缩」看不到任何反应。
+        const info = { before: active, after: active, windowNumber: budget.window.windowNumber, reason: "历史较短，无需压缩" };
+        sendToWindow("llm:compaction", { ...info, sessionId: session });
+        return { messages: effective, info };
+      }
+      return { messages: effective };
+    }
+
     // 压缩对象是**当前历史**（effective），不是渲染端传来的原始 messages。
     //
     // 为什么（实测踩到的坑）：渲染端永不裁剪会话，messages 会无界增长。若压缩原始 messages，

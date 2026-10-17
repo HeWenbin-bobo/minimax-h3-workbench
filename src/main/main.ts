@@ -575,6 +575,14 @@ function registerIpc(
     // 不降反增），而不是在上一轮压缩结果上继续——既白烧 token，又可能让摘要请求自身超窗而失败。
     // 对齐 Codex：它压缩的是 `sess.clone_history()`（当前历史），压缩后即压缩结果。
     const summary = await summarizeHistory({ ...settings.llm, apiKey: await settingsStore.getSecret("llmApiKey") }, effective, signal);
+    // **被用户中止时绝不能提交压缩结果**。
+    //
+    // `summarizeHistory` 对任何异常都返回空串（这是刻意的：压缩失败不该阻断对话）。
+    // 但「用户点了停止」也会走那条路——此时摘要为空，下面会把历史换成
+    // "（无可用摘要：… 此前对话细节已丢失）" 并写入 `budget.compacted`，
+    // 于是**整段历史被永久替换成一行占位文案**，而请求本身其实已经取消了。
+    // 用户只是点了下停止，回头发现对话内容没了。
+    if (signal.aborted) return { messages: effective };
     const compacted = buildCompactedHistory(effective, summary);
     budget.compacted = compacted;
     budget.compactedThrough = messages.length;

@@ -43,16 +43,25 @@ export class SettingsStore {
       const defaultBackend = raw.defaultBackend === "ssh" || raw.defaultBackend === "minimax" || raw.defaultBackend === "rb" || raw.defaultBackend === "local"
         ? raw.defaultBackend
         : "local";
+      // 所有字符串字段都要**类型校验**，不能只写 `raw.x || default`：
+      // settings.json 可能被手改、或被旧版本写进非字符串（实测：localComfyUrl=123
+      // 会一路传到 ComfyAdapter，抛 "options.baseUrl.replace is not a function"，
+      // 用户看到的是英文技术错误）。
+      const str = (value: unknown, fallback: string): string =>
+        typeof value === "string" && value.trim() ? value : fallback;
+      // 嵌套对象：非对象（null/数组/字符串）一律回落默认值，避免 {...null} 之类的半残状态。
+      const obj = <T extends object>(value: unknown, fallback: T): T =>
+        value && typeof value === "object" && !Array.isArray(value) ? { ...fallback, ...(value as T) } : fallback;
       return {
-        localComfyUrl: raw.localComfyUrl || defaults.localComfyUrl,
-        outputDirectory: raw.outputDirectory || defaults.outputDirectory,
+        localComfyUrl: str(raw.localComfyUrl, defaults.localComfyUrl),
+        outputDirectory: str(raw.outputDirectory, defaults.outputDirectory),
         comfyuiRoot: typeof raw.comfyuiRoot === "string" ? raw.comfyuiRoot : defaults.comfyuiRoot,
-        rbBaseUrl: typeof raw.rbBaseUrl === "string" && raw.rbBaseUrl ? raw.rbBaseUrl : defaults.rbBaseUrl,
+        rbBaseUrl: str(raw.rbBaseUrl, defaults.rbBaseUrl),
         defaultBackend,
-        minimaxBaseUrl: raw.minimaxBaseUrl || defaults.minimaxBaseUrl,
-        llm: { ...defaults.llm, ...(raw.llm ?? {}) },
-        searchApi: { ...defaults.searchApi, ...(raw.searchApi ?? {}) },
-        ssh: { ...defaults.ssh, ...(raw.ssh ?? {}) }
+        minimaxBaseUrl: str(raw.minimaxBaseUrl, defaults.minimaxBaseUrl),
+        llm: obj(raw.llm, defaults.llm),
+        searchApi: obj(raw.searchApi, defaults.searchApi),
+        ssh: obj(raw.ssh, defaults.ssh)
       };
     } catch {
       return defaultSettings();

@@ -1245,6 +1245,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const leavingId = active?.id;
     setSessions((all) => all.filter((s) => !(s.id === leavingId && s.id !== id && s.messages.length === 0)));
     setActiveId(id);
+    // 草稿是本会话的：输入框、附件、计划开关都是**组件级** state，不随会话切换重置。
+    // 不清的话，在 A 里选好的图片会跟着带进 B —— 用户点发送时看到的是 B 的气泡，
+    // 但实际发出去的内容里带着 A 的附件（跨会话串台，且用户完全没察觉）。
+    setInput("");
+    setAttachments([]);
+    setPlanNext(false);
   }
 
   function newSession() {

@@ -51,13 +51,16 @@ export function renderMarkdown(text: string): ReactNode[] {
       continue;
     }
 
-    // 表格：| a | b | 行 + 下一行 |---|---| 分隔行。模型常用表格输出结构化结果，
+    // 表格：表头行 + 下一行是分隔行（---|---）。模型常用表格输出结构化结果，
     // 不支持时整块沦为挤在一起的纯文本（实测热搜 10 条渲染成一坨）。
-    if (/^\s*\|.*\|\s*$/.test(line) && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(lines[index + 1] ?? "")) {
+    //
+    // 外侧竖线**必须可选**：GFM 允许 `a | b` / `---|---` / `1 | 2` 这种省略写法，
+    // 模型也常这么写。此前要求首尾都有 `|`，这类表整块不识别（实测 probe-md-pipe-optional）。
+    if (isTableRow(line) && isTableSeparator(lines[index + 1] ?? "")) {
       const header = parseTableRow(line);
       index += 2; // 跳过表头与分隔行
       const rows: string[][] = [];
-      while (index < lines.length && /^\s*\|.*\|\s*$/.test(lines[index])) {
+      while (index < lines.length && isTableRow(lines[index])) {
         rows.push(parseTableRow(lines[index]));
         index += 1;
       }
@@ -100,7 +103,6 @@ export function renderMarkdown(text: string): ReactNode[] {
     }
 
     // 普通段落（连续非空非特殊行合并）
-    const isTableRow = (text: string) => /^\s*\|.*\|\s*$/.test(text);
     const paragraph: string[] = [line];
     index += 1;
     while (index < lines.length && lines[index].trim() && !lines[index].trimStart().startsWith("```") && !/^\s*[-*]\s+/.test(lines[index]) && !/^\s*\d+[.、]\s+/.test(lines[index]) && !/^#{1,4}\s/.test(lines[index]) && !isTableRow(lines[index])) {
@@ -112,6 +114,25 @@ export function renderMarkdown(text: string): ReactNode[] {
     nodes.push(<p key={key++}>{inline(paragraph.join("\n"), key++)}</p>);
   }
   return nodes;
+}
+
+/**
+ * 表格行判定。**外侧竖线可选**（GFM 允许 `a | b`），但不能把正文里的竖线当分隔符：
+ * 竖线必须位于行首/行尾，或至少一侧紧邻空白。
+ * 否则「价格是 100 元|台」这类普通句子会被当成表格行（实测 probe-md-table-false）。
+ * 分隔行由 isTableSeparator 单独判定，这里排除掉。
+ */
+function isTableRow(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.includes("|")) return false;
+  if (isTableSeparator(trimmed)) return false;
+  // 首/尾竖线，或竖线一侧紧邻空白 → 视为分隔符
+  return /^\||\|$/.test(trimmed) || /(^|\s)\||\|(\s|$)/.test(trimmed);
+}
+
+/** 表格分隔行判定：`|---|---|` / `---|---` / `:--|--:` 等。 */
+function isTableSeparator(text: string): boolean {
+  return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(text) && text.includes("-");
 }
 
 /**

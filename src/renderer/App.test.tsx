@@ -127,3 +127,24 @@ describe("markdown 表格紧随段落", () => {
     expect(html).toContain("x|y");
   });
 });
+
+// GFM 允许省略表格外侧竖线（`a | b`），模型常这么写；但正文里的竖线不能被误当分隔符。
+describe("markdown 表格：外侧竖线可选", () => {
+  it("省略外侧竖线的表格仍渲染为 <table>", () => {
+    const html = render("a | b\n---|---\n1 | 2");
+    expect(html).toContain("<table>");
+    expect(html).toContain("<th>a</th>");
+    expect(html).toContain("<td>1</td>");
+  });
+
+  it("只省略左侧竖线也能识别", () => {
+    const html = render("a | b |\n---|---|\n1 | 2 |");
+    expect(html).toContain("<table>");
+  });
+
+  it("正文里的竖线不被误判为表格", () => {
+    const html = render("价格是 100 元|台\n选项 A|B 都不对");
+    expect(html).not.toContain("<table>");
+    expect(html).toContain("价格是 100 元|台");
+  });
+});

@@ -90,30 +90,49 @@ export function App() {
   }, [report]);
 
   async function detect() {
-    setDetecting(true); const response = await window.h3.inspectEnvironment(); setDetecting(false);
-    if (response.data) {
-      setReport(response.data);
-      setNotice({ text: `检测完成：${response.data.verdict}` });
-    } else showError(response.message);
+    setDetecting(true);
+    // IPC 可能 reject（主进程 handler 异常、通道被销毁）。不兜住的话 setDetecting(false)
+    // 永远不执行——按钮永久卡在「检测中…」且再也没有第二次机会（与 pickAttachment 同一类）。
+    try {
+      const response = await window.h3.inspectEnvironment();
+      if (response.data) {
+        setReport(response.data);
+        setNotice({ text: `检测完成：${response.data.verdict}` });
+      } else showError(response.message);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setDetecting(false);
+    }
   }
   async function update() {
     if (installing) return;
     if (updateInfo?.updateAvailable) {
       setInstalling(true);
       setNotice({ text: "正在后台下载更新，完成后应用将自动重启安装…" });
-      const response = await window.h3.downloadAndInstallUpdate();
-      setInstalling(false);
-      if (!response.ok) showError(response.message);
+      try {
+        const response = await window.h3.downloadAndInstallUpdate();
+        if (!response.ok) showError(response.message);
+      } catch (error) {
+        showError(error);
+      } finally {
+        setInstalling(false);
+      }
       return;
     }
     setCheckingUpdate(true);
-    const response = await window.h3.checkForUpdates();
-    setCheckingUpdate(false);
-    if (!response.data) { showError(response.message); return; }
-    setUpdateInfo(response.data);
-    if (response.data.updateAvailable) {
-      setNotice({ text: `发现新版本 v${response.data.latestVersion}，再次点击左下角即可下载。` });
-    } else setNotice({ text: `当前已是最新版 v${response.data.currentVersion}` });
+    try {
+      const response = await window.h3.checkForUpdates();
+      if (!response.data) { showError(response.message); return; }
+      setUpdateInfo(response.data);
+      if (response.data.updateAvailable) {
+        setNotice({ text: `发现新版本 v${response.data.latestVersion}，再次点击左下角即可下载。` });
+      } else setNotice({ text: `当前已是最新版 v${response.data.currentVersion}` });
+    } catch (error) {
+      showError(error);
+    } finally {
+      setCheckingUpdate(false);
+    }
   }
   if (!settings) return <div className="splash"><div className="brand-mark">H3</div><p>正在启动工作台…</p></div>;
   return <div className="app-shell">

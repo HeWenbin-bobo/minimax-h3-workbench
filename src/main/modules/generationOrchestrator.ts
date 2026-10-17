@@ -240,7 +240,14 @@ export class GenerationOrchestrator {
         cancelNotified = true;
         // ComfyAdapter.cancel 忽略参数并请求全局 /interrupt（本地/SSH 后端并发为 1，目标即当前任务）；
         // MiniMax 无 cancel 方法，云端任务由 abort 信号停止轮询即可。
-        void this.adapters.get(request.backend).then((a) => a.cancel?.(task.providerTaskId ?? "").catch(() => undefined));
+        //
+        // **必须 catch 到链末**：`adapters.get()` 会读密钥（`getSecret` → 解不开时抛错），
+        // 而这里在 abort 回调中、没有任何调用方能接住 —— 裸 `void promise.then(...)`
+        // 会变成未处理的 rejection，Node/Electron 主进程**直接退出**（用户点一下取消，软件就没了）。
+        void this.adapters
+          .get(request.backend)
+          .then((a) => a.cancel?.(task.providerTaskId ?? ""))
+          .catch(() => undefined);
       }, { once: true });
       const result = await adapter.generate(
         request,

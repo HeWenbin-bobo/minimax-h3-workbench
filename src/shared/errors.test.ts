@@ -108,3 +108,33 @@ describe("isNetworkError", () => {
     expect(isNetworkError(undefined)).toBe(false);
   });
 });
+
+// 文件系统 errno 也必须翻成中文：保存产物 / 写设置 / 删回收站文件都会碰到，
+// 裸英文（"ENOSPC: no space left on device, write"）用户看不懂也不知道该怎么办。
+describe("describeError 文件系统错误", () => {
+  const fsError = (message: string, code?: string) => Object.assign(new Error(message), code ? { code } : {});
+
+  it("磁盘满 → 中文原因 + 英文细节", () => {
+    const text = describeError(fsError("ENOSPC: no space left on device, write", "ENOSPC"), "兜底");
+    expect(text).toContain("磁盘空间不足");
+    expect(text).toContain("no space left");
+  });
+
+  it("权限不足（EACCES / EPERM）", () => {
+    expect(describeError(fsError("EACCES: permission denied", "EACCES"), "兜底")).toContain("没有访问权限");
+    expect(describeError(fsError("EPERM: operation not permitted", "EPERM"), "兜底")).toContain("权限不足");
+  });
+
+  it("文件被占用 / 路径是目录", () => {
+    expect(describeError(fsError("EBUSY: resource busy", "EBUSY"), "兜底")).toContain("被其他程序占用");
+    expect(describeError(fsError("EISDIR: illegal operation on a directory", "EISDIR"), "兜底")).toContain("是一个目录");
+  });
+
+  it("没有 code 字段时按 message 里的 errno 令牌识别", () => {
+    expect(describeError(fsError("ENOSPC: no space left on device, write"), "兜底")).toContain("磁盘空间不足");
+  });
+
+  it("普通业务异常仍原样返回（不误判）", () => {
+    expect(describeError(new Error("尚未保存瞬映卡密。"), "兜底")).toBe("尚未保存瞬映卡密。");
+  });
+});

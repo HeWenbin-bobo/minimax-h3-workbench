@@ -119,12 +119,31 @@ export class RbAdapter implements GenerationAdapter {
   ): Promise<{ images: string[]; videos: string[] }> {
     const images: string[] = [];
     const videos: string[] = [];
-    const candidates = [
-      { filePath: request.sourceImagePath, kind: "image" as const },
-      { filePath: request.firstFramePath, kind: "image" as const },
-      { filePath: request.lastFramePath, kind: "image" as const },
-      { filePath: request.sourceVideoPath, kind: "video" as const }
-    ];
+    // **按预设决定传哪些素材**，不能无脑把所有已选路径都传上去。
+    //
+    // 切换预设时界面只是不显示对应的选择器，`request.*Path` 里的旧值仍然在：
+    // 用户在「贴合参考图」选了图、再切到「15 秒」(easy_15)，界面已无任何素材入口，
+    // 但参考图仍会被上传并写进 job body——实测（本地跑 buildJobBody）确认。
+    // easy_15/30 的官网契约是固定时长、不带素材；多余的参考图轻则被忽略，
+    // 重则改变生成结果或直接被拒（失败照样扣卡密次数）。
+    const preset = request.preset || (request.firstFramePath && request.lastFramePath ? "tail_frame" : "reference");
+    const candidates = preset === "flashvsr_upscale"
+      // 视频变清晰只收源视频。
+      ? [{ filePath: request.sourceVideoPath, kind: "video" as const }]
+      : preset === "tail_frame"
+        // 首尾过渡只收这两张，不接纳参考图/参考视频。
+        ? [
+            { filePath: request.firstFramePath, kind: "image" as const },
+            { filePath: request.lastFramePath, kind: "image" as const }
+          ]
+        : preset === "easy_15" || preset === "easy_30"
+          // 固定时长预设不接受任何素材。
+          ? []
+          // reference：≤8 图 + 参考视频。
+          : [
+              { filePath: request.sourceImagePath, kind: "image" as const },
+              { filePath: request.sourceVideoPath, kind: "video" as const }
+            ];
     for (const candidate of candidates) {
       if (!candidate.filePath) continue;
       const ref = await this.uploadFile(candidate.filePath, candidate.kind, signal);

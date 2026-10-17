@@ -613,10 +613,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const mainWidth = document.querySelector(".pg-main")?.getBoundingClientRect().width ?? 0;
     if (mainWidth > 700) setPreviewWidth(Math.round(mainWidth * 0.55));
   }, [preview]);
-  const resizePreview = (width: number) => {
-    setPreviewWidth(width);
-    savePreviewWidth(width);
-  };
+  // 拖拽过程中只更新内存宽度；**落盘留到松手**。拖拽时 mousemove 每秒可达上百次，
+  // 每次都同步写 localStorage 会造成明显卡顿（本修复初版就是这么写的，属自引入的性能回归）。
+  const resizePreview = (width: number) => setPreviewWidth(width);
   const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
   const [webSearch, setWebSearch] = useState(true);
   // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
@@ -1389,6 +1388,9 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
   }, [artifact.path, needsContent, nonce]);
   const content = artifact.content || diskContent || "";
   const dragRef = useRef<{ startX: number; startWidth: number } | undefined>(undefined);
+  // 拖拽中的最新宽度：松手时用它落盘（不依赖闭包里过期的 width）。
+  const latestWidthRef = useRef(width);
+  latestWidthRef.current = width;
   function onDragStart(e: React.MouseEvent) {
     e.preventDefault();
     dragRef.current = { startX: e.clientX, startWidth: width };
@@ -1402,6 +1404,8 @@ function PgPreviewPanel({ artifact, onClose, width, onResize }: { artifact: Arti
     };
     const up = () => {
       dragRef.current = undefined;
+      // 松手时才写盘：拖拽时 mousemove 每秒上百次，逐次同步写 localStorage 会卡。
+      savePreviewWidth(latestWidthRef.current);
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
     };

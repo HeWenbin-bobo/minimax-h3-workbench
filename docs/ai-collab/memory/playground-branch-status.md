@@ -1,14 +1,19 @@
 ---
 name: playground-branch-status
-description: v0.2.1 已发布；2026-10-17 探索模式连续修复，54 笔未推送
+description: v0.2.1 已发布；2026-10-17 探索模式连续修复，137 笔未推送（HEAD 7f08304）
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-17T17:20:00.000Z
+  modified: 2026-10-17T23:05:00.000Z
 ---
 
-**状态（2026-10-17 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 54 笔（未推送）。**
+**状态（2026-10-17 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 137 笔（未推送）。**
+
+- `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
+- HEAD = `7f08304`。
+- 验证基线：`npm test` 399 项 / 34 文件全绿；typecheck、build 通过；
+  E2E test-01/02/03/05/06/07/08/10 逐个复跑通过。
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
 - HEAD = `9639b6c`。
@@ -90,3 +95,33 @@ E2E test-01..10 全过（逐个跑，避免 CDP 端口争用）。
 - 「注释承诺了但代码没实现」是高产 bug 源（滚动跟随、预览宽度记忆、错误可见）。
 - 「同一语义两处实现」必有一处漏（校验/超时/端点/合并策略）——改一处要 grep 全仓同类。
 - 真实 key 端到端必跑：单测 + E2E 全绿仍可能模型根本没看进去（world state 那次）。
+
+## 2026-10-17 深夜批量（自 `991147a` 之后，共 137 笔未推送）
+
+按问题类型归纳，重点在**「UI 有选项但下游没接线」**与**「同一职责分散在多处」**：
+
+| 类型 | 具体问题 |
+|---|---|
+| **功能静默失效** | 画幅/分辨率下拉完全不生效（工作流读 `width/height`，UI 只改 `ratio/resolution`）——新增 `shared/dimensions.ts`；视频拖不动进度条（`net.fetch(file://)` 不支持 Range）——新增 `mediaRange.ts` 自实现 206；搜索 API 返回 0 条时静默（模型凭旧知识答）；ComfyUI 完成但无产物会干等 30 分钟超时 |
+| **素材按模式过滤** | 切模式/切预设后旧路径残留：MiniMax 收到两个 `first_frame`；RB `easy_15` 仍上传参考图；ComfyUI 图生视频挂上残留尾帧。三个后端同一类，必须各自按 `mode`/`preset` 过滤 |
+| **SSRF 三重** | 结果下载漏 5 种 IPv6 内嵌 IPv4；`open_page` 只校验协议不拦内网；**3xx 重定向可绕过首跳校验**（实测 302 → `127.0.0.1` 内网内容被读回） |
+| **超时纪律** | ComfyUI `cancel()` 无超时；`signal ?? AbortSignal.timeout()` 假超时两处；`nonstreamChat` 无超时；普通对话 SSE 无空闲超时（上游卡住光标一直闪） |
+| **崩溃/僵尸状态** | SSH 掉线无 error 监听器（主进程直接退出）+ 重连后仍用旧端口；abort 回调里的未处理 rejection；读密钥失败让会话永久卡在「上一轮还在进行中」；旧一轮 finally 清掉新一轮 controller |
+| **数据损坏** | `tasks.json` / localStorage 一条坏记录让**全部**历史消失（元素级校验写成整体级）；消息 `content` 非字符串抛英文 TypeError；第三方 API 返回非数组 JSON |
+| **性能** | 流式每个 chunk 都把全部会话 stringify + 同步写盘（实测 2.2MB × 20 次/秒）→ 节流 400ms |
+| **密钥/设置** | settings.json 嵌套字段无类型校验；密钥解不开仍报「已保存」+ 英文 crypto 错误 |
+| **资源泄漏** | 会话彻底删除后 `artifacts/<sessionId>/` 永久留盘（新增 `artifact:purgeSession`）；拖拽中面板卸载导致 window 监听器残留 |
+| **IPC 健壮性（一批同型）** | 多处 `await window.h3.*()` 无 try/catch 或丢弃返回值：三个按钮点了没反应、检测/更新/测试连接卡在加载态、回收站与项目操作、模型下载页、连接页两个「选择」、游乐场提交无双击守卫（RB 重复扣费） |
+
+**本轮新增认知**：
+- **一类缺陷往往成批出现**：修完一处后 grep 同型模式（`signal ?? AbortSignal.timeout`、`void x.then(`、
+  `JSON.parse` 后直接 `.map`、`await window.h3.*` 无 try）比逐个读文件高效得多。
+- **「看起来生效、实际没生效」必须对照下游真实输入**：UI 改的是 `ratio/resolution`，
+  工作流读的是 `width/height`——只读 UI 代码永远看不出来。
+- **先跑探针再下结论**：`net.fetch(file://)` 的 Range 不支持、Electron 跟随 302、
+  React updater 里做副作用，都是实测确认后才算数。
+- **测试也可能锁住正确行为**：MiniMax「Success 但无 url 继续轮询」看着像 bug，
+  实际是云端转码延迟的真实契约（已加注释防止再被"修"）。
+- **自己引入的回归要立刻修并记录**：SSH `test()` 顺序、`setSessions` updater 副作用、
+  capSessions 无限渲染循环——都在同一轮内发现并修正。
+

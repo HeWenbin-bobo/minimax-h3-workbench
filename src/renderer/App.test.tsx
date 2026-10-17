@@ -207,6 +207,22 @@ describe("normalizeStoredSessions 消息 content 类型兜底", () => {
     expect(result[0].messages[1].content).toBe("");
   });
 
+  it("messages 里的非对象元素被丢弃（字符串按字符展开会变成垃圾消息）", () => {
+    const result = normalizeStoredSessions([{ id: "a", messages: ["hi", 42, null, { role: "user", content: "好" }] }]);
+    expect(result[0].messages).toHaveLength(1);
+    expect(result[0].messages[0].content).toBe("好");
+  });
+
+  it("taskIds 非数组时不被包成「一组装一个字符串」（否则渲染端 map 白屏）", () => {
+    const result = normalizeStoredSessions([{ id: "a", messages: [{ role: "assistant", content: "x", taskIds: "abc" }] }]);
+    expect(result[0].messages[0].taskGroups).toBeUndefined();
+  });
+
+  it("taskIds 是合法数组时照常迁移为单组", () => {
+    const result = normalizeStoredSessions([{ id: "a", messages: [{ role: "assistant", content: "x", taskIds: ["t1", "t2"] }] }]);
+    expect(result[0].messages[0].taskGroups).toEqual([["t1", "t2"]]);
+  });
+
   it("正常字符串原样保留（不改变既有内容）", () => {
     const result = normalizeStoredSessions([{ id: "a", messages: [{ role: "user", content: "你好\n世界" }] }]);
     expect(result[0].messages[0].content).toBe("你好\n世界");

@@ -949,7 +949,13 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
     deletedAt: normalizeDeletedAt(session.deletedAt),
     // toolSteps 与 streaming 同理是瞬态：流式途中关闭应用会残留，读取时强制剥离。
     // 旧数据迁移：扁平 taskIds → 单组 taskGroups（旧消息没有分组结构）。
-    messages: (Array.isArray(session.messages) ? session.messages : []).filter(Boolean).map((msg) => {
+    // `filter(Boolean)` 只挡 null/undefined/0/""：字符串与数字仍会通过，
+    // 而下面 `{ ...msg }` 对字符串是**按字符展开**（"hi" → {0:"h",1:"i"}），
+    // 最终变成一条 role/content 都缺失的垃圾消息（界面显示「（空回复）」，
+    // 且 `key={msg.id}` 为 undefined，多条时报 key 重复）。
+    // 与主进程 `safeMessages` 同一口径：必须是对象。
+    messages: (Array.isArray(session.messages) ? session.messages : [])
+      .filter((msg): msg is PlaygroundMessage => Boolean(msg) && typeof msg === "object").map((msg) => {
       // toolStatus 是更早版本的瞬态字段（现已改为 toolSteps）；旧数据可能残留，读取时一并剥离。
       const { toolStatus: _dropped, toolSteps: _dropped2, ...rest } = msg as PlaygroundMessage & { toolStatus?: unknown };
       // content 必须是字符串：主进程的 normalizeHistory 会调 `.trim()`、上下文估算会调 `.match()`，
@@ -962,7 +968,11 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
       const asArray = <T,>(value: unknown): T[] | undefined =>
         Array.isArray(value) ? (value as T[]) : undefined;
       const normalized = asArray<string[]>(rest.taskGroups)?.filter((group) => Array.isArray(group) && group.length > 0)?.map((group) => group.filter((id) => typeof id === "string"))
-        ?? (rest.taskIds?.length ? [rest.taskIds] : undefined);
+        // `taskIds` 是更早版本的扁平字段：**必须先确认它真是数组**。
+        // 旧写法 `rest.taskIds?.length ? [rest.taskIds] : undefined` 只判了 truthy——
+        // 若磁盘上是字符串（手改 / 旧版本写脏），`[ "abc" ]` 会变成"一组里装了一个字符串"，
+        // 而渲染端 `group.map(...)` 对字符串调用 map → TypeError → **整个游乐场页白屏**。
+        ?? (asArray<string>(rest.taskIds)?.length ? [asArray<string>(rest.taskIds)!] : undefined);
       const migrated = {
         ...rest,
         content,

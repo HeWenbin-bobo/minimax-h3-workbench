@@ -436,6 +436,9 @@ function TaskCard({ task, index, onError, allowDemoPlaceholder = true, onRetried
   const bundledPoster = `${import.meta.env.BASE_URL}demo-videos/showcase-0${index + 1}.jpg`;
   const media = task?.outputPath ? `h3media://local/file?path=${encodeURIComponent(task.outputPath)}` : task ? "" : showDemo ? bundledMedia : "";
   const [retrying, setRetrying] = useState(false);
+  // 视频加载失败（文件被手动删除、被过期清理、磁盘故障）时 <video> 只显示黑屏，
+  // 用户以为"生成坏了"。这里记下失败并在原位给出可执行提示。
+  const [mediaBroken, setMediaBroken] = useState(false);
   async function retry() {
     if (!task || retrying) return;
     setRetrying(true);
@@ -475,7 +478,7 @@ function TaskCard({ task, index, onError, allowDemoPlaceholder = true, onRetried
   if (!task && !allowDemoPlaceholder) {
     return <article className="task-card missing"><div className="task-placeholder"><span>0{index + 1}</span><i>任务已不存在</i></div><div className="task-meta"><div><strong>结果 {index + 1}</strong><small>该任务已被删除，可在工作台回收站恢复</small></div></div></article>;
   }
-  return <article className={`task-card ${task?.status || "ready"}`}>{media ? <video src={media} poster={task ? undefined : bundledPoster} controls preload="metadata" /> : <div className="task-placeholder"><span>0{index + 1}</span><i>{statusLabel(task!.status)}</i></div>}<div className="task-meta"><div><strong>{task ? `Seed ${task.seed}` : `结果 ${index + 1}`}</strong><small>{task?.message || "4 秒 · 480P · 已生成"}</small></div>{task ? <em>{task.progress}%</em> : <em>就绪</em>}</div>{task && <div className="progress"><i style={{ width: `${task.progress}%` }}/></div>}{task?.outputPath && <button className="text-button" onClick={reveal}>在文件夹中显示</button>}{canRetry && <button className="cancel-button" disabled={retrying} onClick={retry}>{retrying ? "重试中…" : "重试"}</button>}{canCancel && <button className="cancel-button" onClick={cancel}>取消</button>}</article>;
+  return <article className={`task-card ${task?.status || "ready"}`}>{media && !mediaBroken ? <video src={media} poster={task ? undefined : bundledPoster} controls preload="metadata" onError={() => { if (task?.outputPath) setMediaBroken(true); }} /> : <div className="task-placeholder"><span>0{index + 1}</span><i>{mediaBroken ? "视频文件不可用" : statusLabel(task!.status)}</i>{mediaBroken && <small>文件可能已被删除或移动</small>}</div>}<div className="task-meta"><div><strong>{task ? `Seed ${task.seed}` : `结果 ${index + 1}`}</strong><small>{mediaBroken ? "生成结果文件已不在原路径，可点「重试」重新生成" : task?.message || "4 秒 · 480P · 已生成"}</small></div>{task ? <em>{task.progress}%</em> : <em>就绪</em>}</div>{task && <div className="progress"><i style={{ width: `${task.progress}%` }}/></div>}{task?.outputPath && <button className="text-button" onClick={reveal}>在文件夹中显示</button>}{canRetry && <button className="cancel-button" disabled={retrying} onClick={retry}>{retrying ? "重试中…" : "重试"}</button>}{canCancel && <button className="cancel-button" onClick={cancel}>取消</button>}</article>;
 }
 
 function ResourcesPage({ resources, settings, onSettingsChange, onError }: { resources: ResourceLink[]; settings: AppSettings; onSettingsChange: (s: AppSettings) => void; onError: (e: unknown) => void }) {

@@ -165,7 +165,10 @@ export class GenerationOrchestrator {
     created.forEach(this.listener);
 
     const concurrency = request.backend === "minimax" ? 2 : 1;
-    void runPool(created, concurrency, (task) => this.runTask(request, task));
+    // `runTask` 内部有 try/catch，但 `finally` 里的 `store.save` 与 `update()` 里的
+    // `listener`（向窗口推送）仍在保护范围外。裸 `void runPool(...)` 会让那类失败
+    // 变成未处理的 rejection（Electron 主进程会直接退出）。
+    void runPool(created, concurrency, (task) => this.runTask(request, task)).catch(() => undefined);
     return created;
   }
 
@@ -199,7 +202,7 @@ export class GenerationOrchestrator {
     this.trimHistory();
     await this.store.save(this.tasks);
     this.listener({ ...created });
-    void runPool([created], request.backend === "minimax" ? 2 : 1, (item) => this.runTask(request, item));
+    void runPool([created], request.backend === "minimax" ? 2 : 1, (item) => this.runTask(request, item)).catch(() => undefined);
     return created;
   }
 

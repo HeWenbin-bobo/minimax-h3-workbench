@@ -917,12 +917,17 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   }
 
   async function pickAttachment() {
-    const response = await window.h3.selectFile("image");
-    if (!response.data) return;
-    const payload = await window.h3.readAttachment(response.data);
-    if (!payload.data) { onError(new Error(payload.message || "读取附件失败")); return; }
-    if (payload.data.kind === "other") { onNotice(`已添加附件 ${payload.data.name}（此类型仅作为文件名提示发送）`); }
-    setAttachments((all) => [...all, { name: payload.data!.name, dataUrl: payload.data!.dataUrl, text: payload.data!.text }]);
+    // IPC 可能 reject（不只是 ok:false）；不兜住的话点「附件」毫无反应。
+    try {
+      const response = await window.h3.selectFile("image");
+      if (!response.data) return;
+      const payload = await window.h3.readAttachment(response.data);
+      if (!payload.data) { onError(new Error(payload.message || "读取附件失败")); return; }
+      if (payload.data.kind === "other") { onNotice(`已添加附件 ${payload.data.name}（此类型仅作为文件名提示发送）`); }
+      setAttachments((all) => [...all, { name: payload.data!.name, dataUrl: payload.data!.dataUrl, text: payload.data!.text }]);
+    } catch (error) {
+      onError(error);
+    }
   }
 
   /** 当前会话传给主进程的历史（与 send() 里构造的完全一致，使压缩记账锚定同一份消息）。 */
@@ -1051,10 +1056,17 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
 
   async function stop() {
     // 只中止当前会话；其它会话的生成不受影响（并发场景下不能连坐）。
-    await window.h3.abortLlm(activeId);
-    setGeneratingIds((all) => all.filter((id) => id !== activeId));
-    sendingRef.current.delete(activeId);
-    setSessions((all) => patchLast(all, activeId, (msg) => ({ ...msg, streaming: false })));
+    // 本地状态**无条件**清理：IPC 即使抛异常，界面也必须退出"生成中"，
+    // 否则用户点了停止却仍卡在转圈（且发送按钮一直禁用）。
+    try {
+      await window.h3.abortLlm(activeId);
+    } catch (error) {
+      onError(error);
+    } finally {
+      setGeneratingIds((all) => all.filter((id) => id !== activeId));
+      sendingRef.current.delete(activeId);
+      setSessions((all) => patchLast(all, activeId, (msg) => ({ ...msg, streaming: false })));
+    }
   }
 
   /**
@@ -1066,9 +1078,13 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       ...session,
       messages: session.messages.map((msg) => msg.questions?.requestId === requestId ? { ...msg, questions: undefined } : msg)
     }));
-    const result = await window.h3.answerLlmQuestion(requestId, answers);
-    // 返回 false 通常是超时竞态（用户点得太慢），不是错误——提示一下即可，不弹红色报错。
-    if (!result.ok || !result.data) onNotice("这组问题已经超时或结束了，AI 会按最合理的方式继续。");
+    try {
+      const result = await window.h3.answerLlmQuestion(requestId, answers);
+      // 返回 false 通常是超时竞态（用户点得太慢），不是错误——提示一下即可，不弹红色报错。
+      if (!result.ok || !result.data) onNotice("这组问题已经超时或结束了，AI 会按最合理的方式继续。");
+    } catch (error) {
+      onError(error);
+    }
   }
 
   /** 跳过整组问题：立即放行工具循环，不必干等超时。 */
@@ -1077,7 +1093,11 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       ...session,
       messages: session.messages.map((msg) => msg.questions?.requestId === requestId ? { ...msg, questions: undefined } : msg)
     }));
-    await window.h3.skipLlmQuestion(requestId);
+    try {
+      await window.h3.skipLlmQuestion(requestId);
+    } catch (error) {
+      onError(error);
+    }
   }
 
   async function submitVideo() {

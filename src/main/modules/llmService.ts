@@ -42,7 +42,11 @@ export class LlmService {
       throw new Error("请先在连接设置中保存游乐场 LLM 的 API Key。");
     }
     const payload = await this.buildPayload(messages, webSearch, browserOnly);
-    this.controller = new AbortController();
+    // 保留一份**本地引用**：`abort()` 会立刻把 this.controller 置空（让 busy 立即放开），
+    // 之后旧一轮的 finally 若无条件 `this.controller = undefined`，就会把**新一轮**的
+    // controller 误清掉——新一轮从此停不下来，busy 也一直误报 false。
+    const controller = new AbortController();
+    this.controller = controller;
     try {
       const response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
         method: "POST",
@@ -58,7 +62,7 @@ export class LlmService {
           // 普通对话里让模型写长内容（长文档、长代码）同样会被静默截断。
           max_tokens: 64_000
         }),
-        signal: this.controller.signal
+        signal: controller.signal
       });
       if (!response.ok || !response.body) {
         const detail = await response.text().catch(() => "");
@@ -85,7 +89,9 @@ export class LlmService {
         else throw new Error(`服务商未返回内容：${full.base_resp?.status_msg || JSON.stringify(full).slice(0, 200)}`);
       }
     } finally {
-      this.controller = undefined;
+      // 只清自己的那份：`abort()` 与下一轮可能已经换上了新 controller，
+      // 无条件清会把新一轮的停止能力抹掉。
+      if (this.controller === controller) this.controller = undefined;
     }
   }
 

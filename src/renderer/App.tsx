@@ -246,18 +246,27 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   }, [projects, categoryFilter]);
   async function setProjectCategory(category: string) {
     if (!activeProject) return;
-    const response = await window.h3.setTaskCategory(activeProject[0].id, category);
-    if (!response.ok) { onError(response.message); return; }
-    onNotice(category ? `已归类到「${category}」` : "已清除分类");
+    // IPC 可能 reject；不兜住会变成未处理的 Promise rejection（点了没反应也没提示）。
+    try {
+      const response = await window.h3.setTaskCategory(activeProject[0].id, category);
+      if (!response.ok) { onError(response.message); return; }
+      onNotice(category ? `已归类到「${category}」` : "已清除分类");
+    } catch (error) {
+      onError(error);
+    }
   }
   async function deleteProject() {
     if (!activeProject) return;
     // 传任一真实任务 id，orchestrator 按 parentId 整组软删除。
-    const response = await window.h3.deleteTasks([activeProject[0].id]);
-    if (!response.ok) { onError(response.message); return; }
-    setActiveProjectId(undefined);
-    onNotice("已移入回收站，7 天内可恢复");
-    window.dispatchEvent(new Event("h3-tasks-changed"));
+    try {
+      const response = await window.h3.deleteTasks([activeProject[0].id]);
+      if (!response.ok) { onError(response.message); return; }
+      setActiveProjectId(undefined);
+      onNotice("已移入回收站，7 天内可恢复");
+      window.dispatchEvent(new Event("h3-tasks-changed"));
+    } catch (error) {
+      onError(error);
+    }
   }
   return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="page-title-actions"><button className="text-button" onClick={() => setShowTrash((v) => !v)}>🗑 回收站</button><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div></div>
     {projects.length > 0 && <div className="category-filter">
@@ -334,8 +343,29 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
   }
   const daysLeft = (iso: string) => Math.max(0, Math.ceil((retentionMs - (Date.now() - new Date(iso).getTime())) / 86_400_000));
   const notifyChanged = () => window.dispatchEvent(new Event("h3-tasks-changed"));
-  async function restore(ids: string[]) { const r = await window.h3.restoreTasks(ids); if (!r.ok) { onError(r.message); return; } onNotice("已恢复"); notifyChanged(); void refresh(); }
-  async function purge(ids: string[]) { const r = await window.h3.purgeTasks(ids); if (!r.ok) { onError(r.message); return; } onNotice("已彻底删除（含视频文件）"); notifyChanged(); void refresh(); }
+  // 回收站两个操作同样要兜住 IPC reject：否则点了没反应，也没有任何提示。
+  async function restore(ids: string[]) {
+    try {
+      const r = await window.h3.restoreTasks(ids);
+      if (!r.ok) { onError(r.message); return; }
+      onNotice("已恢复");
+      notifyChanged();
+      void refresh();
+    } catch (error) {
+      onError(error);
+    }
+  }
+  async function purge(ids: string[]) {
+    try {
+      const r = await window.h3.purgeTasks(ids);
+      if (!r.ok) { onError(r.message); return; }
+      onNotice("已彻底删除（含视频文件）");
+      notifyChanged();
+      void refresh();
+    } catch (error) {
+      onError(error);
+    }
+  }
   return <section className="trash-panel">
     <header><strong>回收站</strong><small>项目删除后保留 7 天，到期自动清除（含视频文件）</small></header>
     {loading && <p className="footnote">加载中…</p>}

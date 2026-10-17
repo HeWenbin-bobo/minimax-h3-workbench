@@ -91,27 +91,30 @@ async function renderOnce(url: string, timeoutMs: number): Promise<string> {
        * 后，内网内容被完整读回。搜索抓取（Bing/搜狗）虽然目标是固定的公网域名，
        * 但结果页本身也可能被劫持后跳内网，所以这道闸门对两条链路都必要。
        *
-       * 只拦**会读数据的主框架导航**：内部 scheme（about:blank、chrome-error: 等）
-       * 读不到内网资源，放开以免误伤真实网页的正常跳转；file:/data:/javascript: 必须拒绝。
+       * 两个关键细节：
+       * ① **主框架才 reject**。子框架（广告/统计/播放器）跳到内网只需阻止加载；
+       *    让它连坐整次渲染就重演了 `did-fail-load` 那个坑（正常页面误报失败）。
+       * ② **内部 scheme 放行**。`about:blank` 是 iframe 初始化与部分跳转的常态，
+       *    `chrome-error:` 是子资源失败页——都读不到内网资源，拦了只会误伤。
        */
-      const guardNavigation = (target: string): boolean => {
+      const guardNavigation = (event: { preventDefault: () => void }, target: string, isMainFrame: boolean): void => {
         let protocol = "";
         try { protocol = new URL(target).protocol; } catch { /* 非法 URL 走下面的拒绝分支 */ }
-        if (protocol === "about:" || protocol === "chrome-error:" || protocol === "devtools:") return true;
+        if (protocol === "about:" || protocol === "chrome-error:" || protocol === "devtools:") return;
         try {
           assertPublicHttpUrl(target);
-          return true;
         } catch (error) {
+          event.preventDefault();
+          // 子框架跳内网：静默阻止即可，页面其余部分照常渲染。
+          if (!isMainFrame) return;
           done(error instanceof Error ? error : new Error("该地址指向内网，已拒绝访问。"));
-          return false;
         }
       };
-      const onRedirect = (event: { preventDefault: () => void }, target: string) => {
-        if (!guardNavigation(target)) event.preventDefault();
-      };
-      const onNavigate = (event: { preventDefault: () => void }, target: string) => {
-        if (!guardNavigation(target)) event.preventDefault();
-      };
+      // 新版事件把 URL / isMainFrame 放在 details 里（位置参数已标记 deprecated）。
+      const onRedirect = (details: Electron.Event<Electron.WebContentsWillRedirectEventParams>) =>
+        guardNavigation(details, details.url, details.isMainFrame);
+      const onNavigate = (details: Electron.Event<Electron.WebContentsWillNavigateEventParams>) =>
+        guardNavigation(details, details.url, details.isMainFrame);
       win.webContents.once("did-finish-load", onLoad);
       win.webContents.on("did-fail-load", onFail);
       win.webContents.on("will-redirect", onRedirect);

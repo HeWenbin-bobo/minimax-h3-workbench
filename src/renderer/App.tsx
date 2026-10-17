@@ -722,16 +722,36 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, content: buffered })));
     });
     // 智能体多步工具日志：start 追加"→ …"，end 追加"✓ …"——用户能看到完整过程而非光标空闪。
+    // 每个工具都必须有**中文名**：此前只有 web_search / generate_video / open_page 有映射，
+    // create_file / update_plan / request_user_input 会直接冒出英文标识符（"→ 正在调用 create_file…"），
+    // 违反「界面文案一律中文」。end 的 result 可能很长（create_file 的确认文案约百字），截断展示。
+    const TOOL_LABELS: Record<string, string> = {
+      web_search: "联网搜索",
+      generate_video: "生成视频",
+      open_page: "打开网页",
+      create_file: "生成文件",
+      update_plan: "更新步骤清单",
+      request_user_input: "向你提问"
+    };
+    const toolLabel = (tool: string) => TOOL_LABELS[tool] ?? "工具调用";
     const offTool = window.h3.onLlmTool((event) => {
       const targetId = event.sessionId;
       if (!targetId) return;
       setSessions((all) => patchLast(all, targetId, (msg) => {
         const steps = msg.toolSteps ?? [];
+        const name = toolLabel(event.tool);
+        const summary = (event.result ?? "完成").replace(/\s+/g, " ").trim();
+        const shortSummary = summary.length > 60 ? `${summary.slice(0, 60)}…` : summary;
         if ((event.phase ?? "start") === "end") {
-          const label = event.tool === "web_search" ? `✓ 搜索完成（${event.result ?? "完成"}）` : `✓ ${event.tool} 完成（${event.result ?? "完成"}）`;
-          return { ...msg, toolSteps: [...steps, label] };
+          return { ...msg, toolSteps: [...steps, `✓ ${name}完成（${shortSummary}）`] };
         }
-        const label = event.tool === "web_search" ? `→ 正在搜索：${event.input}` : event.tool === "generate_video" ? "→ 正在创建视频生成任务…" : event.tool === "open_page" ? `→ 正在打开网页：${event.input}` : `→ 正在调用 ${event.tool}…`;
+        const label = event.tool === "web_search" ? `→ 正在搜索：${event.input}`
+          : event.tool === "generate_video" ? "→ 正在创建视频生成任务…"
+            : event.tool === "open_page" ? `→ 正在打开网页：${event.input}`
+              : event.tool === "create_file" ? "→ 正在生成文件…"
+                : event.tool === "update_plan" ? "→ 正在更新步骤清单…"
+                  : event.tool === "request_user_input" ? "→ 正在向你提问…"
+                    : `→ ${name}中…`;
         return { ...msg, toolSteps: [...steps, label] };
       }));
     });

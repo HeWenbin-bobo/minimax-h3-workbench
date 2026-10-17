@@ -972,6 +972,10 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   // 于是**两张卡片指向同一个文件**、都显示第二版内容（实测 probe-dup-artifact）。
   // 这里探测重名并加 " (2)" / " (3)" 后缀，保证每次落盘都是独立文件。
   const filePath = await uniqueArtifactPath(dir, safeName);
+  // 返回的 name 必须取**实际落盘文件名**（可能带 " (2)" 序号）。
+  // 用 safeName 会让卡片显示"报告.md"、磁盘上却是"报告 (2).md"——用户按卡片名去找
+  // 文件会找不到（实测 probe-dup-xlsx）。
+  const finalName = path.basename(filePath);
   if (kind === "xlsx") {
     // SheetJS：CSV 文本 → 工作簿 → xlsx 二进制。用户点名要"能保存成 .xlsx"，纯 CSV 落盘达不到。
     const XLSX = await loadXlsx();
@@ -979,10 +983,10 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
     XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(parseCsvRows(content)), "Sheet1");
     XLSX.writeFile(book, filePath);
     const info = await stat(filePath);
-    return { name: safeName, path: filePath, size: info.size };
+    return { name: finalName, path: filePath, size: info.size };
   }
   await writeFile(filePath, content, "utf8");
-  return { name: safeName, path: filePath, size: Buffer.byteLength(content, "utf8") };
+  return { name: finalName, path: filePath, size: Buffer.byteLength(content, "utf8") };
 }
 
 /** CSV 文本 → string[][]：用共享解析器切行切格（正确处理引号字段与引号内的换行）。

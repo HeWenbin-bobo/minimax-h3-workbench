@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { renderMarkdown } from "./markdown";
+import { normalizeStoredSessions } from "./App";
 import { PLAN_BLOCK_CLOSE, PLAN_BLOCK_OPEN } from "../shared/planMode";
 
 const render = (text: string) => renderToStaticMarkup(createElement("div", null, renderMarkdown(text)));
@@ -146,5 +147,46 @@ describe("markdown 表格：外侧竖线可选", () => {
     const html = render("价格是 100 元|台\n选项 A|B 都不对");
     expect(html).not.toContain("<table>");
     expect(html).toContain("价格是 100 元|台");
+  });
+});
+
+// 会话读取容错：一条坏数据不能让**全部**会话消失。
+// 旧实现直接对数组 map 并靠外层 catch 兜底，数组里出现 null/非对象时
+// `session.messages` 立刻抛错 → 外层 catch 返回 []，用户的全部对话一次性清空。
+describe("normalizeStoredSessions 坏数据容错", () => {
+  it("坏元素被跳过，正常会话全部保留", () => {
+    const result = normalizeStoredSessions([
+      { id: "a", title: "甲", messages: [{ role: "user", content: "hi" }] },
+      null,
+      "坏数据",
+      { id: "b", title: "乙", messages: [] }
+    ]);
+    expect(result.map((s) => s.id)).toEqual(["a", "b"]);
+  });
+
+  it("非数组输入返回空数组（不抛错）", () => {
+    for (const bad of [null, undefined, 42, "x", {}]) {
+      expect(normalizeStoredSessions(bad)).toEqual([]);
+    }
+  });
+
+  it("messages 非数组时当作空会话，其它字段仍保留", () => {
+    const result = normalizeStoredSessions([{ id: "a", title: "甲", messages: "坏" }]);
+    expect(result).toHaveLength(1);
+    expect(result[0].messages).toEqual([]);
+    expect(result[0].title).toBe("甲");
+  });
+
+  it("残留 streaming 标记被清掉（重启后不留闪烁光标）", () => {
+    const result = normalizeStoredSessions([
+      { id: "a", messages: [{ role: "assistant", content: "半截", streaming: true }] }
+    ]);
+    expect(result[0].messages[0].streaming).toBe(false);
+  });
+
+  it("旧数据扁平 taskIds 迁移成单组 taskGroups", () => {
+    const result = normalizeStoredSessions([{ id: "a", messages: [{ role: "assistant", content: "x", taskIds: ["t1", "t2"] }] }]);
+    expect(result[0].messages[0].taskGroups).toEqual([["t1", "t2"]]);
+    expect(result[0].messages[0].taskIds).toBeUndefined();
   });
 });

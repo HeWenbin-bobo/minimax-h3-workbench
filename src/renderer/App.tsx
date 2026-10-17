@@ -602,26 +602,32 @@ export function capSessions(sessions: PlaygroundSession[], generatingIds: string
   return next.length === sessions.length ? sessions : next;
 }
 
+/** 读盘后的会话归一化。**导出以便单测**：坏元素的容错逻辑读代码看不出来，必须能断言。 */
+export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
+  if (!Array.isArray(raw)) return [];
+  // 逐条容错：一条坏数据不该让**全部**会话消失。
+  // 旧实现直接 `parsed.map(...)` 并靠外层 catch 兜底，只要数组中有一个 null/非对象
+  // （半截写入、手改、旧版本遗留），`session.messages` 就抛错，外层 catch 返回 [] ——
+  // 用户精心攒下的全部对话一次性清空（实测探针 sessions-bad-element 复现）。
+  return raw.filter((session): session is PlaygroundSession =>
+    Boolean(session) && typeof session === "object" && typeof (session as PlaygroundSession).id === "string"
+  ).map((session) => ({
+    ...session,
+    // toolSteps 与 streaming 同理是瞬态：流式途中关闭应用会残留，读取时强制剥离。
+    // 旧数据迁移：扁平 taskIds → 单组 taskGroups（旧消息没有分组结构）。
+    messages: (Array.isArray(session.messages) ? session.messages : []).filter(Boolean).map((msg) => {
+      // toolStatus 是更早版本的瞬态字段（现已改为 toolSteps）；旧数据可能残留，读取时一并剥离。
+      const { toolStatus: _dropped, toolSteps: _dropped2, ...rest } = msg as PlaygroundMessage & { toolStatus?: unknown };
+      const normalized = rest.taskGroups ?? (rest.taskIds?.length ? [rest.taskIds] : undefined);
+      const migrated = { ...rest, taskGroups: normalized, taskIds: undefined };
+      return migrated.streaming ? { ...migrated, streaming: false, toolSteps: undefined } : migrated;
+    })
+  }));
+}
+
 function loadSessions(): PlaygroundSession[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem(pgSessionsKey) || "[]") as PlaygroundSession[];
-    // 归一化残留的 streaming 标记：应用在流式回复途中被关闭时，消息上的 streaming:true 会被原样存下来，
-    // 而重启后并没有任何流在跑。残留标记会让两个功能失灵：
-    //   1) 删除按钮被 deleteSession 的"正在生成不能删"守卫静默拦掉，点了毫无反应；
-    //   2) 气泡永久显示闪烁光标，像卡在回复中。
-    // 读取时就地清掉——这是唯一能把历史脏数据一次性修好的地方。
-    return parsed.map((session) => ({
-      ...session,
-      // toolSteps 与 streaming 同理是瞬态：流式途中关闭应用会残留，读取时强制剥离。
-      // 旧数据迁移：扁平 taskIds → 单组 taskGroups（旧消息没有分组结构）。
-      messages: (session.messages ?? []).map((msg) => {
-        // toolStatus 是更早版本的瞬态字段（现已改为 toolSteps）；旧数据可能残留，读取时一并剥离。
-        const { toolStatus: _dropped, toolSteps: _dropped2, ...rest } = msg as PlaygroundMessage & { toolStatus?: unknown };
-        const normalized = rest.taskGroups ?? (rest.taskIds?.length ? [rest.taskIds] : undefined);
-        const migrated = { ...rest, taskGroups: normalized, taskIds: undefined };
-        return migrated.streaming ? { ...migrated, streaming: false, toolSteps: undefined } : migrated;
-      })
-    }));
+    return normalizeStoredSessions(JSON.parse(localStorage.getItem(pgSessionsKey) || "[]"));
   } catch { return []; }
 }
 

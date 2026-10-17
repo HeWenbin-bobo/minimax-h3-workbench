@@ -390,6 +390,8 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
 function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNotice: (s: string) => void }) {
   const [items, setItems] = useState<GenerationTask[]>([]);
   const [loading, setLoading] = useState(true);
+  // 正在等待二次确认的项目组（parentId）。彻底删除不可逆，不能单击即生效。
+  const [confirmingGroup, setConfirmingGroup] = useState<string>();
   const retentionMs = 7 * 24 * 60 * 60 * 1_000;
   const refresh = useCallback(() => window.h3.listDeletedTasks().then((r) => { if (r.data) setItems(r.data); setLoading(false); }).catch(() => setLoading(false)), []);
   useEffect(() => {
@@ -439,7 +441,15 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
           <small>{group.length} 条 · {daysLeft(deletedAt)} 天后自动清除</small></div>
         <div className="trash-actions">
           <button className="text-button" onClick={() => restore(ids)}>恢复</button>
-          <button className="text-button danger" onClick={() => purge(ids)}>彻底删除</button>
+          {/* 「彻底删除」会连输出视频一起删，**不可逆**。此前是单击即生效，
+              而按钮与「恢复」并排、只差一个颜色。改成内联两段式确认
+              （不用 window.confirm：它会阻塞渲染进程，CDP 自动化也会被挂住）。 */}
+          {confirmingGroup === group[0].parentId
+            ? <>
+                <button className="text-button danger" onClick={() => { setConfirmingGroup(undefined); void purge(ids); }}>确认删除</button>
+                <button className="text-button" onClick={() => setConfirmingGroup(undefined)}>取消</button>
+              </>
+            : <button className="text-button danger" onClick={() => setConfirmingGroup(group[0].parentId)}>彻底删除</button>}
         </div>
       </article>;
     })}

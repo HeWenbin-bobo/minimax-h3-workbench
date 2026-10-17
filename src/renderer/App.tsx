@@ -885,6 +885,20 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     previewCalibrated.current = true;
     if (mainWidth > 700) setPreviewWidth(clamp(mainWidth * 0.55));
   }, [preview]);
+  // 窗口缩放时重新夹取。面板宽度只在"打开那一刻"按容器量过一次；
+  // 之后把窗口拉小，`flex: none` 的面板会直接把 `flex:1; min-width:0` 的聊天列压到 0
+  // （用户点开文件后再拖动窗口，聊天区就"消失"了）。
+  // 用函数式更新：值没变时 React 会 bail out，不会引发多余渲染。
+  useEffect(() => {
+    if (!preview) return;
+    const onResize = () => {
+      const mainWidth = document.querySelector(".pg-main")?.getBoundingClientRect().width ?? 0;
+      if (mainWidth <= 0) return;
+      setPreviewWidth((current) => Math.round(Math.max(360, Math.min(current, Math.max(360, mainWidth - 30)))));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [preview]);
   // 拖拽过程中只更新内存宽度；**落盘留到松手**。拖拽时 mousemove 每秒可达上百次，
   // 每次都同步写 localStorage 会造成明显卡顿（本修复初版就是这么写的，属自引入的性能回归）。
   const resizePreview = (width: number) => setPreviewWidth(width);

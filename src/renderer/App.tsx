@@ -522,6 +522,12 @@ interface PlaygroundMessage {
    * 导致气泡重复显示 + 内容进历史、每轮重发给模型（白烧 token）。
    */
   artifacts?: Array<{ name: string; path: string; size: number; kind: ArtifactKind }>;
+  /**
+   * **仅用于界面展示的系统提示**（如"上下文已压缩…"）。
+   * 这类消息绝不能进历史发给模型：它会在后续每轮里被当成助手说过的话，
+   * 污染上下文（实测 probe-compaction-notice-history：第二轮请求体里出现了压缩提示原文）。
+   */
+  notice?: boolean;
 }
 
 const pgSessionsKey = "h3-playground-sessions";
@@ -668,7 +674,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 轮询闭包必须读**最新**历史：effect 只依赖消息**条数**，而流式期间条数不变、内容在涨。
   // 若闭包捕获旧的 active，回复结束后 chip 仍显示开头的占用（实测：真实 59% 时 chip 停在 0%）。
   const threadRef = useRef<ChatMessage[]>([]);
-  threadRef.current = active ? active.messages.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })) : [];
+  threadRef.current = active ? active.messages.filter((m) => !m.error && !m.notice).map((m) => ({ role: m.role, content: m.content, images: m.images })) : [];
   useEffect(() => {
     if (!activeId) return;
     let cancelled = false;
@@ -792,6 +798,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       const notice: PlaygroundMessage = {
         id: crypto.randomUUID(),
         role: "assistant",
+        // 打上标记：这条只给用户看，不能进历史发给模型（否则后续每轮都复述这句系统提示）。
+        notice: true,
         content: `（${event.reason}：上下文已从约 ${formatTokens(event.before)} 压到约 ${formatTokens(event.after)}，保留最近对话 + 交接摘要；此前细节以摘要形式保留）`
       };
       setSessions((all) => all.map((session) => {
@@ -889,7 +897,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   /** 当前会话传给主进程的历史（与 send() 里构造的完全一致，使压缩记账锚定同一份消息）。 */
   function activeThreadMessages(): ChatMessage[] {
     if (!active) return [];
-    return active.messages.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images }));
+    // notice 是纯界面提示（如"上下文已压缩"），不能进历史——否则模型会把系统提示当自己说过的话复述。
+    return active.messages.filter((m) => !m.error && !m.notice).map((m) => ({ role: m.role, content: m.content, images: m.images }));
   }
 
   /** 手动压缩：对齐 Codex 的 Manual trigger。压缩事件由主进程推回，气泡里的提示统一样式。 */
@@ -943,7 +952,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     // 计划模式（用户点了「📋 计划」）：本轮只出方案，主进程会摘掉副作用工具并注入计划提示词。
     const planArg: PlanMode = planNext ? "plan" : undefined;
     if (planArg) planTurnRef.current.add(sessionId);
-    const history: ChatMessage[] = [...(session.messages).filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })), { role: "user", content: userMsg.content, images: userMsg.images }];
+    const history: ChatMessage[] = [...(session.messages).filter((m) => !m.error && !m.notice).map((m) => ({ role: m.role, content: m.content, images: m.images })), { role: "user", content: userMsg.content, images: userMsg.images }];
     setSessions((all) => all.map((s) => s.id === sessionId ? { ...s, title: s.messages.length === 0 && text ? text.slice(0, 20) : s.title, updatedAt: new Date().toISOString(), messages: [...s.messages, userMsg, assistantMsg] } : s));
     setInput(""); setAttachments([]); setPlanNext(false);
     setGeneratingIds((all) => all.includes(sessionId) ? all : [...all, sessionId]);
@@ -981,7 +990,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     sendingRef.current.add(target.id);
     const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: "", streaming: true };
     const history: ChatMessage[] = [
-      ...target.messages.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content, images: m.images })),
+      ...target.messages.filter((m) => !m.error && !m.notice).map((m) => ({ role: m.role, content: m.content, images: m.images })),
       { role: "user", content: "按上面的计划执行。" }
     ];
     // 该计划消息去掉"待确认"标记（已确认），避免按钮重复出现。

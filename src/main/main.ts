@@ -79,6 +79,27 @@ let mainWindow: BrowserWindow | undefined;
 let adapters: AdapterRegistry | undefined;
 let settingsCache: AppSettings | undefined; // 模块级：h3media/showItem 白名单与 registerIpc 共享
 
+/**
+ * 单实例锁：双击两次快捷方式时，第二个进程必须退出并把窗口带到前台。
+ *
+ * 不加会**真实损坏数据**：两个进程共享同一个 userData，各自持有内存态任务列表、
+ * 各自 atomicWrite 同一个 `tasks.json` / `settings.json` / `secrets.json`。
+ * SettingsStore/TaskStore 的串行队列只在**进程内**有效，跨进程完全挡不住
+ * （实测 probe-double-instance：两个实例都能起来、同一 userData 并发写）。
+ * E2E 用 H3_USER_DATA 传独立目录，且这里允许显式豁免，故不影响测试。
+ */
+const singleInstanceLock = process.env.H3_ALLOW_MULTI_INSTANCE === "1" ? true : app.requestSingleInstanceLock();
+if (!singleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
+
 app.whenReady().then(async () => {
   // E2E/多实例隔离：H3_USER_DATA 指定独立 userData 目录（settings/secrets/tasks 全随隔离）。
   if (process.env.H3_USER_DATA) app.setPath("userData", path.resolve(process.env.H3_USER_DATA));

@@ -136,12 +136,20 @@ export class ComfyAdapter implements GenerationAdapter {
       const sourceVideo = await this.upload(request.sourceVideoPath, signal);
       return buildRef2vaWorkflow(request, seed, { sourceVideo });
     }
-    const [first, last, sourceImage] = await Promise.all([
+    // **按模式取素材**：切换模式时界面只是不显示对应的选择器，`request.*Path` 里的旧值仍在。
+    // 全都传的话，图生视频模式下会额外挂一个残留的尾帧（实测：buildFl2vaWorkflow 收到
+    // stale last 后照样生成 lastImage 节点与 last_frame 输入）——首帧来自参考图、
+    // 尾帧却来自上次文生视频残留的文件，生成结果与用户预期完全不符。
+    if (request.mode === "image") {
+      const sourceImage = request.sourceImagePath ? await this.upload(request.sourceImagePath, signal) : undefined;
+      return buildFl2vaWorkflow(request, seed, { sourceImage });
+    }
+    // 文生视频：可选首帧/尾帧。
+    const [first, last] = await Promise.all([
       request.firstFramePath ? this.upload(request.firstFramePath, signal) : undefined,
-      request.lastFramePath ? this.upload(request.lastFramePath, signal) : undefined,
-      request.sourceImagePath ? this.upload(request.sourceImagePath, signal) : undefined
+      request.lastFramePath ? this.upload(request.lastFramePath, signal) : undefined
     ]);
-    return buildFl2vaWorkflow(request, seed, { first, last, sourceImage });
+    return buildFl2vaWorkflow(request, seed, { first, last });
   }
 
   private async upload(filePath: string, signal?: AbortSignal): Promise<UploadedMedia> {

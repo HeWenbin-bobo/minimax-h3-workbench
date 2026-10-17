@@ -216,3 +216,47 @@ describe("ComfyAdapter 完成但无产物", () => {
     expect(historyHits).toBe(2);
   }, 15_000);
 });
+
+// 切换模式后 `request.*Path` 里的旧值仍在。图生视频模式若把残留尾帧也传进去，
+// buildFl2vaWorkflow 会照样生成 lastImage 节点 —— 首帧来自参考图、尾帧却来自
+// 上次文生视频残留的文件（实测确认该工作流会挂上 last_frame）。
+describe("ComfyAdapter 按模式取素材", () => {
+  it("image 模式只上传参考图，不碰残留的首帧/尾帧", async () => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const pathMod = await import("node:path");
+    const dir = await mkdtemp(pathMod.join(tmpdir(), "h3-comfy-"));
+    const img = pathMod.join(dir, "ref.png");
+    await writeFile(img, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const uploads: string[] = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/upload/image")) {
+        const form = init?.body as FormData;
+        const file = form.get("image") as File;
+        uploads.push(file.name);
+        return json({ name: file.name, subfolder: "", type: "input" });
+      }
+      if (url.endsWith("/object_info")) return json(objectInfo({
+        diffusion: ["minimax_h3_fl2va_pruned_int8_convrot.safetensors", "minimax_h3_ref2va_pruned_int8_convrot.safetensors"],
+        textEncoders: ["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"],
+        vaes: ["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_audio_vae_fp32.safetensors"]
+      }));
+      if (url.endsWith("/prompt")) return json({ prompt_id: "p1" });
+      if (url.includes("/history/")) return json({ p1: { outputs: { save: [{ filename: "o.mp4", type: "output" }] }, status: { status_str: "success" } } });
+      if (url.includes("/view?")) return new Response(new Uint8Array([0]), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adapter().generate(
+      { ...request, mode: "image", sourceImagePath: img, firstFramePath: img, lastFramePath: img },
+      task,
+      () => undefined
+    );
+
+    // 只应上传一次（参考图）；首帧/尾帧的残留路径不该被碰
+    expect(uploads).toHaveLength(1);
+  });
+});

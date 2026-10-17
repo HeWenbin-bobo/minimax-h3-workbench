@@ -1414,6 +1414,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   }, [filteredSessions]);
   const grouped = sessionGroups.length > 1;
   // 运行面板：扁平收集当前会话的工具步骤（跨气泡、按时间顺序），最近 8 条。
+  // **新→旧**排列（reverse 之后），所以收起态摘要要取 `[0]` 才是"最新一步"。
   const [showRuns, setShowRuns] = useState(false);
   const recentRuns = useMemo(
     () => (active?.messages ?? []).flatMap((msg) => msg.toolSteps ?? []).slice(-8).reverse(),
@@ -1556,7 +1557,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           <button className="pg-runs-head" onClick={() => setShowRuns(!showRuns)} title={showRuns ? "收起运行记录" : "展开运行记录"}>
             <span className="pg-runs-arrow">{showRuns ? "▾" : "▸"}</span>
             运行面板
-            {recentRuns.length > 0 && <span className="pg-runs-last">{recentRuns[recentRuns.length - 1]}</span>}
+            {/* 收起态摘要要显示**最新一步**：recentRuns 已是新→旧，取 [0]。
+                取 [length-1] 会显示这一批里最旧的一条（用户看到的进度是反的）。 */}
+            {recentRuns.length > 0 && <span className="pg-runs-last">{recentRuns[0]}</span>}
           </button>
           {showRuns && (recentRuns.length === 0
             ? <p className="pg-runs-empty">本会话还没有工具调用。开启「联网」或「智能体」后，这里会记录每一步。</p>

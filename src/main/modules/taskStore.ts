@@ -5,6 +5,23 @@ import type { GenerationTask } from "../../shared/types";
 
 const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 
+/**
+ * 回收站时间的归一化（与会话侧 `App.normalizeDeletedAt` 同一套理由）。
+ *
+ * `deletedAt` 参与两处：回收站每项的「N 天后自动清除」，以及启动时的
+ * `purgeExpired`（`now - deletedAt > 7 天`）。磁盘里的非法值（`"abc"`）会让
+ * `new Date(...)` 得到 Invalid Date：
+ * - 界面显示「NaN 天后自动清除」
+ * - `Date.now() - NaN > 7 天` 恒为 false → 这条记录**永远不会被清理**
+ *   （连同输出视频一起白占磁盘）
+ * 非法值按"刚删除"处理，让 7 天计时正常走完；`undefined/null/空串` 仍是"未删除"。
+ */
+function normalizeDeletedAt(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "string" && !Number.isNaN(new Date(value).getTime())) return value;
+  return new Date().toISOString();
+}
+
 export class TaskStore {
   private readonly filePath = path.join(app.getPath("userData"), "tasks.json");
   // 进度更新高频触发 save；串行化写入链，避免并发原子写同一 .tmp 文件在 Windows 上互撞。
@@ -58,6 +75,12 @@ export class TaskStore {
         if (createdAt !== task.createdAt || updatedAt !== task.updatedAt) {
           changed = true;
           task = { ...task, createdAt, updatedAt };
+        }
+        // `deletedAt` 决定回收站的保留期与「N 天后自动清除」文案（同会话侧）。
+        const deletedAt = normalizeDeletedAt(task.deletedAt);
+        if (deletedAt !== task.deletedAt) {
+          changed = true;
+          task = { ...task, deletedAt };
         }
         if (terminal.has(task.status)) return task;
         changed = true;

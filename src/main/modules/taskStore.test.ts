@@ -163,3 +163,39 @@ describe("TaskStore.load parentId / 时间字段归一", () => {
     expect(tasks[0].updatedAt).toBe("2026-10-02T03:04:05.000Z");
   });
 });
+
+// 任务侧 deletedAt 与会话侧同源：非法值会让回收站显示「NaN 天后自动清除」，
+// 且 `Date.now() - NaN > 7 天` 恒为 false —— purgeExpired 永远清不掉（连视频一起白占磁盘）。
+describe("TaskStore.load deletedAt 归一", () => {
+  it("非法字符串被改成可解析时间（7 天计时能正常走）", async () => {
+    const before = Date.now();
+    await writeFile(taskFile(), JSON.stringify([makeTask({ deletedAt: "abc" })]), "utf8");
+    const tasks = await new TaskStore().load();
+    const stamp = new Date(tasks[0].deletedAt!).getTime();
+    expect(Number.isNaN(stamp)).toBe(false);
+    expect(stamp).toBeGreaterThanOrEqual(before - 1000);
+    // 关键：7 天后必须真的被判为过期
+    expect(Date.now() - stamp > 7 * 86_400_000).toBe(false);
+  });
+
+  it("非字符串被改成可解析时间", async () => {
+    await writeFile(taskFile(), JSON.stringify([makeTask({ deletedAt: 123 })]), "utf8");
+    const tasks = await new TaskStore().load();
+    expect(Number.isNaN(new Date(tasks[0].deletedAt!).getTime())).toBe(false);
+  });
+
+  it("空值/缺失仍表示「未删除」（不误标成已删除）", async () => {
+    for (const value of [undefined, null, ""]) {
+      await writeFile(taskFile(), JSON.stringify([makeTask({ deletedAt: value })]), "utf8");
+      const tasks = await new TaskStore().load();
+      expect(tasks[0].deletedAt).toBeUndefined();
+    }
+  });
+
+  it("合法时间串原样保留", async () => {
+    const iso = "2026-10-01T00:00:00.000Z";
+    await writeFile(taskFile(), JSON.stringify([makeTask({ deletedAt: iso })]), "utf8");
+    const tasks = await new TaskStore().load();
+    expect(tasks[0].deletedAt).toBe(iso);
+  });
+});

@@ -190,3 +190,25 @@ describe("normalizeStoredSessions 坏数据容错", () => {
     expect(result[0].messages[0].taskIds).toBeUndefined();
   });
 });
+
+// content 类型兜底：主进程会调 `.trim()` / `.match()`，非字符串会抛英文技术错误。
+describe("normalizeStoredSessions 消息 content 类型兜底", () => {
+  it("数字/对象 content 被转成字符串，不留给下游抛错", () => {
+    const result = normalizeStoredSessions([
+      { id: "a", messages: [{ role: "user", content: 123 }, { role: "assistant", content: { x: 1 } }] }
+    ]);
+    expect(result[0].messages[0].content).toBe("123");
+    expect(typeof result[0].messages[1].content).toBe("string");
+  });
+
+  it("null / undefined content 变空串（下游按空消息处理，不是崩溃）", () => {
+    const result = normalizeStoredSessions([{ id: "a", messages: [{ role: "user", content: null }, { role: "user" }] }]);
+    expect(result[0].messages[0].content).toBe("");
+    expect(result[0].messages[1].content).toBe("");
+  });
+
+  it("正常字符串原样保留（不改变既有内容）", () => {
+    const result = normalizeStoredSessions([{ id: "a", messages: [{ role: "user", content: "你好\n世界" }] }]);
+    expect(result[0].messages[0].content).toBe("你好\n世界");
+  });
+});

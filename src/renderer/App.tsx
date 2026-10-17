@@ -736,8 +736,12 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
     messages: (Array.isArray(session.messages) ? session.messages : []).filter(Boolean).map((msg) => {
       // toolStatus 是更早版本的瞬态字段（现已改为 toolSteps）；旧数据可能残留，读取时一并剥离。
       const { toolStatus: _dropped, toolSteps: _dropped2, ...rest } = msg as PlaygroundMessage & { toolStatus?: unknown };
+      // content 必须是字符串：主进程的 normalizeHistory 会调 `.trim()`、上下文估算会调 `.match()`，
+      // 非字符串（手改、旧版本写脏）会抛 "text.trim is not a function" 这类英文技术错误，
+      // 用户完全无法对症。在这里兜住，比在每个下游都判类型便宜得多。
+      const content = typeof rest.content === "string" ? rest.content : String(rest.content ?? "");
       const normalized = rest.taskGroups ?? (rest.taskIds?.length ? [rest.taskIds] : undefined);
-      const migrated = { ...rest, taskGroups: normalized, taskIds: undefined };
+      const migrated = { ...rest, content, taskGroups: normalized, taskIds: undefined };
       return migrated.streaming ? { ...migrated, streaming: false, toolSteps: undefined } : migrated;
     })
   }));

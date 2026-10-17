@@ -158,7 +158,13 @@ export class LlmService {
       if (lastUser?.content) {
         try {
           const results = await this.search(lastUser.content.slice(0, 200), browserOnly);
-          if (results) system.content = `${system.content}\n\n以下是网络搜索结果，回答时可引用：\n${results}`;
+          // 空串（配置了搜索 API 但对端返回 0 条）必须**明确告知**，不能什么都不追加。
+          // 不告知的话模型以为自己检索过了，直接凭训练知识作答——正是本项目反复踩到的
+          // "凭旧知识回答实时问题"。免 key 路径在没有结果时会抛错走下面的 catch，
+          // API 路径原本是静默返回空串，两条路径行为不一致（实测 probe-search-empty）。
+          system.content = results
+            ? `${system.content}\n\n以下是网络搜索结果，回答时可引用：\n${results}`
+            : `${system.content}\n\n（联网搜索已执行但未返回任何结果。涉及实时信息时请如实说明本次未能检索到，不要凭记忆给出具体数字或日期；可建议用户换个关键词或稍后再问。）`;
         } catch (error) {
           system.content = `${system.content}\n\n（联网搜索失败：${describeError(error, "未知错误")}，请基于自身知识回答。）`;
         }

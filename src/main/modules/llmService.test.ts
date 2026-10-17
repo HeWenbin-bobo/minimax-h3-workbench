@@ -11,7 +11,7 @@ vi.mock("@ai-sdk/openai-compatible", () => ({
   createOpenAICompatible: () => ({ chatModel: (id: string) => ({ id }) })
 }));
 
-import { consumeSse, chatAgent, resolveChatPath, rewriteChatEndpoint, type LlmServiceOptions } from "./llmService";
+import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, type LlmServiceOptions } from "./llmService";
 
 // 构造一个 ReadableStream，把字符串分块推送（模拟网络分包边界不齐）。
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
@@ -211,5 +211,54 @@ describe("resolveChatPath", () => {
   it("非法 baseUrl 不抛错", () => {
     expect(resolveChatPath("not-a-url")).toBe("/chat/completions");
     expect(resolveChatPath("")).toBe("/chat/completions");
+  });
+});
+
+// 搜索返回空结果时必须**明确告知模型**，不能什么都不追加——
+// 否则模型以为自己检索过了，直接凭训练知识作答（本项目反复踩到的"凭旧知识回答实时问题"）。
+describe("buildPayload 搜索空结果的告知", () => {
+  async function systemContentFrom(handler: (url: string) => Response): Promise<string> {
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/search")) return handler(url);
+      bodies.push(String(init?.body ?? ""));
+      if (url.includes("/chat/completions")) {
+        return new Response(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: "好" } }] })}\n\ndata: [DONE]\n\n`,
+          { status: 200, headers: { "Content-Type": "text/event-stream" } }
+        );
+      }
+      throw new Error(`Unexpected: ${url}`);
+    }));
+    const service = new LlmService({
+      baseUrl: "https://llm.test/v1",
+      apiKey: "k",
+      model: "m",
+      systemPrompt: "SYS",
+      searchBaseUrl: "https://search.test",
+      searchApiKey: "k"
+    });
+    await service.chat([{ role: "user", content: "今天股价多少" }], true, () => {});
+    const payload = JSON.parse(bodies[0]) as { messages: Array<{ role: string; content: string }> };
+    vi.unstubAllGlobals();
+    return payload.messages[0].content;
+  }
+
+  it("搜索 API 返回 0 条时，system 里写明「未返回任何结果」", async () => {
+    const content = await systemContentFrom(() => new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    expect(content).toContain("未返回任何结果");
+    // 必须同时约束模型不要编造具体数字。
+    expect(content).toContain("不要凭记忆给出具体数字");
+  });
+
+  it("搜索有结果时追加结果正文，不写「未返回」提示", async () => {
+    const content = await systemContentFrom(() => new Response(
+      JSON.stringify({ results: [{ title: "T", url: "https://x", snippet: "S" }] }),
+      { status: 200 }
+    ));
+    expect(content).toContain("以下是网络搜索结果");
+    expect(content).toContain("[1] T");
+    expect(content).not.toContain("未返回任何结果");
   });
 });

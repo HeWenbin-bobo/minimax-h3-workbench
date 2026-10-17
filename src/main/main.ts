@@ -911,7 +911,12 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   let base = path.basename(String(name || "")).replace(/[\\/:*?"<>|]/g, "_").trim();
   base = base.replace(/\.(html?|csv|tsv|md|xlsx)$/i, "").trim();
   const safeName = `${base || "artifact"}${ext}`;
-  const dir = path.join(app.getPath("userData"), "artifacts", path.basename(String(sessionId || "unknown")));
+  // sessionId 来自渲染端（可构造）。只取 basename 不够：`path.basename("..")` 仍返回 ".."，
+  // join 后会把产物目录**抬到 userData 根**（实测复现）。这里再把危险字符与纯点段滤掉，
+  // 保证落点始终在 artifacts 之下。
+  const sessionDirName = path.basename(String(sessionId || "unknown")).replace(/[\\/:*?"<>|]/g, "_").trim();
+  const safeSession = !sessionDirName || /^\.+$/.test(sessionDirName) ? "unknown" : sessionDirName;
+  const dir = path.join(app.getPath("userData"), "artifacts", safeSession);
   await mkdir(dir, { recursive: true });
   const filePath = path.join(dir, safeName);
   if (kind === "xlsx") {

@@ -39,13 +39,15 @@ export class MiniMaxAdapter implements GenerationAdapter {
         headers: { Authorization: `Bearer ${this.options.apiKey}` },
         signal: requestSignal(signal, 8_000)
       });
-      const authenticated = response.status !== 401;
+      // 401 与 403 都算鉴权失败：403 常见于 Key 被禁用/无该模型权限/地区限制，
+      // 只认 401 会把这类"实际不可用"误报成"已通过鉴权"（与 RbAdapter 的判定保持一致）。
+      const authenticated = response.status !== 401 && response.status !== 403;
       return {
         ok: authenticated,
         label: "MiniMax 云 API",
         latencyMs: Date.now() - start,
         details: { httpStatus: response.status },
-        message: authenticated ? "API Key 已通过鉴权检查。" : "API Key 无效或已失效。"
+        message: authenticated ? "API Key 已通过鉴权检查。" : `API Key 无效、已失效或无访问权限（HTTP ${response.status}）。`
       };
     } catch (error) {
       return {

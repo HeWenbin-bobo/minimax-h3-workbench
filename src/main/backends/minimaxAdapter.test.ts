@@ -99,3 +99,25 @@ describe("MiniMaxAdapter 任务状态识别", () => {
     expect(queryIndex).toBe(2);
   });
 });
+
+// 鉴权探测：401 与 403 都应判为失败。只认 401 会把 403（Key 被禁用 / 无该模型权限 /
+// 地区限制）误报成"已通过鉴权"，用户看到绿色"连接成功"却根本用不了。
+describe("MiniMaxAdapter.test 鉴权判定", () => {
+  const stubStatus = (status: number) =>
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status })));
+
+  it("200 → 通过", async () => {
+    stubStatus(200);
+    expect((await adapter().test()).ok).toBe(true);
+  });
+
+  it("401 → 失败", async () => {
+    stubStatus(401);
+    expect((await adapter().test()).ok).toBe(false);
+  });
+
+  it("403 → 失败（无权限不等于已通过鉴权）", async () => {
+    stubStatus(403);
+    expect((await adapter().test()).ok).toBe(false);
+  });
+});

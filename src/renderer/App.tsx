@@ -1216,7 +1216,7 @@ function clampDuration(duration: number, options: number[]): number {
 // 游乐场会话回收站：悬浮面板展示已删除会话（保留 7 天），支持恢复 / 彻底删除。
 /** 提取消息里第一个完整 HTML 代码块（```html 或以 <!DOCTYPE/或 html> 开头的围栏块）用于产物落盘与预览。 */
 function extractHtmlArtifact(content: string): string | undefined {
-  const fences = [...content.matchAll(/```(\w*)\n([\s\S]*?)```/g)];
+  const fences = [...content.matchAll(/```(\w*)\r?\n([\s\S]*?)```/g)];
   for (const [, lang, body] of fences) {
     const code = body.trim();
     if (/^html$/i.test(lang) || /^<!doctype html/i.test(code) || /^<html[\s>]/i.test(code)) return code;
@@ -1231,7 +1231,7 @@ type ArtifactKind = "html" | "sheet" | "doc";
 function extractArtifact(content: string): { kind: ArtifactKind; content: string } | undefined {
   const html = extractHtmlArtifact(content);
   if (html) return { kind: "html", content: html };
-  const fences = [...content.matchAll(/```(\w*)\n([\s\S]*?)```/g)];
+  const fences = [...content.matchAll(/```(\w*)\r?\n([\s\S]*?)```/g)];
   for (const [, lang, body] of fences) {
     const code = body.trim();
     if (/^(csv|tsv|xlsx|excel)$/i.test(lang)) {

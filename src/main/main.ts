@@ -70,6 +70,22 @@ interface SessionContextBudget {
   compactedThrough?: number;
 }
 
+/**
+ * 主进程兜底：未处理的 Promise rejection 只记录，不让进程退出。
+ *
+ * 为什么需要：Node 15+ 对未处理 rejection 的默认行为是**终止进程**。
+ * 本应用有大量"后台异步"路径（任务池、定时器、事件回调、工具循环的重试），
+ * 一次漏写 `.catch()` 就会让软件凭空消失、且什么都不留下——本轮已实测修过
+ * 三起同类（abort 回调、SSE 超时、runPool）。
+ *
+ * 为什么**不**兜 `uncaughtException`：未处理的 rejection 通常只是"某个调用忘了接"
+ * （进程状态本身完好，继续跑是安全的）；而 uncaughtException 往往意味着状态已不一致，
+ * 强行吞掉只会把崩溃推迟到一个更难复现的地方。
+ */
+process.on("unhandledRejection", (reason) => {
+  console.error("[main] 未处理的 Promise rejection（已忽略，进程继续运行）：", describeError(reason, "未知错误"));
+});
+
 protocol.registerSchemesAsPrivileged([
   { scheme: "h3media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
   // 产物预览专用协议。存在的理由（实测确认）：srcdoc / blob: / data: 加载的 iframe 会

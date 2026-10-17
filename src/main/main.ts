@@ -441,7 +441,14 @@ function registerIpc(
   };
   const invalidateLlmSessions = () => {
     llm = undefined;
-    sessionServices.clear();
+    // **正在跑的会话实例不能丢**：普通对话的「停止」走的是 `sessionServices.get(id)?.abort()`
+    // （`sessionAborters` 只覆盖智能体路径）。用户在回复过程中去「连接设置」点一次保存
+    // 就会触发这里——`clear()` 之后那个实例再也找不回来，点「停止」毫无反应，
+    // 只能等这一轮自己结束（长回答可达数分钟）。
+    // 正在进行的实例保留到本轮结束（其 `.finally` 会自行清理），其余的照常丢弃。
+    for (const [sessionId, service] of sessionServices) {
+      if (!service.busy) sessionServices.delete(sessionId);
+    }
     // 换模型/换上游后，旧窗口的大小与基线全部作废——下一次对话从零重新锚定。
     sessionBudgets.clear();
     // world state 同理：换了模型就是换了一个"没见过这些环境事实"的对话方，必须重注入一遍。

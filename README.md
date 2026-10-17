@@ -122,7 +122,7 @@ npm run package:mac
 ## 当前验收状态
 
 - TypeScript 类型检查：通过
-- Vitest：16 项通过
+- Vitest：通过（数量随迭代增长，以 `npm test` 实际输出为准）
 - Vite 生产构建：通过
 - Electron 真实页面截图验收：通过
 - macOS arm64 DMG/ZIP：构建、签名校验并从打包 App 启动通过

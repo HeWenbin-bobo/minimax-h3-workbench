@@ -13,6 +13,11 @@
  */
 export async function downscaleDataUrl(dataUrl: string, maxEdge = 1568, quality = 0.85): Promise<string> {
   if (!dataUrl.startsWith("data:image/")) return dataUrl;
+  // **GIF 一律原样返回**。canvas 只能画出第一帧，重编码成 JPEG 会：
+  // ① 把动图悄悄变成静态图（用户上传的动图"不动了"，且没有任何提示）；
+  // ② 丢掉透明通道。而 GIF 通常只有几十到几百 KB，本来就不是撑爆 localStorage 的那类。
+  // 真正需要压的是手机照片（几 MB 的 JPEG/PNG），让它们走下面的缩放。
+  if (dataUrl.startsWith("data:image/gif")) return dataUrl;
   try {
     const image = await loadImage(dataUrl);
     const longEdge = Math.max(image.naturalWidth, image.naturalHeight);

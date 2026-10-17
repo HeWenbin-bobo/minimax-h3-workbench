@@ -84,3 +84,26 @@ describe("capSessions 容量裁剪", () => {
     expect(kept.some((s) => s.id === "a59")).toBe(true);
   });
 });
+
+// 回归：文字后紧跟表格时，表格不能被并进段落（否则整张表渲染成一堆竖线）。
+describe("markdown 表格紧随段落", () => {
+  it("段落后的表格仍渲染为 <table>", () => {
+    const html = render("下面是对比：\n| 名称 | 价格 |\n|---|---|\n| A | 1 |");
+    expect(html).toContain("<table>");
+    expect(html).toContain("<th>名称</th>");
+    expect(html).toContain("<td>A</td>");
+  });
+
+  it("段落本身仍保留", () => {
+    const html = render("下面是对比：\n| 名称 | 价格 |\n|---|---|\n| A | 1 |");
+    expect(html).toContain("下面是对比");
+  });
+
+  it("单元格里的转义竖线不被当作分隔符", () => {
+    // 注意用 \\| —— JS 字符串里 '\|' 会退化成 '|'，那样测的就不是转义了。
+    const html = render("| 组合 | 说明 |\n|---|---|\n| x\\|y | 含竖线 |");
+    // 两列表头 + 两列数据；若错切会出现第三列
+    expect((html.match(/<td>/g) || []).length).toBe(2);
+    expect(html).toContain("x|y");
+  });
+});

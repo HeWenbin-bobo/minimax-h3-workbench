@@ -100,9 +100,12 @@ export function renderMarkdown(text: string): ReactNode[] {
     }
 
     // 普通段落（连续非空非特殊行合并）
+    const isTableRow = (text: string) => /^\s*\|.*\|\s*$/.test(text);
     const paragraph: string[] = [line];
     index += 1;
-    while (index < lines.length && lines[index].trim() && !lines[index].trimStart().startsWith("```") && !/^\s*[-*]\s+/.test(lines[index]) && !/^\s*\d+[.、]\s+/.test(lines[index]) && !/^#{1,4}\s/.test(lines[index])) {
+    while (index < lines.length && lines[index].trim() && !lines[index].trimStart().startsWith("```") && !/^\s*[-*]\s+/.test(lines[index]) && !/^\s*\d+[.、]\s+/.test(lines[index]) && !/^#{1,4}\s/.test(lines[index]) && !isTableRow(lines[index])) {
+      // 表格行不能并入段落：否则"说明文字：\n| a | b |\n|---|---|" 会把整张表
+      // 当成段落正文（实测：紧随其后的表格完全不渲染，用户看到的是一堆竖线）。
       paragraph.push(lines[index]);
       index += 1;
     }

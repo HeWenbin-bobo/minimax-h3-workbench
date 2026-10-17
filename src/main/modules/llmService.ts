@@ -227,7 +227,7 @@ export interface AgentToolCallbacks {
   webSearch: (query: string) => Promise<string>;
   /** 视频生成工具：提交生成任务并返回给用户的说明文本。 */
   generateVideo: (params: { prompt: string; duration: number; count: number }) => Promise<string>;
-  /** 打开网页工具（open_page）：用应用自带 Chromium 渲染指定 URL 并返回 HTML，让模型能真正"打开浏览器"。 */
+  /** 打开网页工具（open_page）：用应用自带 Chromium 渲染指定 URL 并返回**可见正文**（innerText），让模型能真正"打开浏览器"。 */
   openPage: (url: string) => Promise<string>;
   /** 文件产物工具（create_file）：把内容保存为文件并返回给模型的确认文本。 */
   createFile: (params: { kind: "html" | "csv" | "tsv" | "md" | "xlsx"; name: string; content: string }) => Promise<string>;

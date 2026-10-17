@@ -147,13 +147,18 @@ export function parseBing(html: string): SearchResult[] {
   return items;
 }
 
-/** 解析搜狗结果页：<h3 class="vr-title"><a href="…">标题</a></h3>；链接常是 /link?url=… 相对形式，补成绝对地址。 */
+/**
+ * 解析搜狗结果页：`<h3 class="vr-title"><a href="…">标题</a></h3>`；链接常是 /link?url=… 相对形式。
+ *
+ * 与 parseBing 同理：class 必须宽容匹配（复合 class / 单引号 / 前置属性），
+ * 死认 `class="vr-title"` 在真实页面上会一条都解析不出（实测 probe-sogou：3/4 结构失败）。
+ */
 export function parseSogou(html: string): SearchResult[] {
   const items: SearchResult[] = [];
-  const block = /<h3 class="vr-title"[^>]*>([\s\S]*?)<\/h3>/g;
+  const block = /<h3[^>]*class=["'][^"']*\bvr-title\b[^"']*["'][^>]*>([\s\S]*?)<\/h3>/g;
   let match: RegExpExecArray | null;
   while ((match = block.exec(html)) !== null && items.length < MAX_RESULTS) {
-    const anchor = /<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/.exec(match[1]);
+    const anchor = /<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/.exec(match[1]);
     if (!anchor) continue;
     const href = anchor[1];
     items.push({

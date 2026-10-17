@@ -782,15 +782,16 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           // 收尾取缓冲区与消息内容的较长者：避免真实回复被空 content 覆盖（"发消息没回复"）。
           const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
           const failed = !event.ok && Boolean(event.message);
-          // 收尾把缓冲的整组任务并入分组结构（保持"哪几路是一起提交的"）。
+          // 收尾把缓冲里**尚未出现**的任务并入（保持"哪几路是一起提交的"）。
           //
-          // **必须去重**：onLlmTasks 里同一批任务既实时追加进 taskGroups、又写进缓冲，
-          // 这里再并一次就会挂两份——实测 2 个任务渲染成 4 张卡片、还撞了重复 React key
-          // （probe-dup-taskgroup）。缓冲存在的意义是"事件可能早于 React 提交"，即
-          // 那些**没进到 msg.taskGroups** 的批次；已在列表里的就跳过。
-          const existing = new Set((msg.taskGroups ?? []).map((group) => group.join(",")));
-          const pendingGroupsToAdd = pendingGroups.length && !existing.has(pendingGroups.join(",")) ? [pendingGroups] : [];
-          const mergedGroups = [...(msg.taskGroups ?? []), ...pendingGroupsToAdd];
+          // **必须按 id 去重**，不能按组去重：onLlmTasks 里同一批任务既实时追加进
+          // taskGroups、又写进 taskIdsBuffer，而缓冲区是**扁平累积**的——一轮里
+          // generate_video 被调用两次时它是 [a,b,c]，与任何单个组都对不上，
+          // 于是又多加一组（实测 groups=[2,1,3]、渲染 6 张卡片，probe-multibatch）。
+          // 缓冲存在的意义只是"事件可能早于 React 提交"；已出现过的 id 一律跳过。
+          const seenIds = new Set((msg.taskGroups ?? []).flat());
+          const missingIds = pendingGroups.filter((id) => !seenIds.has(id));
+          const mergedGroups = [...(msg.taskGroups ?? []), ...(missingIds.length ? [missingIds] : [])];
           return {
             ...msg,
             streaming: false,

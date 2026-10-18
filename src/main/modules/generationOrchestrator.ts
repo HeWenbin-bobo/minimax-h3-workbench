@@ -446,6 +446,15 @@ function validateRequest(request: GenerationRequest): void {
     // 必须在这里兜住——工作台 UI 会 clamp，但 tasks:submit 与智能体的 generate_video 工具
     // 都是可达入口（后者会把 4–15 秒原样传进来）。非法 seconds+preset 组合会真的发到云端，
     // **失败也照样扣卡密次数**（CLAUDE.md 记过这条）。
+    //
+    // **preset 本身也要过白名单**：下面所有分支都是"如果是已知预设就放行"，
+    // 未知值（拼错的 "tailframe"、空串、模型瞎编的名字）会一路落到
+    // `buildJobBody` 的 `preset = request.preset || ...` —— 原样发给云端。
+    // 云端拒绝时卡密**照样按次扣**，而用户看到的错误与自己填的内容毫无关系。
+    const RB_PRESETS = ["reference", "tail_frame", "easy_15", "easy_30", "flashvsr_upscale"];
+    if (request.preset !== undefined && !RB_PRESETS.includes(request.preset)) {
+      throw new Error(`瞬映 RB 预设无效：${request.preset}。可选：${RB_PRESETS.join(" / ")}。`);
+    }
     if (request.preset === "flashvsr_upscale") {
       if (!request.sourceVideoPath) throw new Error("视频变清晰模式必须选择源视频。");
       return;

@@ -764,6 +764,8 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
       // 密钥输入框只在**全部成功**后清空：中途失败时保留用户刚输入的内容，
       // 否则他得重新贴一遍（而失败原因可能只是某个通道暂时不可用）。
       setApiKey(""); setSshPassword(""); setRbCardCode(""); setLlmKey(""); setSearchKey("");
+      // 刷新「是否已保存」状态，让占位文案从「尚未保存」变成「已保存…」。
+      refreshSecrets();
       onNotice("连接设置已安全保存");
     } catch (e) {
       onError(e);

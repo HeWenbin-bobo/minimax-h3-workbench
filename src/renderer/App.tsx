@@ -1712,8 +1712,18 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   );
   const current = visibleSessions.find((s) => s.id === activeId);
   // 当前会话被删除/过滤时自动落到列表第一个。
+  //
+  // **落位时要按"切会话"同一套清理**：这条路径绕过了 `switchSession()`，
+  // 不清理的话，在 A 里写了一半的文字/选好的图片会跟着落到 B——
+  // 用户看到的是 B 的气泡，点发送却把 A 的草稿发了出去（与 switchSession 那处同类串台）。
   useEffect(() => {
-    if (activeId && !visibleSessions.some((s) => s.id === activeId)) setActiveId(visibleSessions[0]?.id || "");
+    if (activeId && !visibleSessions.some((s) => s.id === activeId)) {
+      setActiveId(visibleSessions[0]?.id || "");
+      setInput("");
+      setAttachments([]);
+      setPlanNext(false);
+      setVideoRequest((current) => (current.prompt ? { ...current, prompt: "" } : current));
+    }
   }, [visibleSessions, activeId]);
   function deleteSession(session: PlaygroundSession) {
     // 正在生成时不允许删除（否则流事件会写进已被删掉的会话）。但必须给反馈——

@@ -329,21 +329,31 @@ export class RbAdapter implements GenerationAdapter {
       // 旧实现只认 succeeded：任务早已生成完成（has_video=true）却永远匹配不上，界面卡在"正在生成 92%"，
       // 成片永远不下载——卡密已扣、结果拿不到。这里把两种写法都收下。
       const isDone = status === "succeeded" || status === "done" || status === "success" || status === "completed";
+      // 提取/转码等"生成后处理"阶段：属进行中而非失败。
+      // **必须记住它并在下面的统一进度上报里沿用**，否则紧接着的
+      // `onProgress("running", …, "瞬映 RB 正在生成")` 会把它当场覆盖——
+      // 用户永远看不到"正在提取结果"，只会以为还在采样。
+      const postProcessing = status === "extracting" || status === "decoding" || status === "processing";
+      // "已完成但视频还没就绪（转码中）"也是一种后处理：下面同样不能用 running 覆盖。
+      let decoding = postProcessing;
       if (isDone) {
         if (hasVideo || payload.video_url || payload.videoUrl) {
           return { videoUrl: payload.video_url ?? payload.videoUrl };
         }
         // 已完成但视频尚未就绪（转码中）：继续轮询。
+        decoding = true;
         onProgress("decoding", Math.min(92, progress), "视频转码中");
       } else if (status === "failed" || status.includes("fail") || status.includes("error")) {
         // 兼容失败态的各种写法（failed / extract_failed …）：带服务端原文抛出，别再静默轮询。
         throw new Error(payload.error?.message || payload.message || `瞬映 RB 任务失败（状态：${payload.status || "unknown"}）`);
-      } else if (status === "extracting" || status === "decoding" || status === "processing") {
-        // 生成完成后的提取/转码阶段（官网状态机）：属进行中，不是失败。
+      } else if (postProcessing) {
         onProgress("decoding", Math.min(92, progress), "正在提取生成结果");
       }
       progress = Math.min(92, progress + 2);
-      onProgress("running", progress, status === "queued" ? "云端排队中" : "瞬映 RB 正在生成");
+      // 后处理阶段不要用 running 覆盖：沿用上面刚报的 decoding。
+      if (!decoding) {
+        onProgress("running", progress, status === "queued" ? "云端排队中" : "瞬映 RB 正在生成");
+      }
       await delay(5_000, signal);
     }
   }

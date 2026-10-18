@@ -175,14 +175,29 @@ export function parseSogou(html: string): SearchResult[] {
   while ((match = block.exec(html)) !== null && items.length < MAX_RESULTS) {
     const anchor = /<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/.exec(match[1]);
     if (!anchor) continue;
-    const href = anchor[1];
     items.push({
-      url: href.startsWith("/") ? `https://www.sogou.com${href}` : href,
+      url: resolveHref(anchor[1], "https://www.sogou.com"),
       title: stripHtml(anchor[2]),
       snippet: ""
     });
   }
   return items;
+}
+
+/**
+ * 把结果页里的 href 补成绝对 URL。
+ *
+ * 三种形态都要认（真实结果页都会出现）：
+ * - 绝对地址 `https://x`：原样返回；
+ * - **协议相对** `//x/y`：补 `https:`——**不能**按"以 / 开头"直接拼域名，
+ *   否则会变成 `https://www.sogou.com//x/y`（一个不存在的路径，用户点开 404）；
+ * - 站点相对 `/link?url=…`：与 base 拼接。
+ */
+function resolveHref(href: string, base: string): string {
+  const value = href.trim();
+  if (value.startsWith("//")) return `https:${value}`;
+  if (value.startsWith("/")) return `${base}${value}`;
+  return value;
 }
 
 /** 去标签 + 解常见实体（搜索结果标题/摘要里 &ensp; 等很常见）。 */

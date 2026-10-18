@@ -40,6 +40,13 @@ describe("parseSogou", () => {
     expect(items[0]).toEqual({ url: "https://www.sogou.com/link?url=abc123", title: "科技时事要闻", snippet: "" });
     expect(items[1].url).toBe("https://www.kj.cn/x");
   });
+
+  // 协议相对链接（//host/path）真实存在。旧实现按"以 / 开头"拼域名，
+  // 会得到 https://www.sogou.com//host/path —— 不存在的路径，用户点开 404。
+  it("协议相对链接补 https:，而不是拼到搜狗域名后面", () => {
+    const items = parseSogou(`<h3 class="vr-title"><a href="//example.com/a?b=1">标题</a></h3>`);
+    expect(items[0].url).toBe("https://example.com/a?b=1");
+  });
 });
 
 describe("searchWeb", () => {

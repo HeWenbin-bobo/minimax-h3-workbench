@@ -76,6 +76,13 @@ export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentRep
   const memoryKnown = input.memoryTotalBytes > 0;
   const memoryAtLeast = (bytes: number) => !memoryKnown || input.memoryTotalBytes >= bytes;
 
+  // **显卡读不到时不要断言"硬件不行"**：`si.graphics()` 在 Windows 上走 WMI，
+  // 超时兜底会给一个空 `controllers`。此时 `nvidia.length === 0` 与"真的没有 NVIDIA 卡"
+  // 无法区分——但 D 级文案会写成「当前硬件低于量化实验配置」，
+  // 而这台机器可能只是一次 WMI 超时。改为如实说明"未能读取显卡信息"。
+  const gpuKnown = input.gpus.length > 0;
+  if (!gpuKnown) recommendations.push("未能读取显卡信息（可能是显卡驱动或系统管理服务异常），请确认后重新检测。 ");
+
   if (nvidia.length >= 2 && totalVram >= 48 * GiB && memoryAtLeast(256 * GiB)) {
     if (!memoryKnown) recommendations.push("未能读取内存总量，请自行确认至少 256GB 再开始。 ");
     if (!input.comfyReachable) recommendations.push("安装或启动 ComfyUI 0.30.0+，然后重新检测。 ");

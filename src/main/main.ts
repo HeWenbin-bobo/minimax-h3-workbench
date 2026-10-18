@@ -549,15 +549,19 @@ function registerIpc(
     return result.canceled ? undefined : result.filePaths[0];
   });
   handle("dialog:file", async (_event, kind: "image" | "video" | "key" | "attachment") => {
+    // 附件选择器的图片扩展名必须与 `attachment:read` 的图片白名单**逐项一致**：
+    // 那边收 `.png/.jpg/.jpeg/.webp/.gif/.heic/.heif`，这里漏了 gif 时，
+    // 选「图片与文本」过滤器根本看不到 .gif 文件（同一份能力，两处定义对不上）。
+    const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif", "heic", "heif"];
     const filters = kind === "image"
-      ? [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "heic", "heif"] }]
+      ? [{ name: "图片", extensions: IMAGE_EXTENSIONS }]
       : kind === "video"
         ? [{ name: "视频", extensions: ["mp4", "mov", "webm", "mkv"] }]
         : kind === "attachment"
           // 对话附件：图片 + 文本。此前这里用的是 "image"，而 attachment:read 明确支持
           // .txt/.md/.json/.csv/.srt/.vtt/.log —— 用户却根本选不到它们（能力存在但够不着）。
           ? [
-              { name: "图片与文本", extensions: ["png", "jpg", "jpeg", "webp", "heic", "heif", "txt", "md", "json", "csv", "srt", "vtt", "log"] },
+              { name: "图片与文本", extensions: [...IMAGE_EXTENSIONS, "txt", "md", "json", "csv", "srt", "vtt", "log"] },
               { name: "所有文件", extensions: ["*"] }
             ]
           : [{ name: "SSH 私钥", extensions: ["pem", "key", "ppk", "*"] }];

@@ -1029,9 +1029,21 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
   // 旧实现直接 `parsed.map(...)` 并靠外层 catch 兜底，只要数组中有一个 null/非对象
   // （半截写入、手改、旧版本遗留），`session.messages` 就抛错，外层 catch 返回 [] ——
   // 用户精心攒下的全部对话一次性清空（实测探针 sessions-bad-element 复现）。
-  return raw.filter((session): session is PlaygroundSession =>
-    Boolean(session) && typeof session === "object" && typeof (session as PlaygroundSession).id === "string"
-  ).map((session) => ({
+  //
+  // **id 必须去重**：重复 id 不是理论问题——并发写盘、手改、从别的窗口导入都可能造出来。
+  // 它带来的后果都在"按 id 操作"的地方：
+  // ① `key={session.id}` / `key={msg.id}` 重复 → React 复用错元素，列表里出现串行状态；
+  // ② 删除/恢复/patchLast 全是 `filter(s => s.id !== id)` / `map` → **一次操作作用到两条**。
+  // 保留**第一条**（磁盘顺序即写入顺序，先出现的通常才是用户真正在用的那条）。
+  const seenSessions = new Set<string>();
+  const unique = raw.filter((session): session is PlaygroundSession => {
+    if (!session || typeof session !== "object") return false;
+    const id = (session as PlaygroundSession).id;
+    if (typeof id !== "string" || seenSessions.has(id)) return false;
+    seenSessions.add(id);
+    return true;
+  });
+  return unique.map((session) => ({
     ...session,
     // `title` 必须归成字符串：它直接进 JSX（`{session.title || "新对话"}`）。
     // 若磁盘上是对象/数组，React 会抛 "Objects are not valid as a React child"
@@ -1060,8 +1072,19 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
     // 且 `key={msg.id}` 为 undefined，多条时报 key 重复）。
     // 与主进程 `safeMessages` 同一口径：必须是对象。
     messages: (Array.isArray(session.messages) ? session.messages : [])
-      .filter((msg): msg is PlaygroundMessage => Boolean(msg) && typeof msg === "object").map((msg) => {
-      // toolStatus 是更早版本的瞬态字段（现已改为 toolSteps）；旧数据可能残留，读取时一并剥离。
+      .filter((msg): msg is PlaygroundMessage => Boolean(msg) && typeof msg === "object")
+      // **消息 id 也要去重**：渲染端用 `key={msg.id}`，重复 id 会让 React 复用错元素
+      // （气泡内容/流式光标串到别的消息上）；`patchLast` 之类按位置操作虽不受影响，
+      // 但删除单条消息、定位 questions 卡片都按 id 匹配，重复时会同时命中两条。
+      // 缺 id 的也补一个（旧版本可能没写），否则 key 变成 undefined。
+      .map((msg, index) => {
+        const id = typeof (msg as { id?: unknown }).id === "string" && (msg as { id: string }).id
+          ? (msg as { id: string }).id
+          : `legacy-${session.id}-${index}`;
+        return { ...(msg as PlaygroundMessage), id };
+      })
+      .filter((msg, index, all) => all.findIndex((entry) => entry.id === msg.id) === index)
+      .map((msg) => {
       const { toolStatus: _dropped, toolSteps: _dropped2, ...rest } = msg as PlaygroundMessage & { toolStatus?: unknown };
       // content 必须是字符串：主进程的 normalizeHistory 会调 `.trim()`、上下文估算会调 `.match()`，
       // 非字符串（手改、旧版本写脏）会抛 "text.trim is not a function" 这类英文技术错误，

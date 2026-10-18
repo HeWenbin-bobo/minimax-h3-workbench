@@ -198,6 +198,35 @@ describe("normalizeStoredSessions 坏数据容错", () => {
     expect(result[0].messages[0].taskGroups).toEqual([["t1", "t2"]]);
     expect(result[0].messages[0].taskIds).toBeUndefined();
   });
+
+  // 重复 id 来自并发写盘 / 手改 / 从别的窗口导入。后果都在"按 id 操作"的地方：
+  // `key={session.id}` 让 React 复用错元素；删除/恢复是 `filter(s => s.id !== id)`，
+  // 一次操作会作用到两条。这里锁定"保留第一次出现的那个"。
+  it("重复的会话 id 被去重（保留第一条）", () => {
+    const result = normalizeStoredSessions([
+      { id: "dup", title: "第一条", messages: [] },
+      { id: "dup", title: "第二条", messages: [] },
+      { id: "ok", title: "正常", messages: [] }
+    ]);
+    expect(result.map((s) => s.id)).toEqual(["dup", "ok"]);
+    expect(result[0].title).toBe("第一条");
+  });
+
+  it("重复的消息 id 被去重；缺 id 的补一个（否则 React key 是 undefined）", () => {
+    const result = normalizeStoredSessions([{
+      id: "a",
+      messages: [
+        { id: "m1", role: "user", content: "甲" },
+        { id: "m1", role: "assistant", content: "乙" },
+        { role: "assistant", content: "无 id" }
+      ]
+    }]);
+    const ids = result[0].messages.map((m) => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // 重复的那条被丢掉：只剩 [m1, 无 id 那条补出来的 id]。
+    expect(ids[0]).toBe("m1");
+    expect(ids[1]).toMatch(/^legacy-/);
+  });
 });
 
 // content 类型兜底：主进程会调 `.trim()` / `.match()`，非字符串会抛英文技术错误。

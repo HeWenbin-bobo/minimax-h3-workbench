@@ -461,6 +461,12 @@ function validateRequest(request: GenerationRequest): void {
     }
     if (!request.prompt?.trim()) throw new Error("请输入视频描述。");
     if (request.preset === "easy_15" || request.preset === "easy_30") return; // 固定时长，不用校验
+    // **tail_frame 必须同时给首帧与尾帧**。界面上这两个选择器没有标「（可选）」
+    // （reference 的参考图明确标了），语义就是必填；而 `uploadRefs` 会按预设过滤，
+    // 缺图时 job body 里一个 images 都没有——云端必然拒绝，**却照样扣卡密次数**。
+    if (request.preset === "tail_frame" && (!request.firstFramePath || !request.lastFramePath)) {
+      throw new Error("首尾过渡模式必须同时选择首帧和尾帧。");
+    }
     if (![4, 6, 8].includes(request.duration)) {
       throw new Error("瞬映 RB 的参考图/首尾帧模式只支持 4、6、8 秒。");
     }

@@ -47,6 +47,13 @@ export function splitCsvLines(text: string): string[] {
  * 不能只看"全文含不含 \t"：CSV 单元格里出现制表符（"备注\t含tab"）会被误判成 TSV，
  * 整表列数错乱（实测 probe-delim-guess）。也不能两个都当分隔符（TSV 里的逗号会被切，probe-tsv-comma）。
  *
+ * **候选门槛：至少一半的行要能被切开**。
+ * 早先只看"有几行被切成多列"（>0 即可），于是**单列表格里某一个单元格带了制表符**
+ * 就会被判成 TSV——那张表整列被劈成两列（实测 probe-csv3：
+ * `标题 / 备注\t含tab / 第二行` 变成 2 列，而它本来只是 1 列文本）。
+ * 真正的 CSV/TSV 里绝大多数行都带分隔符，一半的门槛既挡住这种偶发误判，
+ * 又容得下"表头列数与数据行不一致"的脏数据。
+ *
  * 计分：引号内的分隔符不算数（parseCsvRow 已处理），所以对每种分隔符数"width > 1 的行数"。
  * 平手时取列数一致的那个，再平手取首行列数大的。
  */
@@ -54,14 +61,23 @@ function detectDelimiter(lines: string[]): string {
   const score = (delimiter: string) => {
     const widths = lines.map((line) => parseCsvRow(line, delimiter).length);
     const first = widths[0] ?? 1;
+    const separated = widths.filter((width) => width > 1).length;
     return {
-      separated: widths.filter((width) => width > 1).length,
+      separated,
       consistent: widths.every((width) => width === first),
-      first
+      first,
+      // 半数以上的行能切开才算"这张表真的用它当分隔符"。
+      viable: separated > 0 && separated * 2 >= lines.length
     };
   };
   const comma = score(",");
   const tab = score("\t");
+  // 只有一侧成立就用它。
+  if (comma.viable !== tab.viable) return comma.viable ? "," : "\t";
+  // **两侧都不成立 → 当作单列文本，选"切开行数更少"的那个**（平手用逗号）。
+  // 不能默认逗号：单列表格里某个单元格含逗号时（"价格是 100, 元"），
+  // 默认逗号会把那一行劈成两格，与上下行对不齐。
+  if (!comma.viable && !tab.viable) return tab.separated < comma.separated ? "\t" : ",";
   if (comma.separated !== tab.separated) return comma.separated > tab.separated ? "," : "\t";
   if (comma.consistent !== tab.consistent) return comma.consistent ? "," : "\t";
   return tab.first > comma.first ? "\t" : ",";

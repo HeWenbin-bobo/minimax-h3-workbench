@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ApiResponse, AppSettings, BackendKind, BackendTestResult, ChatMessage, ContextStatus, EnvironmentReport, GenerationMode, GenerationRequest, GenerationTask, LlmQuestion, LlmStreamEvent, LocalModelStatus, PlanStep, ResourceLink, UpdateInfo } from "../shared/types";
 import { LLM_PROVIDERS, MAX_PROMPT_LENGTH } from "../shared/types";
 import { parseCsvRows } from "../shared/csv";
@@ -1014,6 +1014,19 @@ function loadSessions(): PlaygroundSession[] {
   } catch { return []; }
 }
 
+/**
+ * 消息正文的 markdown 渲染（**必须 memo**）。
+ *
+ * 流式期间每个 chunk 都会 `setSessions` 改最后一条消息，但父组件重渲染时
+ * `<div className="pg-bubble">` 里的 `renderMarkdown(msg.content)` 会给**所有**
+ * 历史气泡重新跑一遍解析（含表格、代码块切分）。长会话（几十上百条）时
+ * 每帧都在做全量解析，明显拖慢流式观感。
+ * memo 之后，内容没变的历史消息直接复用上一次的元素树。
+ */
+const PgMarkdown = memo(function PgMarkdown({ content }: { content: string }) {
+  return <>{renderMarkdown(content)}</>;
+});
+
 function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
   // **只解析一次 localStorage**：此前 `useState(loadSessions)` 与
   // `useState(() => loadSessions().find(...))` 各读一遍，等于把整份会话
@@ -1793,7 +1806,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
               {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
-              <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <PgToolSteps steps={msg.toolSteps} running={Boolean(msg.streaming)} />}{msg.content ? renderMarkdown(msg.content) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
+              <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <PgToolSteps steps={msg.toolSteps} running={Boolean(msg.streaming)} />}{msg.content ? <PgMarkdown content={msg.content} /> : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
                 // 优先用主进程推来的已落盘产物（元数据，内容在磁盘上）。
                 // 回落到扫描正文围栏：兼容历史消息，以及模型没用工具、直接在回复里写文件内容的老路径。
                 if (msg.role === "assistant" && msg.artifacts?.length) {

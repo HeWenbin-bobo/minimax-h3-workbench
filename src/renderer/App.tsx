@@ -247,8 +247,21 @@ function ReadyPage({ report, busy, onDetect, onNavigate }: { report?: Environmen
   </section>;
 }
 
+/**
+ * 工作台表单草稿的模块级缓存。
+ *
+ * 为什么需要：`App` 用 `{page === "studio" && <StudioPage …/>}` 做页面切换，
+ * 切走时组件**整个卸载**，`useState` 里的表单内容随之蒸发。
+ * 用户写了一段很长的提示词、切去「模型下载」看一眼再回来，草稿就没了——
+ * 而输入框里还会重新填上示例提示词，他甚至不会意识到自己写的内容已经丢失。
+ * 草稿只存内存（关掉应用即丢），与"设置"是两回事，不适合进 settingsStore。
+ */
+let studioDraft: GenerationRequest | undefined;
+
 function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void }) {
-  const [request, setRequest] = useState<GenerationRequest>({ ...initialRequest, backend: settings.defaultBackend });
+  const [request, setRequest] = useState<GenerationRequest>(() => studioDraft ?? { ...initialRequest, backend: settings.defaultBackend });
+  // 每次变化都写回缓存（含后端/画幅等偏好），下次挂载直接复用。
+  useEffect(() => { studioDraft = request; }, [request]);
   const [submitting, setSubmitting] = useState(false);
   // 项目化：按 parentId 分组展示历次提交（最新在前），提交后自动切到新项目；支持多项目并行生成。
   const projects = useMemo(() => {

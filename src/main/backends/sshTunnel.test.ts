@@ -96,6 +96,27 @@ describe("SshTunnel 断线处理", () => {
     tunnel.close();
   });
 
+  // 旧连接的 'close' 是异步到达的（TCP FIN 要等一轮）。若监听器不认领自己的 client，
+  // 它会在**新隧道已经建好之后**把新隧道一起拆掉：用户看到"刚重连上又断了"，
+  // 下一次请求直接拿到「SSH 尚未连接」。
+  it("旧 client 迟到的 close 不会拆掉新隧道", async () => {
+    const tunnel = new SshTunnel(config, "pw");
+    await tunnel.start();
+    const old = FakeClient.instances[0];
+    tunnel.close(); // close() 里 client.end()，但真实 ssh2 的 'close' 事件稍后才到
+    const { url } = await tunnel.start();
+    expect(FakeClient.instances).toHaveLength(2);
+
+    old.emit("close");
+    old.emit("error", new Error("旧连接迟到的错误"));
+
+    // 新隧道未被拆：start() 直接复用现有端口，没有再建第三个 client。
+    const again = await tunnel.start();
+    expect(FakeClient.instances).toHaveLength(2);
+    expect(again.url).toBe(url);
+    tunnel.close();
+  });
+
   it("close 后 exec 立即报中文错误（不悬挂）", async () => {
     const tunnel = new SshTunnel(config, "pw");
     await tunnel.start();

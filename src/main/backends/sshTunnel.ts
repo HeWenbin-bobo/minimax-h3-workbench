@@ -76,8 +76,13 @@ export class SshTunnel {
     // 而连接中途断开时 ssh2 会 emit 'error'——没有常驻监听器的话，
     // EventEmitter 会把 emit 变成同步抛出，**整个主进程直接崩掉**。
     // 实测复现过：SSH 连接中途断开即命中。
-    this.client.on("error", () => this.drop());
-    this.client.on("close", () => this.drop());
+    // **监听器必须绑定到这一次的 client**：旧写法直接写 `() => this.drop()`，而 drop()
+    // 作用于对象自身的字段。旧连接被 close() 之后，它的 'close' 事件（TCP FIN 是异步到达的）
+    // 若在新隧道已经建好之后才到，就会把**新隧道**一起拆掉——用户看到"刚重连上又断了"，
+    // 而且下一次请求拿到的是"SSH 尚未连接"。只在字段仍指向本次 client 时才收尾。
+    const onDown = () => { if (this.client === client) this.drop(); };
+    client.on("error", onDown);
+    client.on("close", onDown);
     this.server = net.createServer((socket) => {
       this.sockets.add(socket);
       socket.on("close", () => this.sockets.delete(socket));

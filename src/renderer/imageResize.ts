@@ -11,13 +11,36 @@
  *
  * 无法解码时（极少数格式、损坏文件）**原样返回**：宁可不压，也不能把用户的内容丢掉。
  */
+
+/** 单张附件 data URL 的软上限（约 1.2MB）。超过它的 GIF 必须降级，否则会撑爆 localStorage。 */
+const MAX_DATA_URL_CHARS = 1_600_000;
+
 export async function downscaleDataUrl(dataUrl: string, maxEdge = 1568, quality = 0.85): Promise<string> {
   if (!dataUrl.startsWith("data:image/")) return dataUrl;
-  // **GIF 一律原样返回**。canvas 只能画出第一帧，重编码成 JPEG 会：
-  // ① 把动图悄悄变成静态图（用户上传的动图"不动了"，且没有任何提示）；
-  // ② 丢掉透明通道。而 GIF 通常只有几十到几百 KB，本来就不是撑爆 localStorage 的那类。
-  // 真正需要压的是手机照片（几 MB 的 JPEG/PNG），让它们走下面的缩放。
-  if (dataUrl.startsWith("data:image/gif")) return dataUrl;
+  // **GIF 通常原样返回**：canvas 只能画出第一帧，重编码成 JPEG 会
+  // ① 把动图悄悄变成静态图（用户上传的动图"不动了"）；② 丢掉透明通道。
+  // 而 GIF 一般只有几十到几百 KB，本来就不是撑爆 localStorage 的那类。
+  //
+  // **但超大 GIF 必须降级**：主进程允许 15MB，base64 后约 20MB——原样塞进会话，
+  // 之后所有会话的持久化都会失败（"本地存储空间不足"，重启整段对话丢失）。
+  // 这种情况下宁可退化成静态图（画质与体积优先），也不能让整个会话存不下去。
+  if (dataUrl.startsWith("data:image/gif")) {
+    if (dataUrl.length <= MAX_DATA_URL_CHARS) return dataUrl;
+    try {
+      const image = await loadImage(dataUrl);
+      const scale = Math.min(1, maxEdge / Math.max(image.naturalWidth, image.naturalHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const context = canvas.getContext("2d");
+      if (!context) return dataUrl;
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const next = canvas.toDataURL("image/jpeg", quality);
+      return next.length < dataUrl.length ? next : dataUrl;
+    } catch {
+      return dataUrl; // 解码不了就原样带回（宁可占空间，也不丢用户内容）
+    }
+  }
   try {
     const image = await loadImage(dataUrl);
     const longEdge = Math.max(image.naturalWidth, image.naturalHeight);

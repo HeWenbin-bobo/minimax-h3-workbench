@@ -152,8 +152,10 @@ async function scrapeSogou(query: string, signal?: AbortSignal): Promise<SearchR
 /**
  * 单条结果块的最大跨度（开标签结束 → 闭合标签之间的字符数）。
  *
- * 真实结构里一条结果的正文不会超过这个量级（Bing 的摘要与标题合计几百字符）。
- * 超出即视为"这不是一条完整结果"，直接跳过。
+ * 真实结构里一条结果的正文不会超过这个量级。实测（probe-blocksize7，本机直连：
+ * 查询「iPhone 价格」）Bing 前 10 条 `b_algo` 实测跨度为 1093–2951 字符，
+ * 搜狗标题块更短。4000 留了约 35% 余量：既容得下真实结果，又能把"注入一整页"
+ * 这种一眼假的块挡在外面。
  */
 const MAX_BLOCK_SCAN = 4_000;
 

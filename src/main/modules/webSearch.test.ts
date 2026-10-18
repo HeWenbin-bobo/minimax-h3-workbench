@@ -167,6 +167,16 @@ describe("parseBing class 匹配稳健性", () => {
   it("b_algoExtra 这类近似名不误匹配", () => {
     expect(parseBing(mk('class="b_algoxy"'))).toHaveLength(0);
   });
+
+  // Bing 的结果标题常带属性（`<h2 class="b_title">`）。死认裸 `<h2>` 会一条都解析不出，
+  // 而失败是**静默**的：上层只看到"未返回结果"，接着换搜狗或直接报"未取到结果"。
+  it("h2 带属性时仍能解析", () => {
+    const html = `<ol><li class="b_algo"><h2 class="b_title"><a href="https://x.com">标题</a></h2><p>摘要</p></li></ol>`;
+    const items = parseBing(html);
+    expect(items).toHaveLength(1);
+    expect(items[0].url).toBe("https://x.com");
+    expect(items[0].title).toBe("标题");
+  });
 });
 
 // 第三方搜索 API 的兼容实现质量参差：results 不是数组时会抛英文 TypeError，

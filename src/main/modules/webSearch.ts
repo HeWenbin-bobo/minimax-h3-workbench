@@ -158,7 +158,10 @@ async function scrapeSogou(query: string, signal?: AbortSignal): Promise<SearchR
  */
 export function parseBing(html: string): SearchResult[] {
   const items: SearchResult[] = [];
-  const block = /<li[^>]*class=["'][^"']*\bb_algo\b[^"']*["'][^>]*>[\s\S]*?<h2><a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a><\/h2>([\s\S]*?)<\/li>/g;
+  // `<h2>` 也必须宽容匹配：Bing 的结果标题常带属性（`<h2 class="b_title">`），
+  // 死认裸 `<h2>` 会一条都解析不出来——而这条链路的失败是**静默**的
+  // （上层只看到"未返回结果"，接着换搜狗或报"未取到结果"）。
+  const block = /<li[^>]*class=["'][^"']*\bb_algo\b[^"']*["'][^>]*>[\s\S]*?<h2[^>]*><a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a><\/h2>([\s\S]*?)<\/li>/g;
   let match: RegExpExecArray | null;
   while ((match = block.exec(html)) !== null && items.length < MAX_RESULTS) {
     const snippet = /<p[^>]*>([\s\S]*?)<\/p>/.exec(match[3]);

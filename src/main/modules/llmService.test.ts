@@ -339,3 +339,30 @@ describe("consumeSse 空闲超时", () => {
     expect(received).toEqual(["好"]);
   });
 });
+
+// `consumeSse` 的空闲超时只在**拿到响应头之后**才生效。上游若接受连接却永不回响应头
+// （网关卡死、中间层黑洞、服务半开），而这里传的是用户取消信号（本身永不到期），
+// 整轮对话会永久卡住——界面一直是"生成中"，用户不知道要等多久。
+// 实测（probe-chat-headers，本机起一个只接受连接不回头的 server）：8 秒后仍未落定。
+describe("chat 等响应头的超时", () => {
+  it("上游不回响应头时按超时抛中文错误（不永久挂住）", async () => {
+    // 模拟 fetch 卡在等响应头：只在 signal abort 时落定，否则永不 resolve。
+    vi.stubGlobal("fetch", vi.fn((_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")));
+      })
+    ));
+    const service = new LlmService({
+      baseUrl: "https://llm.test/v1",
+      apiKey: "k",
+      model: "m",
+      systemPrompt: "",
+      headerTimeoutMs: 50
+    });
+    const error = await service.chat([{ role: "user", content: "hi" }], false, () => {}).catch((e: Error) => e);
+    vi.unstubAllGlobals();
+    expect((error as Error).message).toContain("没有返回响应");
+    // 必须能被上层的 describeError 翻成中文，而不是透出 AbortError 英文名。
+    expect((error as Error).message).not.toMatch(/AbortError/);
+  });
+});

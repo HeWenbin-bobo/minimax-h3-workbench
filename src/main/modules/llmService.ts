@@ -18,6 +18,11 @@ export interface LlmServiceOptions {
   searchRenderHtml?: (url: string, signal?: AbortSignal) => Promise<string>;
   /** 智能体模式（chatAgent）使用的框架版本——由 updateChecker 独立检查更新。 */
   frameworkVersion?: string;
+  /**
+   * 「等响应头」的超时（默认 120 秒，与 `consumeSse` 的空闲超时同口径）。
+   * 只给单测缩短用——产品里不必配。
+   */
+  headerTimeoutMs?: number;
 }
 
 export type ChunkSender = (event: LlmStreamEvent) => void;
@@ -53,22 +58,49 @@ export class LlmService {
     this.controller = controller;
     try {
       const payload = await this.buildPayload(messages, webSearch, browserOnly, controller.signal);
-      const response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {})
-        },
-        body: JSON.stringify({
-          model: this.options.model,
-          messages: payload,
-          stream: true,
-          // 与智能体路径同一个理由：不设就用上游默认（实测该中转约 4096 tokens），
-          // 普通对话里让模型写长内容（长文档、长代码）同样会被静默截断。
-          max_tokens: 64_000
-        }),
-        signal: controller.signal
-      });
+      // **等响应头也要有超时**。
+      //
+      // `consumeSse` 的空闲超时只在**已经拿到响应头**之后才生效；上游若接受 TCP 连接
+      // 却永不回响应头（网关卡死、中间层黑洞、服务半开），`fetch` 会一直挂着，
+      // 而这里传的是用户取消信号（本身永不到期）——整轮对话永久卡住，
+      // 「停止」按钮点了也只是 abort 一个已经在等的 promise（其实能救，但用户不知道要等多久）。
+      // 实测（probe-chat-headers，本机起一个只接受连接不回头的 server）：8 秒后仍未落定。
+      //
+      // 单独计时而不是给 fetch 加 `AbortSignal.timeout`：那样会连**整个流式读取**一起限时，
+      // 长回答（几十秒到几分钟）会被误杀。拿到响应头就立刻 clear。
+      let headerTimedOut = false;
+      const HEADER_TIMEOUT_MS = this.options.headerTimeoutMs ?? 120_000; // 与 consumeSse 的空闲超时同口径
+      const headerTimer = setTimeout(() => {
+        headerTimedOut = true;
+        controller.abort();
+      }, HEADER_TIMEOUT_MS);
+      let response: Response;
+      try {
+        response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {})
+          },
+          body: JSON.stringify({
+            model: this.options.model,
+            messages: payload,
+            stream: true,
+            // 与智能体路径同一个理由：不设就用上游默认（实测该中转约 4096 tokens），
+            // 普通对话里让模型写长内容（长文档、长代码）同样会被静默截断。
+            max_tokens: 64_000
+          }),
+          signal: controller.signal
+        });
+      } catch (error) {
+        // 区分"我们等不到响应头"与"用户点了停止"——后者是正常收尾，不该报超时。
+        if (headerTimedOut) {
+          throw new Error(`服务商超过 ${HEADER_TIMEOUT_MS / 1000} 秒没有返回响应（地址可能填错、服务卡死或被网络中间层拦截）。请检查连接设置后重试。`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(headerTimer);
+      }
       if (!response.ok || !response.body) {
         const detail = await response.text().catch(() => "");
         throw new Error(`LLM 请求失败：${response.status} ${detail.slice(0, 200)}`);

@@ -34,7 +34,11 @@ export async function checkForUpdates(
   });
   if (!response.ok) throw new Error(`更新服务器返回 HTTP ${response.status}`);
 
-  const release = (await response.json()) as GithubRelease;
+  // **非 JSON 要明确报错**：GitHub 在限流/维护/被网络中间层劫持时会返回 HTML，
+  // 裸 `response.json()` 抛的是英文 `Unexpected token '<'`，原样透到
+  // 「检查更新」的提示里，用户完全看不懂。这里换成可执行的说明。
+  const release = (await readJson(response)) as GithubRelease | undefined;
+  if (!release) throw new Error("更新服务器返回的不是有效数据（可能被网络中间层拦截或接口限流），请稍后重试。");
   const latestVersion = normalizeVersion(release.tag_name);
   if (!latestVersion) throw new Error("更新服务器没有返回有效版本号");
   if (!release.html_url?.startsWith(RELEASE_PREFIX)) throw new Error("更新下载地址未通过安全校验");
@@ -76,6 +80,17 @@ export async function checkFrameworkUpdate(
   } catch (error) {
     return { bundledVersion, updateAvailable: false, message: error instanceof Error ? `框架更新检查失败：${error.message}` : "框架更新检查失败。" };
   }
+}
+
+/**
+ * 读 JSON，失败返回 undefined。
+ *
+ * GitHub / npm registry 在限流、维护、或被网络中间层劫持时会返回 HTML，
+ * 裸 `response.json()` 抛英文 `Unexpected token '<'`——这条会原样进到
+ * 「检查更新」的提示里，用户完全看不懂。
+ */
+async function readJson(response: Response): Promise<unknown | undefined> {
+  return response.json().catch(() => undefined);
 }
 
 /**

@@ -741,6 +741,15 @@ export async function consumeSse(
     return false;
   };
   try {
+    // **[DONE] 之后必须主动取消流**：`releaseLock()` 只放读锁，**不会断开底层连接**。
+    // 实测（probe-sse-done，本机起一个发完 `[DONE]` 但不断开连接的 SSE 服务）：
+    // 连跑 3 轮后仍有 3 条 socket 开着、一条都没关。部分中转正是这种形态
+    // （回答给完就静默挂着），长会话下来累积成连接泄漏，最终撞上游的连接数上限。
+    // 正常读到流结束（done=true）时不必取消——那时连接已经关了，取消是无害的空操作。
+    const finish = async (): Promise<boolean> => {
+      await reader.cancel().catch(() => undefined);
+      return received;
+    };
     for (;;) {
       // 给每次读取加空闲超时：`reader.read()` 在上游卡住时永不返回。
       // 超时后主动 cancel 流并抛中文错误，让调用方按"连接中断"处理并释放 busy。
@@ -773,14 +782,14 @@ export async function consumeSse(
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) {
-        if (handleLine(line)) return received;
+        if (handleLine(line)) return await finish();
       }
     }
     // 流结束：缓冲区里可能还剩**最后一行/半行**（服务端最后一帧之后不带换行）。
     // 旧实现直接丢弃 → 最后一帧内容丢失（实测复现：含单帧数据的流返回空内容）。
     // 先冲刷解码器的残留字节（多字节字符被切断时），再把残余当一行处理。
     buffer += decoder.decode();
-    if (buffer.trim() && handleLine(buffer)) return received;
+    if (buffer.trim() && handleLine(buffer)) return await finish();
     return received;
   } finally {
     reader.releaseLock();

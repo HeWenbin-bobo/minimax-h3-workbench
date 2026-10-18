@@ -65,6 +65,24 @@ describe("consumeSse", () => {
     expect(received).toEqual([{ seq: 1, delta: "x" }]);
   });
 
+  // 回归：收到 `[DONE]` 时必须**主动取消流**，不能只 `releaseLock()`。
+  // `releaseLock()` 只放读锁、不断底层连接——实测（probe-sse-done，本机起一个发完
+  // `[DONE]` 但不断开连接的 SSE 服务）连跑 3 轮后仍有 3 条 socket 开着、一条都没关。
+  // 部分中转正是这种形态（答完静默挂着），长会话会累积成连接泄漏。
+  it("收到 [DONE] 后取消流（不只释放读锁，避免连接泄漏）", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'));
+        // 刻意不 close：模拟上游在 [DONE] 之后仍保持连接。
+      },
+      cancel() { cancelled = true; }
+    });
+    const got = await consumeSse(stream, () => undefined);
+    expect(got).toBe(true);
+    expect(cancelled).toBe(true);
+  });
+
   // 回归：流结束时缓冲区里的最后一行不能丢。服务端最后一帧之后不一定带换行，
   // 旧实现在 done 时直接 return，那一帧内容整段丢失（实测：单帧流返回空内容 → "空回复"）。
   it("流末尾没有换行时，最后一帧仍被解析（不丢内容）", async () => {

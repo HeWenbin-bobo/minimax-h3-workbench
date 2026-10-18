@@ -96,6 +96,29 @@ describe("GenerationOrchestrator 回收站", () => {
     expect(files).toEqual(["C:\\out\\old.mp4"]);
     expect(orchestrator.listDeleted().map((t) => t.id)).toEqual(["t-fresh"]);
   });
+
+  // 回归：到期清理**不能**按 parentId 扩展成整组。
+  // 上一版的 `purgeTasks` 一律按组删：同一项目里 a1（8 天前删）过期时，
+  // 会把 a2（1 天前才删、还剩 6 天可恢复）一起抹掉——不可逆，且违背
+  // 「删除后 7 天内可恢复」的承诺。实测 probe-purge-expired 复现。
+  it("purgeExpired 不连带删除同组的未过期任务", async () => {
+    const expired = makeTask({ id: "a1", parentId: "groupA", deletedAt: new Date(Date.now() - 8 * 86_400_000).toISOString() });
+    const freshSibling = makeTask({ id: "a2", parentId: "groupA", index: 1, deletedAt: new Date(Date.now() - 1 * 86_400_000).toISOString() });
+    const { orchestrator } = makeOrchestrator([expired, freshSibling]);
+    await orchestrator.purgeExpired(vi.fn(async () => undefined));
+    expect(orchestrator.listDeleted().map((t) => t.id)).toEqual(["a2"]);
+  });
+
+  // 但 UI 的「彻底删除」仍是**整组**语义：界面上按项目成组展示，用户点的是那一组。
+  it("purgeTasks（UI 彻底删除）仍按组整组清除", async () => {
+    const a = makeTask({ id: "a1", parentId: "groupA", deletedAt: "2026-10-08T00:00:00.000Z" });
+    const b = makeTask({ id: "a2", parentId: "groupA", index: 1, deletedAt: "2026-10-08T00:00:00.000Z" });
+    const other = makeTask({ id: "b1", parentId: "groupB", deletedAt: "2026-10-08T00:00:00.000Z" });
+    const { orchestrator } = makeOrchestrator([a, b, other]);
+    const purged = await orchestrator.purgeTasks(["a1"]);
+    expect(purged.map((t) => t.id).sort()).toEqual(["a1", "a2"]);
+    expect(orchestrator.listDeleted().map((t) => t.id)).toEqual(["b1"]);
+  });
 });
 
 describe("GenerationOrchestrator 历史淘汰", () => {

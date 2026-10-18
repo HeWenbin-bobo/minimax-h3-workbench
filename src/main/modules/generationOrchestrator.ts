@@ -129,19 +129,47 @@ export class GenerationOrchestrator {
     return affected;
   }
 
-  async purgeTasks(taskIds: string[], deleteFile?: (path: string) => Promise<void>): Promise<GenerationTask[]> {
+  /**
+   * 彻底清除（不可逆）。
+   *
+   * @param expandGroups 是否按 parentId 扩展成"整组删除"。
+   *   - UI 的「彻底删除」传 true：界面上是按项目成组展示的，用户点的是那一整组；
+   *   - **7 天到期清理必须传 false**：它只挑出 `deletedAt` 已过期的任务，
+   *     若仍按组扩展，同一组里"1 天前才删、还剩 6 天可恢复"的任务会被一起抹掉。
+   *     实测（probe-purge-expired）：a1（8 天前删除）+ a2（1 天前删除）同组，
+   *     清理后 a2 也消失了——违背"删除后 7 天内可恢复"的承诺，且不可逆。
+   */
+  async purgeTasks(
+    taskIds: string[],
+    deleteFile?: (path: string) => Promise<void>,
+    expandGroups = true
+  ): Promise<GenerationTask[]> {
     const ids = new Set(taskIds);
     const affected: GenerationTask[] = [];
-    const groupIds = new Set(this.tasks.filter((t) => ids.has(t.id) && t.deletedAt).map((t) => t.parentId));
+    // 需要清除的任务。
+    // - 默认（UI「彻底删除」）：按 parentId **扩展成整组**——界面上是按项目成组展示的，
+    //   用户点的是那一整组，只删其中一路会留下半截项目；
+    // - `expandGroups = false`（7 天到期清理）：**只删点名的那些**。
+    const targets = expandGroups
+      ? (() => {
+          const groupIds = new Set(this.tasks.filter((t) => ids.has(t.id) && t.deletedAt).map((t) => t.parentId));
+          return this.tasks.filter((t) => t.deletedAt && groupIds.has(t.parentId));
+        })()
+      : this.tasks.filter((t) => t.deletedAt && ids.has(t.id));
+    const targetIds = new Set(targets.map((t) => t.id));
     // 同 delete/restore：写盘失败要还原内存列表（`this.tasks` 是整体替换的，回滚即赋回原引用）。
     // 注意**文件已经删掉了**，回滚记录只会留下"指向不存在文件的条目"——
     // 这里选择回滚记录而不是假装成功：任务记录留在回收站、用户能看见并可再点一次，
     // 比"记录消失但文件还在/或反过来"更容易解释（下次清理会重新尝试）。
     const before = this.tasks;
-    for (const task of this.tasks.filter((t) => groupIds.has(t.parentId) && t.deletedAt)) {
+    for (const task of targets) {
       if (task.outputPath && deleteFile) await deleteFile(task.outputPath).catch(() => undefined);
       this.tasks = this.tasks.filter((t) => t.id !== task.id);
       affected.push(task);
+    }
+    // 自检护栏：删掉的必须正是 targets（改这段逻辑时，这里先失败比静默多删好）。
+    if (affected.length !== targetIds.size) {
+      throw new Error(`内部错误：预期清除 ${targetIds.size} 条，实际 ${affected.length} 条。`);
     }
     try {
       await this.store.save(this.tasks);
@@ -182,8 +210,11 @@ export class GenerationOrchestrator {
     const now = Date.now();
     const expired = this.tasks.filter((t) => t.deletedAt && now - new Date(t.deletedAt).getTime() > GenerationOrchestrator.RETENTION_MS);
     const files = expired.map((t) => t.outputPath).filter((p): p is string => Boolean(p));
+    // **必须传 false**（不按组扩展）：这里只挑出真正过期的任务，
+    // 若按 parentId 扩展成整组，同一组里"1 天前才删、还剩 6 天可恢复"的任务会被一起抹掉。
+    // 实测（probe-purge-expired）：a1（8 天前删）+ a2（1 天前删）同组，清理后 a2 也消失了。
     if (expired.length > 0) {
-      await this.purgeTasks(expired.map((t) => t.id), deleteFile);
+      await this.purgeTasks(expired.map((t) => t.id), deleteFile, false);
     }
     return files;
   }

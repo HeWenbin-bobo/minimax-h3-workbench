@@ -155,16 +155,16 @@ function parseTableRow(line: string): string[] {
   return cells;
 }
 
-// 行内：`code`、**bold**、[text](https-url)。先切行内元素再拼纯文本。
+// 行内：`code`、**bold**、[text](url)。先切行内元素再拼纯文本。
 //
-// **只把 https 渲染成链接**（不是 `https?`）：主进程的 `setWindowOpenHandler` 与
-// `shell:openExternal` 都只放行 HTTPS（CLAUDE.md 的安全约束，不能放宽）。
-// 若这里把 `http://` 也渲染成 <a target="_blank">，用户看到可点击样式、点下去
-// 却被静默拒绝——"点了没反应"，比直接显示成纯文本更糟。
-// http 链接因此保留为普通文本（可复制），不伪装成可点击。
+// **http 链接仍要匹配，但只能渲染成纯文本**：
+// 主进程的 `setWindowOpenHandler` 与 `shell:openExternal` 都只放行 HTTPS
+// （CLAUDE.md 的安全约束，不能放宽），所以 http 渲染成 <a> 只会"点了没反应"。
+// 但**也不能不匹配**——那样 `[标题](http://…)` 会把方括号与网址原文显示出来，
+// 比不可点更糟。这里的做法：匹配 `https?`，http 只输出标题文字。
 function inline(text: string, keyBase: number): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https:\/\/[^)\s]+)\)/g;
+  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
   let last = 0;
   let match: RegExpExecArray | null;
   let key = keyBase * 1000;
@@ -175,7 +175,10 @@ function inline(text: string, keyBase: number): ReactNode[] {
     } else if (match[2] !== undefined) {
       nodes.push(<strong key={key++}>{match[2]}</strong>);
     } else if (match[3] !== undefined && match[4]) {
-      nodes.push(<a key={key++} href={match[4]} target="_blank" rel="noopener noreferrer">{match[3]}</a>);
+      // 只有 https 可点击；http 退化为纯文本标题（保留可读性，不伪装成可点）。
+      nodes.push(match[4].startsWith("https:")
+        ? <a key={key++} href={match[4]} target="_blank" rel="noopener noreferrer">{match[3]}</a>
+        : <span key={key++}>{match[3]}</span>);
     }
     last = pattern.lastIndex;
   }

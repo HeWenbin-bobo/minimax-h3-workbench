@@ -54,6 +54,15 @@ describe("方案块渲染（<proposed_plan> 契约）", () => {
     const html = render("这是一段提到 <proposed_plan> 字样的普通说明文字。");
     expect(html).not.toContain("md-plan");
   });
+
+  // 递归深度必须有上限：这段文本来自模型输出，可被提示注入诱导写出成百上千个开标签。
+  // 实测（probe-plan-depth，复刻同一段逻辑）1000 层直接栈溢出——
+  // 溢出发生在渲染期，表现是**整个游乐场页白屏**，且刷新后会立刻复发（坏文本存在历史里）。
+  it("深层嵌套的 <proposed_plan> 不栈溢出（超限按普通文本渲染）", () => {
+    const depth = 2_000;
+    const text = `${PLAN_BLOCK_OPEN}\n`.repeat(depth) + "正文" + `\n${PLAN_BLOCK_CLOSE}`.repeat(depth);
+    expect(() => render(text)).not.toThrow();
+  });
 });
 
 // 会话容量裁剪：回收站里的会话必须保留（"7 天内可恢复"的承诺不能被容量上限打破）。

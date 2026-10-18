@@ -14,7 +14,21 @@ import { PLAN_BLOCK_CLOSE, PLAN_BLOCK_OPEN } from "../shared/planMode";
  */
 const MAX_TABLE_ROWS = 200;
 
-export function renderMarkdown(text: string): ReactNode[] {
+/**
+ * 方案块的最大嵌套深度。
+ *
+ * `renderMarkdown` 对方案块正文是**递归渲染**的。这段文本来自模型输出，
+ * 而模型可能被提示注入诱导写出成百上千个 `<proposed_plan>` 行——
+ * 实测（probe-plan-depth，复刻同一段逻辑）1000 层就会栈溢出。
+ * 溢出发生在渲染进程的渲染期，表现是**整个游乐场页白屏**，且刷新后会立刻复发
+ * （历史消息里存着那段文本）。
+ *
+ * 真实方案块永远是单层的（提示词明确要求"一轮最多一个"），8 层足够宽松；
+ * 超出按普通文本继续渲染——宁可显示一堆尖括号，也不能白屏。
+ */
+const MAX_PLAN_DEPTH = 8;
+
+export function renderMarkdown(text: string, depth = 0): ReactNode[] {
   const nodes: ReactNode[] = [];
   const lines = text.split("\n");
   let index = 0;
@@ -26,7 +40,9 @@ export function renderMarkdown(text: string): ReactNode[] {
     // 方案块 <proposed_plan> … </proposed_plan>（计划模式定稿的显式契约）。
     // 必须单独处理：不处理的话这两个标签会作为普通段落的字面文本显示出来，
     // 用户看到一堆尖括号噪声，比不加标记更糟。
-    if (line.trim() === PLAN_BLOCK_OPEN) {
+    //
+    // **深度上限**：见 MAX_PLAN_DEPTH——超限时这段开标签当普通文本渲染。
+    if (line.trim() === PLAN_BLOCK_OPEN && depth < MAX_PLAN_DEPTH) {
       const body: string[] = [];
       index += 1;
       // 未闭合也当正文收下（流式途中会先出现开标签）：宁可先按方案渲染，
@@ -38,7 +54,7 @@ export function renderMarkdown(text: string): ReactNode[] {
       if (index < lines.length) index += 1; // 跳过闭标签
       // 递归渲染正文：块内仍是 markdown（标题/列表照常）。
       // 内层从 key 0 重新计数是安全的——与外层不同层级，React 只要求同级唯一。
-      nodes.push(<div className="md-plan" key={key++}>{renderMarkdown(body.join("\n"))}</div>);
+      nodes.push(<div className="md-plan" key={key++}>{renderMarkdown(body.join("\n"), depth + 1)}</div>);
       continue;
     }
 

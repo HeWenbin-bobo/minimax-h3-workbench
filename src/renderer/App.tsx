@@ -1388,6 +1388,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     setInput("");
     setAttachments([]);
     setPlanNext(false);
+    // 「生成视频」表单里的**描述文本**同样是本会话草稿：不清的话，在 A 里写好的
+    // 一段描述会跟着进入 B，在 B 点提交时发出去的却是 A 的内容（与输入框/附件同一类串台）。
+    // 后端/时长/数量是**用户偏好**，跨会话保留更合理，所以只清 prompt。
+    setVideoRequest((current) => (current.prompt ? { ...current, prompt: "" } : current));
   }
 
   function newSession() {
@@ -1401,6 +1405,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     setInput("");
     setAttachments([]);
     setPlanNext(false);
+    // 与 switchSession 同一套清理（含视频描述草稿），避免跨会话串台。
+    setVideoRequest((current) => (current.prompt ? { ...current, prompt: "" } : current));
   }
 
   async function pickAttachment() {

@@ -296,11 +296,28 @@ E2E test-01…test-10 逐个复跑全过（21/21、12/12、5/5、5/5、23/23、1
 **结论**：`npm test` **528 项 / 39 文件**；typecheck、build 通过；
 E2E test-01…test-10 逐个复跑全过；探针 `probe-preview`/`probe-plan-mode`/`probe-compaction`/
 `probe-preview-headers`/`probe-user-input`/`probe-codex-ui` 全过。
-365 笔仍未推送（等用户明确指示）。
 
-**新增测试（本批）**：SSRF 尾点 2 条 + 通配 DNS 5 条、browserFetch 守卫 4 条、
-SSE `[DONE]` 取消 1 条、等响应头超时 1 条、搜索正则退化 1 条 + 块长度上限 1 条、
-方案块递归 1 条、SSH accept 竞态 1 条、画幅负数 1 条、`bad port` 1 条、框架更新 HTML 1 条。
+> **已修正（2026-10-19）**：本批结束时写的「365 笔仍未推送」已过时。后续又修到 379 笔，
+> 经用户明确指示**推送 + squash 合并 + 发版 v0.3.0**（详见文件头的当前状态）。
+> 保留这句是为了说明当时的记录口径，不要按它判断仓库现状。
+
+**发布后才发现的四类问题**（都在 v0.3.0 的 squash 提交里，不在上面的表格中）：
+
+| 类型 | 具体问题 |
+|---|---|
+| **错误处理路径自己抛错** | `isContentFilterError` 用 `JSON.stringify(error.data)` 拼待匹配文本；错误体是循环引用 / BigInt / 抛错的 `toJSON` 时**自己炸掉**，一次本该"改写措辞重试"的内容拒绝变成未捕获异常。新增 `safeStringify()`（失败退 `String()`，再失败空串，**永不抛错**） |
+| **同一判定写了两处** | SSRF 那边修了 `localhost.` 尾点，`resolveChatPath` 里的 hostname 精确比对没跟着修 → `api.minimax.io.` 走错端点（404）。`assertPublicHost` 与 `resolveChatPath` 现在都先 `replace(/\.+$/, "")` |
+| **字段形状异常连坐整份报告** | `inspectEnvironment` 直接 `graphics.controllers.map(...)`。`systeminformation` 走 WMI，驱动异常时可能返回**缺字段的对象**（不是 reject）→ TypeError → 整份「开始配置检测」失败，而磁盘/内存/ComfyUI 其实都采到了。实测 `vram: "abc"` 还会让显存合计变 NaN、静默降级判级 |
+| **NaN 让"取最大"失效** | `pickVolumeForOutput` 的 `reduce` 用 `free > best` 比较，`fsSize()` 给出 `size: NaN` 时 `NaN > NaN` 恒 false → **原样保留第一个 NaN 卷**，界面报「剩余 NaN GB」。`freeOf` 对非有限值返回 `-Infinity` |
+
+同批还修了：`formatAnswers` 缺 `options` 时抛错（工具循环 resolve 路径上，会让整轮对话挂掉）、
+CSV 单列表格里一个制表符把整表劈成两列、会话/消息重复 id 未去重（一次删除作用到两条）、
+`renderMarkdown` 里 `<proposed_plan>` 无限递归、回收站 7 天清理误删同组未过期任务、
+world-state 时间按"跨天"节流（15:30 仍告诉模型"现在是 09:00"）、历史习惯提示因排序整条消失。
+
+**新增测试（本批）**：`bad port` 1、框架更新 HTML 1、等响应头超时 1、内容过滤不可序列化 1、
+选择题缺字段 1、CSV 分隔符 4、会话 id 去重 2、画幅负数 1、磁盘 NaN 2、browserFetch 守卫 4、
+SSRF 尾点 2 + 通配 DNS 5、SSH accept 竞态 1 + 迟到 close 1 + exec 超时 1。
 
 **探针自身的坑（三续）**：
 - 测「xlsx 预览输出多大」时，必须**同时**验证提示文案有没有被当成数据行——

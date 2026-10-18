@@ -1,8 +1,8 @@
 # Memory Index
 
 - [MiniMax H3 Workbench 项目](minimax-h3-workbench-project.md) — fork 仓库、自动更新发版流程（tag 即发布）、本机 RTX 5090 D 硬件
-- [游乐场分支状态](playground-branch-status.md) — **v0.2.1 已发布；本轮 3 笔修复未推送**（HEAD 69a26d7）；AI 协作资产（CLAUDE.md/记忆/探针）已入库；含换机 vibe coding 的脱敏约定
-- [Codex world state 两个陷阱](codex-world-state-channel.md) — **载体必须是对话片段（拼进 system 会被模型无视）、且每轮都要出现**；真实 key A/B 实测
+- [游乐场分支状态](playground-branch-status.md) — **v0.3.0 已发布**（2026-10-18）；`feature/agent-iteration` 379 笔已 squash 合入 `main` 并推送；549 项单测；含换机脱敏约定
+- [环境事实要走对话片段](codex-world-state-channel.md) — **环境事实拼进 system prompt 会被模型无视（实测 6 通道全失败），必须作为 user 片段注入**
 - [智能体差距在提示词工程](agent-prompt-engineering-leverage.md) — 模型对工具调用的信任远高于文字约定；产物能力必须工具化（create_file 实证）
 - [Codex harness 移植](codex-harness-port.md) — 8 笔提交落地：提示词分层/world state 差异注入/计划模式/历史规范化/每轮快照/错误恢复/token 层+暗色主题。含"建了模块≠接线了"的教训
 - [MiniMax 支持 Responses API](codex-responses-api-verified.md) — 实测可用、Codex 可直连；但二进制 318MB 故不打包；网关 auth-first，未认证探测会误判

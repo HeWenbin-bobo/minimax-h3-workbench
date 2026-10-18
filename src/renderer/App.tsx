@@ -750,6 +750,18 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
     setTesting(kind);
     // 同 detect()/update()：IPC reject 时 setTesting(undefined) 不执行 → 按钮永久卡在「测试中…」。
     try {
+      // **必须先用当前草稿落盘再测**。主进程的 `backend:test` 读的是已保存的设置，
+      // 而这张卡片上的地址/端口/目录都是本地 draft。不先保存的话，
+      // 用户改了地址再点「测试连接」，测到的永远是**旧地址**——
+      // 他以为新地址可用（或不可用），结论与刚填的内容无关。
+      // 与下面 `testLlm()` / `fetchModels()` 同一口径（它们早就这么做了）。
+      setSettings(await must(window.h3.updateSettings(draft)));
+      // 同一张卡片上刚输入的密钥也要先落盘：用户换了 Key 再点测试，
+      // 测到旧 Key 会给出"鉴权失败"这种与当前输入无关的结论。
+      // 规则与 save() 一致——**留空表示不修改**，只写非空值。
+      if (kind === "minimax" && apiKey) await must(window.h3.setSecret("minimaxApiKey", apiKey));
+      if (kind === "ssh" && sshPassword) await must(window.h3.setSecret("sshPassword", sshPassword));
+      if (kind === "rb" && rbCardCode) await must(window.h3.setSecret("rbCardCode", rbCardCode));
       const result = await window.h3.testBackend(kind);
       if (result.data) setResults((r) => ({ ...r, [kind]: result.data }));
       else onError(result.message);

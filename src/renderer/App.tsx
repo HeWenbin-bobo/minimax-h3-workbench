@@ -1810,6 +1810,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   function restoreSession(session: PlaygroundSession) {
     setSessions((all) => all.map((s) => s.id === session.id ? { ...s, deletedAt: undefined } : s));
     setActiveId(session.id);
+    // 从回收站恢复后会**切到该会话**，与 switchSession 同一套清理必须跟上：
+    // 否则在 A 里写了一半的文字/附件会跟着落到恢复出来的 B（跨会话串台）。
+    setInput("");
+    setAttachments([]);
+    setPlanNext(false);
+    setVideoRequest((current) => (current.prompt ? { ...current, prompt: "" } : current));
   }
   function purgeSession(session: PlaygroundSession) {
     setSessions((all) => all.filter((s) => s.id !== session.id));

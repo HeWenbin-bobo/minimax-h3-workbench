@@ -39,17 +39,31 @@ export async function inspectEnvironment(comfyUrl: string, outputDirectory?: str
     hasFfmpeg()
   ]);
 
-  const gpus: GpuInfo[] = graphics.controllers.map((gpu) => ({
-    vendor: gpu.vendor || "Unknown",
-    model: gpu.model || "Unknown GPU",
-    vramBytes: Number(gpu.vram || 0) * 1024 * 1024
+  // **每个字段都要按"可能缺失/类型不对"处理**。
+  //
+  // `withTimeout` 只兜住"超时"，兜不住"解析成功但形状不对"：
+  // `systeminformation` 在 Windows 上走 WMI，驱动异常/服务半死时可能返回
+  // **缺字段的对象**（而不是 reject）。实测（probe-graphics-shape）：
+  // `si.graphics()` 若没有 `controllers`，`graphics.controllers.map(...)` 直接抛
+  // `TypeError: Cannot read properties of undefined (reading 'map')`，
+  // 整份「开始配置检测」失败——用户只看到转圈后一条英文技术错误，
+  // 而磁盘/内存/ComfyUI 那几项其实都已经采到了。
+  const gpus: GpuInfo[] = (Array.isArray(graphics?.controllers) ? graphics.controllers : []).map((gpu) => ({
+    vendor: typeof gpu?.vendor === "string" && gpu.vendor ? gpu.vendor : "Unknown",
+    model: typeof gpu?.model === "string" && gpu.model ? gpu.model : "Unknown GPU",
+    // `gpu.vram` 单位是 MB。非数字（字符串/undefined/null）统一当 0——
+    // `Number("abc") * 1024 * 1024` 是 NaN，会让显存合计变成 NaN，
+    // 进而把 classifyEnvironment 的 `totalVram >= 48 GiB` 判成 false（静默降级）。
+    vramBytes: Number.isFinite(Number(gpu?.vram)) ? Math.max(0, Number(gpu?.vram)) * 1024 * 1024 : 0
   }));
   // Windows 下 fsSize 的 mount 形如 "C:"，没有 "/"；按输出目录所在卷（其次剩余空间最大卷）报告，避免错报 C 盘。
-  const volume = pickVolumeForOutput(fileSystems, outputDirectory);
+  const volumes = Array.isArray(fileSystems) ? fileSystems : [];
+  const volume = pickVolumeForOutput(volumes, outputDirectory);
   const diskFreeBytes = volume ? Number(volume.size - volume.used) : 0;
+  const memoryTotal = Number.isFinite(memory?.total) ? memory.total : 0;
   const capability = classifyEnvironment({
     gpus,
-    memoryTotalBytes: memory.total,
+    memoryTotalBytes: memoryTotal,
     diskFreeBytes,
     comfyReachable: comfy.reachable,
     comfyHasH3Nodes: comfy.hasH3Nodes,
@@ -58,12 +72,12 @@ export async function inspectEnvironment(comfyUrl: string, outputDirectory?: str
 
   return {
     checkedAt: new Date().toISOString(),
-    os: `${osInfo.distro} ${osInfo.release}`,
-    arch: osInfo.arch,
-    cpu: cpu.brand,
-    cpuCores: cpu.physicalCores || cpu.cores,
-    memoryTotalBytes: memory.total,
-    memoryAvailableBytes: memory.available,
+    os: `${osInfo?.distro ?? ""} ${osInfo?.release ?? ""}`.trim(),
+    arch: osInfo?.arch ?? process.arch,
+    cpu: typeof cpu?.brand === "string" ? cpu.brand : "",
+    cpuCores: Number.isFinite(cpu?.physicalCores) && cpu.physicalCores > 0 ? cpu.physicalCores : Number(cpu?.cores) || 0,
+    memoryTotalBytes: memoryTotal,
+    memoryAvailableBytes: Number.isFinite(memory?.available) ? memory.available : 0,
     diskFreeBytes,
     gpus,
     comfyReachable: comfy.reachable,

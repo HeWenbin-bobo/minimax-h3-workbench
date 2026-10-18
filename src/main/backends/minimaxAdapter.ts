@@ -304,9 +304,15 @@ async function dataUri(filePath: string): Promise<string> {
  */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
+    const abort = () => reject(new DOMException("任务已取消", "AbortError"));
+    // **已经中止的 signal 必须立刻返回**：`addEventListener("abort")` 只对
+    // 后续发生的 abort 生效，已经派发过的事件不会再触发监听器（实测确认）。
+    // 撤销可能在上一段 `await fetch()` 返回之后的任意时刻发生——此时轮到本函数，
+    // 事件早已派发完毕，监听器永远不会被调用，于是「停止」后仍要白等满 3–10 秒。
+    if (signal?.aborted) { abort(); return; }
     const onAbort = () => {
       clearTimeout(timer);
-      reject(new DOMException("任务已取消", "AbortError"));
+      abort();
     };
     const timer = setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);

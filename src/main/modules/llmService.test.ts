@@ -316,6 +316,49 @@ describe("非流式响应体取内容（空串不能被当成有内容）", () =
     vi.unstubAllGlobals();
     expect((error as Error).message).toContain("未返回内容");
   });
+
+  // 反向代理/网关出错时返回的是 **HTML 错误页**。旧实现把响应体原样截 200 字拼进
+  // 错误文案，实测（probe-http-error）界面上出现
+  // `LLM 请求失败：502 <!DOCTYPE html><html><head><title>502 Bad Gateway</title>…`
+  // ——整段标签糊在气泡里，用户既读不出信息也不知道该做什么。
+  describe("HTTP 失败文案", () => {
+    async function failureFrom(status: number, body: string, contentType: string): Promise<string> {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status, headers: { "Content-Type": contentType } })));
+      const service = new LlmService({ baseUrl: "https://llm.test/v1", apiKey: "k", model: "m", systemPrompt: "" });
+      const error = await service.chat([{ role: "user", content: "hi" }], false, () => {}).catch((e: Error) => e);
+      vi.unstubAllGlobals();
+      return (error as Error).message;
+    }
+
+    it("HTML 错误页不回显正文，只给状态码与可执行建议", async () => {
+      const text = await failureFrom(502, "<!DOCTYPE html><html><body><h1>502 Bad Gateway</h1></body></html>", "text/html");
+      expect(text).toContain("HTTP 502");
+      expect(text).toContain("稍后重试");
+      expect(text).not.toContain("<!DOCTYPE");
+      expect(text).not.toContain("<html");
+    });
+
+    it("JSON 错误体保留服务商自己的说明", async () => {
+      const text = await failureFrom(400, JSON.stringify({ error: { message: "model not found: m" } }), "application/json");
+      expect(text).toContain("HTTP 400");
+      expect(text).toContain("model not found: m");
+    });
+
+    it("MiniMax 风格的 base_resp.status_msg 也能取到", async () => {
+      const text = await failureFrom(400, JSON.stringify({ base_resp: { status_msg: "invalid api key" } }), "application/json");
+      expect(text).toContain("invalid api key");
+    });
+
+    it("401 给出「检查 API Key」的定向建议", async () => {
+      const text = await failureFrom(401, "", "text/plain");
+      expect(text).toContain("API Key");
+    });
+
+    it("超长说明被截断（不把整段堆栈糊给用户）", async () => {
+      const text = await failureFrom(500, JSON.stringify({ error: { message: "x".repeat(500) } }), "application/json");
+      expect(text.length).toBeLessThan(400);
+    });
+  });
 });
 
 describe("consumeSse 空闲超时", () => {

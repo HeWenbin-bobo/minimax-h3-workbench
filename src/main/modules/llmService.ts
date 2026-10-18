@@ -103,7 +103,7 @@ export class LlmService {
       }
       if (!response.ok || !response.body) {
         const detail = await response.text().catch(() => "");
-        throw new Error(`LLM 请求失败：${response.status} ${detail.slice(0, 200)}`);
+        throw new Error(httpFailureMessage(response.status, detail));
       }
       // 流式响应走 SSE 解析；服务商忽略 stream:true 返回完整 JSON 时，从非流式结构取内容。
       const contentType = response.headers.get("content-type") || "";
@@ -294,6 +294,50 @@ function firstNonEmpty(...values: Array<string | undefined>): string | undefined
     if (typeof value === "string" && value.trim()) return value;
   }
   return undefined;
+}
+
+/**
+ * HTTP 失败 → 给用户看的中文错误。
+ *
+ * 不能直接把响应体拼进去：反向代理/网关出错时返回的是 **HTML 错误页**，
+ * 实测（probe-http-error）上游 502 时界面显示的是
+ * `LLM 请求失败：502 <!DOCTYPE html><html><head><title>502 Bad Gateway</title>…`
+ * ——整段标签糊在气泡里，用户既读不出信息，也不知道该做什么。
+ *
+ * 这里按状态码给可执行的结论，只在响应体**看起来是 JSON**（即服务商自己的错误对象）
+ * 时才截取其中的 message。HTML / 空体一律不回显。
+ */
+function httpFailureMessage(status: number, body: string): string {
+  const hint = status === 401 || status === 403 ? "请到「连接设置」检查 API Key 是否正确、是否已过期。"
+    : status === 404 ? "请检查 API 地址与模型名（有些服务商的路径不是 /v1）。"
+      : status === 429 ? "请求过于频繁或额度已用尽，请稍后重试。"
+        : status >= 500 ? "服务商侧异常（可能是临时故障或网关错误），请稍后重试。"
+          : "请检查连接设置中的地址、Key 与模型名。";
+  const detail = extractApiErrorMessage(body);
+  return `LLM 请求失败（HTTP ${status}）。${hint}${detail ? `\n服务商说明：${detail}` : ""}`;
+}
+
+/** 从错误响应体里取服务商自己写的 message。非 JSON（HTML 错误页等）一律返回空串。 */
+function extractApiErrorMessage(body: string): string {
+  const text = String(body || "").trim();
+  if (!text || text.startsWith("<")) return "";
+  try {
+    const payload = JSON.parse(text) as {
+      error?: { message?: unknown } | string;
+      message?: unknown;
+      base_resp?: { status_msg?: unknown };
+    };
+    const candidates = [
+      typeof payload.error === "string" ? payload.error : payload.error?.message,
+      payload.message,
+      payload.base_resp?.status_msg
+    ];
+    const found = candidates.find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+    // 上限 200：服务商的 message 偶尔会把整段堆栈塞进来。
+    return found ? sliceSafe(found.trim(), 200) : "";
+  } catch {
+    return "";
+  }
 }
 
 // ---------- 智能体模式（Vercel AI SDK 工具循环，Codex/Claude Code 形态） ----------

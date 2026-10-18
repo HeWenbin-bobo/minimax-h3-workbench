@@ -1,5 +1,6 @@
 import { describeError } from "../../shared/errors";
 import type { ChatMessage, LlmStreamEvent } from "../../shared/types";
+import { sliceSafe } from "../../shared/text";
 import { searchWeb } from "./webSearch";
 
 export interface LlmServiceOptions {
@@ -323,19 +324,21 @@ function humanizeToolOutput(toolName: string, output: unknown): string {
 /** 工具调用入参的人类可读摘要：状态条展示用，别把原始 JSON 糊到用户脸上。 */
 function humanizeToolInput(toolName: string, input: unknown): string {
   if (input == null) return "";
-  if (typeof input === "string") return input.slice(0, 120);
+  // 全部走 `sliceSafe`：这些摘要会显示在气泡的步骤日志里（"→ 正在搜索：…"），
+  // 裸 slice 切在 emoji 代理对中间会渲染成 `�`（与渲染端那批截断同一处理）。
+  if (typeof input === "string") return sliceSafe(input, 120);
   if (typeof input === "object") {
     const record = input as Record<string, unknown>;
-    if (toolName === "web_search" && typeof record.query === "string") return record.query.slice(0, 120);
+    if (toolName === "web_search" && typeof record.query === "string") return sliceSafe(record.query, 120);
     if (toolName === "generate_video") {
-      const prompt = typeof record.prompt === "string" ? record.prompt.slice(0, 80) : "";
+      const prompt = typeof record.prompt === "string" ? sliceSafe(record.prompt, 80) : "";
       const duration = typeof record.duration === "number" ? `${record.duration} 秒` : "";
       const count = typeof record.count === "number" ? `${record.count} 路` : "";
       return [prompt, duration, count].filter(Boolean).join(" · ");
     }
-    return JSON.stringify(input).slice(0, 120);
+    return sliceSafe(JSON.stringify(input), 120);
   }
-  return String(input).slice(0, 120);
+  return sliceSafe(String(input), 120);
 }
 
 /** 一轮智能体对话的收尾统计。usage 供上下文压缩记账；拿不到时调用方回落到字符估算。 */

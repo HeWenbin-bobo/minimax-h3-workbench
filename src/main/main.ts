@@ -544,8 +544,17 @@ function registerIpc(
     return true;
   });
   handle("secret:has", (_event, name: SecretName) => settingsStore.hasSecret(name));
+  // 对话框要用主窗口做父级（模态、居中）。**不能用 `mainWindow!` 断言**：
+  // macOS 关窗后应用常驻、或窗口已销毁时，断言成非空只会在运行时抛
+  // "Object has been destroyed"，一条英文错误直接透到「选择目录失败」的提示里。
+  // Electron 的 `showOpenDialog` 有两个重载：带父窗口 与 不带父窗口，
+  // 这里按窗口是否可用选择对应重载（不要 `as BrowserWindow` 硬塞 undefined）。
+  const showOpen = async (options: Electron.OpenDialogOptions) => {
+    const owner = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+    return owner ? dialog.showOpenDialog(owner, options) : dialog.showOpenDialog(options);
+  };
   handle("dialog:directory", async () => {
-    const result = await dialog.showOpenDialog(mainWindow!, { properties: ["openDirectory", "createDirectory"] });
+    const result = await showOpen({ properties: ["openDirectory", "createDirectory"] });
     return result.canceled ? undefined : result.filePaths[0];
   });
   handle("dialog:file", async (_event, kind: "image" | "video" | "key" | "attachment") => {
@@ -565,7 +574,7 @@ function registerIpc(
               { name: "所有文件", extensions: ["*"] }
             ]
           : [{ name: "SSH 私钥", extensions: ["pem", "key", "ppk", "*"] }];
-    const result = await dialog.showOpenDialog(mainWindow!, { properties: ["openFile"], filters });
+    const result = await showOpen({ properties: ["openFile"], filters });
     return result.canceled ? undefined : result.filePaths[0];
   });
   handle("environment:inspect", async () => {

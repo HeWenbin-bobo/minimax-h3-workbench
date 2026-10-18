@@ -32,6 +32,8 @@ export function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo>();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installing, setInstalling] = useState(false);
+  // 安装包下载进度（0–100）。主进程推送 `update:progress`。
+  const [updateProgress, setUpdateProgress] = useState<number>();
   // 主题三态：只存渲染端 localStorage，不进 settingsStore（见 theme.ts 的说明）。
   const [theme, setTheme] = useState<ThemeChoice>(loadThemeChoice);
   useEffect(() => {
@@ -77,6 +79,11 @@ export function App() {
       if (item.deletedAt) return all.filter((task) => task.id !== item.id);
       return upsert(all, item);
     }));
+    // 安装包下载进度：不订阅的话侧栏只会一直显示"正在下载更新…"，
+    // 用户分不清是在走还是卡住了（100MB+ 的包按网速可能要几分钟）。
+    const offProgress = window.h3.onUpdateProgress((progress) => {
+      setUpdateProgress(Number.isFinite(progress?.percent) ? Math.max(0, Math.min(100, Math.round(progress.percent))) : undefined);
+    });
     window.h3.checkForUpdates().then((response) => {
       if (!response.data) return;
       setUpdateInfo(response.data);
@@ -93,7 +100,7 @@ export function App() {
         text: `智能体框架有新版本 v${response.data!.latestVersion}（当前 v${response.data!.bundledVersion}），更新应用时将一并升级。`
       });
     }).catch(() => undefined);
-    return () => { offTask(); };
+    return () => { offTask(); offProgress(); };
   }, []);
 
   // 删除/恢复后同步渲染端任务列表：删掉的从本地 state 移除，恢复的重新并入。
@@ -165,6 +172,7 @@ export function App() {
     if (installing) return;
     if (updateInfo?.updateAvailable) {
       setInstalling(true);
+      setUpdateProgress(undefined);
       setNotice({ text: "正在后台下载更新，完成后应用将自动重启安装…" });
       try {
         const response = await window.h3.downloadAndInstallUpdate();
@@ -173,6 +181,7 @@ export function App() {
         showError(error);
       } finally {
         setInstalling(false);
+        setUpdateProgress(undefined);
       }
       return;
     }
@@ -212,7 +221,8 @@ export function App() {
         <span>{themeLabel(theme)}</span>
       </button>
       <button className={`sidebar-update ${updateInfo?.updateAvailable ? "available" : ""}`} onClick={update} disabled={checkingUpdate || installing}>
-        <span className="status-dot" /><span><strong>{installing ? "正在下载更新…" : updateInfo?.updateAvailable ? "立即更新" : checkingUpdate ? "正在检查…" : "检查更新"}</strong><small>{installing ? "完成后自动重启" : updateInfo?.updateAvailable ? `v${updateInfo.latestVersion} 可安装` : updateInfo?.currentVersion ? `轻量版 v${updateInfo.currentVersion}` : "点击检查新版本"}</small></span>
+        <span className="status-dot" /><span><strong>{installing ? "正在下载更新…" : updateInfo?.updateAvailable ? "立即更新" : checkingUpdate ? "正在检查…" : "检查更新"}</strong><small>{installing ? (updateProgress === undefined ? "正在连接下载源…" : `已完成 ${updateProgress}%，完成后自动重启`) : updateInfo?.updateAvailable ? `v${updateInfo.latestVersion} 可安装` : updateInfo?.currentVersion ? `轻量版 v${updateInfo.currentVersion}` : "点击检查新版本"}</small></span>
+        {installing && updateProgress !== undefined && <span className="download-progress" style={{ width: "100%" }}><i style={{ width: `${updateProgress}%` }} /></span>}
       </button></aside>
     <main className="main-area">
       {page === "ready" && <ReadyPage report={report} busy={detecting} onDetect={detect} onNavigate={setPage} />}

@@ -21,7 +21,7 @@ import { mediaMime, parseByteRange } from "./modules/mediaRange";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import { describeError, isNetworkError } from "../shared/errors";
 import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmArtifactEvent, LlmDoneEvent, LlmPlanEvent, LlmQuestionEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, SecretName } from "../shared/types";
-import { downloadAndInstall } from "./modules/autoUpdater";
+import { downloadAndInstall, onDownloadProgress } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
 import { LlmService, chatAgent, type AgentQuestion, type AgentRunResult } from "./modules/llmService";
@@ -573,6 +573,15 @@ function registerIpc(
   handle("update:checkFramework", async () => {
     const { frameworkVersion } = await import("../shared/agentVersion.js");
     return checkFrameworkUpdate(frameworkVersion);
+  });
+  // 安装包下载进度转发到窗口。
+  //
+  // `autoUpdater` 的 `download-progress` 早就被封装成 `onDownloadProgress`，
+  // 界面也备好了 `.download-progress` 样式，但**一直没有订阅方**：
+  // 用户下载 100MB+ 安装包时只看到"正在下载更新…"，分不清在走还是卡住。
+  // 订阅一次即常驻（listener 集合由模块持有，窗口重建也不重复注册）。
+  onDownloadProgress((progress) => {
+    sendToWindow("update:progress", progress);
   });
   handle("update:download-install", async () => {
     await downloadAndInstall();

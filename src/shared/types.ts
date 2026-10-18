@@ -201,6 +201,13 @@ export interface UpdateInfo {
   publishedAt?: string;
 }
 
+/** 安装包下载进度（electron-updater 的 download-progress 事件）。 */
+export interface UpdateProgress {
+  percent: number;
+  transferredBytes: number;
+  totalBytes: number;
+}
+
 export interface LocalModelStatus {
   id: string;
   name: string;
@@ -300,6 +307,14 @@ export interface WorkbenchApi {
   answerLlmQuestion(requestId: string, answers: Record<string, string[]>): Promise<ApiResponse<boolean>>;
   /** 跳过整组问题：主进程立即放行工具循环（模型按最佳判断继续），不必等超时。 */
   skipLlmQuestion(requestId: string): Promise<ApiResponse<boolean>>;
+  /**
+   * 安装包下载进度（`downloadAndInstallUpdate` 期间推送）。
+   *
+   * 主进程早就把 electron-updater 的 `download-progress` 接出来了，界面也备好了
+   * `.download-progress` 样式，但一直**没有订阅方**——用户下载 100MB+ 安装包时
+   * 只能看到"正在下载更新…"，不知道是在走还是一动不动。
+   */
+  onUpdateProgress(listener: (progress: UpdateProgress) => void): () => void;
   onTaskUpdate(listener: (task: GenerationTask) => void): () => void;
 }
 

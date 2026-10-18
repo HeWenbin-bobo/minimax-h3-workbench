@@ -170,6 +170,19 @@ describe("parseBing class 匹配稳健性", () => {
 
   // Bing 的结果标题常带属性（`<h2 class="b_title">`）。死认裸 `<h2>` 会一条都解析不出，
   // 而失败是**静默**的：上层只看到"未返回结果"，接着换搜狗或直接报"未取到结果"。
+  // 结果页 HTML 来自网络（可能被劫持/注入）。两个 block 正则都用惰性跨距，
+  // 没有上限时是 O(n²)：2 万个不闭合的起始标记会把主进程卡住近一秒
+  // （实测 probe-regex-dos：parseBing 930ms / parseSogou 702ms，正常 700KB 结果页 1ms）。
+  it("大量不闭合起始标记时快速返回（不退化成正则回溯）", () => {
+    const started = Date.now();
+    const bing = parseBing(`<li class="b_algo">`.repeat(20_000) + "x".repeat(200_000));
+    const sogou = parseSogou(`<h3 class="vr-title">`.repeat(20_000) + "x".repeat(200_000));
+    expect(bing).toHaveLength(0);
+    expect(sogou).toHaveLength(0);
+    // 上限放宽到 1 秒只是防"退化"；正常实现应在几十毫秒内返回。
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it("h2 带属性时仍能解析", () => {
     const html = `<ol><li class="b_algo"><h2 class="b_title"><a href="https://x.com">标题</a></h2><p>摘要</p></li></ol>`;
     const items = parseBing(html);

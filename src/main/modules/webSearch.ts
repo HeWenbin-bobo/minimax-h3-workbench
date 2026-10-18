@@ -150,6 +150,59 @@ async function scrapeSogou(query: string, signal?: AbortSignal): Promise<SearchR
 }
 
 /**
+ * 单条结果块的最大跨度（开标签结束 → 闭合标签之间的字符数）。
+ *
+ * 真实结构里一条结果的正文不会超过这个量级（Bing 的摘要与标题合计几百字符）。
+ * 超出即视为"这不是一条完整结果"，直接跳过。
+ */
+const MAX_BLOCK_SCAN = 4_000;
+
+/**
+ * 按「开标签 + 闭合标签」切出成对的内容块，**单次线性扫描**。
+ *
+ * 为什么不用一个跨标签的正则：`<li class="b_algo">` 反复出现且永不闭合时，
+ * 正则会从**每个**起始位置各扫一遍到串尾，复杂度 O(n²)——实测 2 万个完整前缀
+ * 直接跑满 15 秒（probe-regex-dos2），主进程整窗无响应。加了跨距上限也没用，
+ * 因为代价来自"起始位置的数量 × 每次的扫描长度"，正则引擎不会跳过已试过的位置。
+ *
+ * 这里先一次性收集所有闭合位置，再顺着开标签向前配对，整体 O(n)；
+ * 单块内容再用**有界**正则解析（块本身已 ≤ MAX_BLOCK_SCAN）。
+ *
+ * @param openTag `"<li"` / `"<h3"` 这类开标签前缀（用来做 indexOf 定位）
+ * @param isTarget 判断这个开标签是不是我们要的那种（检查 class）
+ * @param closeTag 对应的闭合标签
+ */
+function collectBlocks(
+  html: string,
+  openTag: string,
+  isTarget: (openTagText: string) => boolean,
+  closeTag: string
+): string[] {
+  const closes: number[] = [];
+  for (let at = html.indexOf(closeTag); at >= 0; at = html.indexOf(closeTag, at + closeTag.length)) closes.push(at);
+  const blocks: string[] = [];
+  let cursor = 0;
+  let closeIndex = 0;
+  while (cursor < html.length) {
+    const open = html.indexOf(openTag, cursor);
+    if (open < 0) break;
+    const tagEnd = html.indexOf(">", open);
+    if (tagEnd < 0) break;
+    while (closeIndex < closes.length && closes[closeIndex] < tagEnd) closeIndex += 1;
+    const close = closes[closeIndex];
+    // 非目标标签（`<link>`、其它 class 的 li）或跨度过大：跳过这个开标签继续找。
+    if (!isTarget(html.slice(open, tagEnd + 1)) || close === undefined || close - tagEnd > MAX_BLOCK_SCAN) {
+      cursor = tagEnd + 1;
+      continue;
+    }
+    blocks.push(html.slice(tagEnd + 1, close));
+    closeIndex += 1;
+    cursor = close + closeTag.length;
+  }
+  return blocks;
+}
+
+/**
  * 解析 Bing 结果页：每条是 `<li class="b_algo …"><h2><a href>标题</a></h2>…<p>摘要</p>…</li>`。
  *
  * class 匹配必须宽容：Bing 实际输出常用**复合 class**（`b_algo b_algoBorder`）或单引号，
@@ -161,16 +214,24 @@ export function parseBing(html: string): SearchResult[] {
   // `<h2>` 也必须宽容匹配：Bing 的结果标题常带属性（`<h2 class="b_title">`），
   // 死认裸 `<h2>` 会一条都解析不出来——而这条链路的失败是**静默**的
   // （上层只看到"未返回结果"，接着换搜狗或报"未取到结果"）。
-  const block = /<li[^>]*class=["'][^"']*\bb_algo\b[^"']*["'][^>]*>[\s\S]*?<h2[^>]*><a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a><\/h2>([\s\S]*?)<\/li>/g;
-  let match: RegExpExecArray | null;
-  while ((match = block.exec(html)) !== null && items.length < MAX_RESULTS) {
-    const snippet = /<p[^>]*>([\s\S]*?)<\/p>/.exec(match[3]);
+  const blocks = collectBlocks(
+    html,
+    "<li",
+    (tag) => /^<li\b[^>]*class=["'][^"']*\bb_algo\b[^"']*["']/i.test(tag),
+    "</li>"
+  );
+  for (const block of blocks) {
+    if (items.length >= MAX_RESULTS) break;
+    // 块已被 collectBlocks 限长，这里的正则只在这段内跑，不会跨到全文。
+    const heading = /<h2[^>]*><a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a><\/h2>/.exec(block);
+    if (!heading) continue;
+    const snippet = /<p[^>]*>([\s\S]*?)<\/p>/.exec(block);
     // href 同样要补全：Bing 的真实结果里常出现 `/ck/a?…` 这类**站点相对**跳转链接，
     // 原样交给模型后 `open_page` 拿到的是没有协议的字符串（`z.string().url()` 直接拒），
     // 用户点开也无从下手。与 `parseSogou` 共用同一个 `resolveHref`。
     items.push({
-      url: resolveHref(match[1], "https://www.bing.com"),
-      title: stripHtml(match[2]),
+      url: resolveHref(heading[1], "https://www.bing.com"),
+      title: stripHtml(heading[2]),
       snippet: snippet ? stripHtml(snippet[1]).slice(0, 200) : ""
     });
   }
@@ -185,10 +246,15 @@ export function parseBing(html: string): SearchResult[] {
  */
 export function parseSogou(html: string): SearchResult[] {
   const items: SearchResult[] = [];
-  const block = /<h3[^>]*class=["'][^"']*\bvr-title\b[^"']*["'][^>]*>([\s\S]*?)<\/h3>/g;
-  let match: RegExpExecArray | null;
-  while ((match = block.exec(html)) !== null && items.length < MAX_RESULTS) {
-    const anchor = /<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/.exec(match[1]);
+  const blocks = collectBlocks(
+    html,
+    "<h3",
+    (tag) => /^<h3\b[^>]*class=["'][^"']*\bvr-title\b[^"']*["']/i.test(tag),
+    "</h3>"
+  );
+  for (const block of blocks) {
+    if (items.length >= MAX_RESULTS) break;
+    const anchor = /<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/.exec(block);
     if (!anchor) continue;
     items.push({
       url: resolveHref(anchor[1], "https://www.sogou.com"),

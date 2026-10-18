@@ -1505,6 +1505,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     // IPC 可能 reject（不只是 ok:false）；不兜住的话点「附件」毫无反应。
     try {
       const response = await window.h3.selectFile("attachment");
+      // `ok:false`（主进程打开对话框失败）也要报出来：只判 `data` 时与旧 bug 表现一致——
+      // 点了没反应，用户无从判断是没选中还是坏了（同连接页两个「选择」按钮那批）。
+      if (!response.ok) { onError(response.message || "无法打开文件选择器"); return; }
       if (!response.data) return;
       const payload = await window.h3.readAttachment(response.data);
       if (!payload.data) { onError(new Error(payload.message || "读取附件失败")); return; }

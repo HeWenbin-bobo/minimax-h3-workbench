@@ -230,7 +230,10 @@ function ReadyPage({ report, busy, onDetect, onNavigate }: { report?: Environmen
   const cards = [
     { name: "显卡", value: report?.gpus.map((g) => g.model).join(" / ") || "等待检测", sub: report?.gpus.map((g) => gb(g.vramBytes)).join(" / ") || "GPU 与显存" },
     { name: "内存", value: gb(report?.memoryTotalBytes), sub: report ? `可用 ${gb(report.memoryAvailableBytes)}` : "系统 RAM" },
-    { name: "磁盘", value: gb(report?.diskFreeBytes), sub: "模型与输出可用空间" },
+    // FFmpeg 主进程一直在检测（`hasFfmpeg`），README 与页面文案也都写着会检查，
+    // 但此前**界面上从不显示**。它关系到视频后处理（抽帧、转码），缺了要让人看见。
+    // 不单开一张卡（保持四卡布局与其既有断言），并入磁盘卡的副标题。
+    { name: "磁盘", value: gb(report?.diskFreeBytes), sub: report ? `模型与输出可用空间 · FFmpeg ${report.ffmpegAvailable ? "已安装" : "未检测到"}` : "模型与输出可用空间" },
     { name: "ComfyUI", value: report?.comfyReachable ? `已连接 ${report.comfyVersion || ""}` : report ? "未连接" : "等待检测", sub: report?.comfyHasH3Nodes ? (report.comfyHasH3Models ? "H3 节点与 5 个模型均已就绪" : `H3 节点正常，缺少 ${report.comfyMissingH3Models.length} 个模型`) : "检测版本、节点与模型" }
   ];
   const runtimeEstimates = report ? estimateLocalRuntime(report) : [];

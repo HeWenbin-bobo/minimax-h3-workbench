@@ -34,7 +34,11 @@ export function assertPublicHttpUrl(rawUrl: string): URL {
 }
 
 function assertPublicHost(url: URL): void {
-  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  // **先去掉尾点**：`localhost.` 是 FQDN 的根锚定写法，DNS 解析与 `localhost` 完全等价。
+  // 实测（probe-ssrf-trailing-dot）`http://localhost.:<port>/object_info` 能真的连上本机服务，
+  // 而旧实现只比对 `localhost` → 放行，模型（或提示注入）由此可读回 ComfyUI 控制面。
+  // `.internal.` / `.local.` / `.localhost.` 同理。
+  const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal") || host.endsWith(".local")) {
     throw new Error("该地址指向内网，已拒绝访问。");
   }

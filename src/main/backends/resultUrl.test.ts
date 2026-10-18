@@ -115,6 +115,26 @@ describe("assertPublicHttpUrl", () => {
     }
   });
 
+  // **尾点绕过**（实测 probe-ssrf-trailing-dot）：`localhost.` 是 FQDN 的根锚定写法，
+  // DNS 解析与 `localhost` 完全等价——实测 `http://localhost.:<port>/object_info`
+  // 真的连上了本机服务并读回内容，而旧实现只比 `localhost` 字面量，直接放行。
+  it("拒绝带尾点的内网域名（FQDN 根锚定写法）", () => {
+    for (const url of [
+      "http://localhost./object_info",
+      "http://localhost../object_info",
+      "http://foo.localhost./",
+      "http://metadata.google.internal./latest/meta-data/",
+      "http://printer.local./",
+      "https://localhost./a.mp4"
+    ]) {
+      expect(() => (url.startsWith("https:") ? assertSafeResultUrl(url) : assertPublicHttpUrl(url)), url).toThrow(/内网/);
+    }
+  });
+
+  it("尾点只去掉末尾的，公网域名照常放行", () => {
+    expect(assertPublicHttpUrl("http://example.com./a").hostname).toBe("example.com.");
+  });
+
   it("无效 URL 报中文错误", () => {
     expect(() => assertPublicHttpUrl("not a url")).toThrow(/无效/);
   });

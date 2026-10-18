@@ -725,6 +725,13 @@ function registerIpc(
   // 游乐场：流式对话（异步跑完，期间 llm:chunk/llm:done 推送）、中断、附件读取。
   // agent 模式走 AI SDK 工具循环（web_search / generate_video），普通聊天走原路径零回归。
   handle("llm:chat", async (_event, messages: ChatMessage[], webSearch: boolean, agent: boolean, sessionId: string, browserSearch: boolean, planMode?: "plan" | "execute") => {
+    // `planMode` 来自 IPC，类型没有保证：只写 `planMode ?? "none"` 时，
+    // 任何非法字符串（"PLAN"、拼错的 "exectue"、对象）都会一路传下去——
+    // `withPlanMode` 里 `mode === "plan"` 为假 → 走 `PLAN_EXECUTION_PROMPT`
+    // （"计划已确认，开始执行"），而 `artifactKinds` / `chatAgent` 的 planMode
+    // 又都按"不是 plan"处理。提示词与工具约束互相打架，模型行为不可预测。
+    // 在边界收敛成三态之一。
+    const planArg: "plan" | "execute" | undefined = planMode === "plan" ? "plan" : planMode === "execute" ? "execute" : undefined;
     // sessionId 由渲染端生成；缺失时退化成一次性的匿名会话（老调用方兼容），不再共用全局单例。
     // browserSearch=true 是「浏览器搜索」联网项：只用应用自带 Chromium 渲染抓取。
     // 与 webSearch 同开时浏览器渲染优先（实测渲染结果质量最稳）；只关掉浏览器搜索时才用 API/HTTP 链路。
@@ -809,7 +816,7 @@ function registerIpc(
       model: turnSettings.llm.model,
       browserOnly,
       webSearch: Boolean(webSearch),
-      planMode: planMode ?? "none",
+      planMode: planArg ?? "none",
       baseUrl: agent ? turnSettings.llm.baseUrl : "",
       systemPrompt: agent ? turnSettings.llm.systemPrompt : "",
       searchBaseUrl: agent ? turnSettings.searchApi.baseUrl || "" : "",
@@ -896,7 +903,7 @@ function registerIpc(
         systemPrompt: withPlanMode(buildSystemPrompt({
           custom: turn.value.systemPrompt,
           memoryHint: buildAgentMemoryHint(orchestrator.list())
-        }), planMode),
+        }), planArg),
         searchBaseUrl: turn.value.searchBaseUrl || undefined,
         searchApiKey: turn.value.searchApiKey
       };
@@ -1018,7 +1025,7 @@ function registerIpc(
             sendLlmTool({ tool, input, phase: "start", sessionId: session });
           }, (tool, summary) => {
             sendLlmTool({ tool, input: "", phase: "end", result: summary, sessionId: session });
-          }, planMode === "plan");
+          }, planArg === "plan");
           break;
         } catch (error) {
           if (controller.signal.aborted) { done({ ok: true }); return; }

@@ -45,7 +45,10 @@ export class TaskStore {
         // 任务卡片的 `prompt.slice()`、`retry` 的 `prompt.trim()` 同理。
         // 在读取边界修一次，比在每个下游各判一次便宜且不易漏。
         const prompt = typeof task.prompt === "string" ? task.prompt : "";
-        const progress = Number.isFinite(task.progress) ? task.progress : 0;
+        // 除了"是不是数字"，还要**夹回 0–100**：手改或旧版本写进 `progress: 500`
+        // 时有限性校验会放行，卡片上显示「500%」、进度条宽度也是 500%
+        // （溢出到容器外）。`update()` 对运行期做了夹取，磁盘这条路径漏了。
+        const progress = Number.isFinite(task.progress) ? Math.max(0, Math.min(100, task.progress)) : 0;
         // message 同理：任务卡片会 `task.message?.slice(0, 60)`——可选链只挡 null/undefined，
         // 数字照样抛 "task.message.slice is not a function"。
         const message = typeof task.message === "string" ? task.message : undefined;

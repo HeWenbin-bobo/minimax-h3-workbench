@@ -183,6 +183,18 @@ describe("parseBing class 匹配稳健性", () => {
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
+  // 上限不能误杀真实结果：Bing 的条目里常内联若干 `<link rel=stylesheet>`，
+  // 但正文（标题+摘要）只有几百字符。3000 字符的块必须照常解析；
+  // 超过 4000 的视为"不是一条结果"跳过（那是注入/陷阱页的特征）。
+  it("块内 3000 字符仍正常解析，超长块被跳过", () => {
+    const pad = "填充".repeat(1500); // 3000 字符
+    const ok = `<ol><li class="b_algo"><h2><a href="https://x.com">标题</a></h2><p>${pad}</p></li></ol>`;
+    expect(parseBing(ok)).toHaveLength(1);
+
+    const tooLong = `<ol><li class="b_algo"><h2><a href="https://x.com">标题</a></h2><p>${pad}${pad}</p></li></ol>`;
+    expect(parseBing(tooLong)).toHaveLength(0);
+  });
+
   it("h2 带属性时仍能解析", () => {
     const html = `<ol><li class="b_algo"><h2 class="b_title"><a href="https://x.com">标题</a></h2><p>摘要</p></li></ol>`;
     const items = parseBing(html);

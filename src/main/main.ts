@@ -1210,6 +1210,11 @@ function registerIpc(
     if (!insideRoot && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) {
       throw new Error("只能打开输出目录或 ComfyUI 模型目录中的位置。");
     }
+    // `showItemInFolder` 对**已不存在的路径是静默空操作**：渲染端拿到 ok:true、
+    // 界面上什么都没发生，用户以为按钮坏了（任务卡在结果被删/被移动后很常见）。
+    // 显式检查一次，把"文件不在了"如实说出来。
+    const exists = await stat(resolved).then(() => true).catch(() => false);
+    if (!exists) throw new Error("该文件已不存在（可能已被删除或移动）。");
     shell.showItemInFolder(resolved);
     return true;
   });

@@ -5,6 +5,15 @@ import { PLAN_BLOCK_CLOSE, PLAN_BLOCK_OPEN } from "../shared/planMode";
 // 覆盖语法：围栏代码块、行内代码、粗体、链接、有序/无序列表、标题、表格、方案块；其余按纯文本段落。
 // 聊天场景足够，不足再扩。
 
+/**
+ * 表格最多渲染多少数据行。
+ *
+ * 模型偶尔吐出成千上万行的表格（把整份 CSV 当 markdown 贴出来），
+ * 一次性铺开会把主线程占满（与预览面板 SheetTable 的 500 行上限同一理由）。
+ * 只渲染前这么多行，并在表下明确告知还剩多少行——不静默少给。
+ */
+const MAX_TABLE_ROWS = 200;
+
 export function renderMarkdown(text: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   const lines = text.split("\n");
@@ -64,12 +73,20 @@ export function renderMarkdown(text: string): ReactNode[] {
         rows.push(parseTableRow(lines[index]));
         index += 1;
       }
+      // **行数上限**：模型偶尔吐出成千上万行的表格，一次性铺开会把主线程占满
+      // （与预览面板 `SheetTable` 的 500 行上限同一理由）。只渲染前 MAX_TABLE_ROWS 行，
+      // 并明确告知还有多少行没显示——不静默少给。
+      const shown = rows.slice(0, MAX_TABLE_ROWS);
+      const hidden = rows.length - shown.length;
       nodes.push(
         <table key={key++}>
           <thead><tr>{header.map((cell, i) => <th key={i}>{inline(cell, key++)}</th>)}</tr></thead>
-          <tbody>{rows.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{inline(cell, key++)}</td>)}</tr>)}</tbody>
+          <tbody>{shown.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{inline(cell, key++)}</td>)}</tr>)}</tbody>
         </table>
       );
+      if (hidden > 0) {
+        nodes.push(<p key={key++} className="md-table-truncated">（表格共 {rows.length} 行，仅显示前 {MAX_TABLE_ROWS} 行）</p>);
+      }
       continue;
     }
 

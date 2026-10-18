@@ -504,6 +504,8 @@ button { cursor: pointer; }
 .pg-msg.assistant .pg-bubble table { border-collapse: collapse; margin: 8px 0; font-size: 11px; width: auto; max-width: 100%; display: block; overflow-x: auto; }
 .pg-msg.assistant .pg-bubble th, .pg-msg.assistant .pg-bubble td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; white-space: nowrap; }
 .pg-msg.assistant .pg-bubble th { background: rgba(122, 39, 255, 0.08); font-weight: 600; }
+/* 表格被截断时的提示（见 markdown.tsx 的 MAX_TABLE_ROWS）：弱化但可读，与表体区分开。 */
+.pg-msg.assistant .pg-bubble .md-table-truncated { margin: 2px 0 8px; font-size: 10px; color: var(--muted); }
 
 /* HTML 产物（对标 WorkBuddy）：聊天内文件卡片 + 右侧宽幅预览面板（标签页顶栏 + 操作按钮）。 */
 /* 产物文件卡片：浅色面。此前是 #141821 近黑底但没设文字色，继承气泡的 --ink 变成黑底黑字。 */

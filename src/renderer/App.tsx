@@ -6,6 +6,7 @@ import { estimateCloudCost, estimateLocalRuntime } from "../shared/capabilities"
 import { resolveDimensions } from "../shared/dimensions";
 import { describeError } from "../shared/errors";
 import { looksLikePlan, type PlanMode } from "../shared/planMode";
+import { sliceSafe } from "../shared/text";
 import { applyTheme, loadThemeChoice, saveThemeChoice, systemPrefersDark, themeLabel, type ThemeChoice } from "./theme";
 import { renderMarkdown } from "./markdown";
 import { downscaleDataUrl } from "./imageResize";
@@ -130,9 +131,9 @@ export function App() {
       if (!before) continue; // 首次见到的任务不算"刚刚完成"（历史加载 / 已在别的路径通知过）
       const entered = (status: GenerationTask["status"]) => before.status !== status && task.status === status;
       if (entered("succeeded")) {
-        notify(`视频生成完成：${task.prompt.slice(0, 40)}`);
+        notify(`视频生成完成：${sliceSafe(task.prompt, 40)}`);
       } else if (entered("failed")) {
-        notify(`生成失败：${task.prompt.slice(0, 40)}（${task.message?.slice(0, 60) || "未知错误"}）`);
+        notify(`生成失败：${sliceSafe(task.prompt, 40)}（${task.message ? sliceSafe(task.message, 60) : "未知错误"}）`);
       }
     }
     tasksRef.current = tasks;
@@ -418,7 +419,7 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
         const done = group.filter((t) => t.status === "succeeded").length;
         const active = activeProjectKey === key;
         return <button key={key} className={`project-tab${active ? " active" : ""}`} onClick={() => setActiveProjectId(key)}>
-          <strong>{group[0].prompt.slice(0, 18) || "未命名项目"}</strong>
+          <strong>{sliceSafe(group[0].prompt, 18) || "未命名项目"}</strong>
           <small>{running ? "生成中…" : `${done}/${group.length} 完成`}{group[0].category ? ` · ${group[0].category}` : ""}</small>
           {running && <i className="dot" />}
         </button>;
@@ -525,7 +526,7 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
       const ids = group.map((t) => t.id);
       const deletedAt = group[0].deletedAt || group[0].updatedAt;
       return <article key={group[0].parentId} className="trash-item">
-        <div><strong>{group[0].prompt.slice(0, 40) || "未命名项目"}</strong>
+        <div><strong>{sliceSafe(group[0].prompt, 40) || "未命名项目"}</strong>
           <small>{group.length} 条 · {daysLeft(deletedAt)} 天后自动清除</small></div>
         <div className="trash-actions">
           <button className="text-button" onClick={() => restore(ids)}>恢复</button>
@@ -1244,7 +1245,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         const steps = msg.toolSteps ?? [];
         const name = toolLabel(event.tool);
         const summary = (event.result ?? "完成").replace(/\s+/g, " ").trim();
-        const shortSummary = summary.length > 60 ? `${summary.slice(0, 60)}…` : summary;
+        const shortSummary = summary.length > 60 ? `${sliceSafe(summary, 60)}…` : summary;
         if ((event.phase ?? "start") === "end") {
           return { ...msg, toolSteps: [...steps, `✓ ${name}完成（${shortSummary}）`] };
         }
@@ -1512,7 +1513,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     let session = active;
     if (!session) {
       creatingSessionRef.current = true;
-      session = { id: crypto.randomUUID(), title: text.slice(0, 20) || "新对话", messages: [], createdAt: new Date().toISOString() };
+      session = { id: crypto.randomUUID(), title: sliceSafe(text, 20) || "新对话", messages: [], createdAt: new Date().toISOString() };
       setSessions((all) => [session as PlaygroundSession, ...all]);
       setActiveId(session.id);
     }
@@ -1526,7 +1527,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const planArg: PlanMode = planNext ? "plan" : undefined;
     if (planArg) planTurnRef.current.add(sessionId);
     const history: ChatMessage[] = [...(session.messages).filter((m) => !m.error && !m.notice).map((m) => ({ role: m.role, content: m.content, images: m.images })), { role: "user", content: userMsg.content, images: userMsg.images }];
-    setSessions((all) => all.map((s) => s.id === sessionId ? { ...s, title: s.messages.length === 0 && text ? text.slice(0, 20) : s.title, updatedAt: new Date().toISOString(), messages: [...s.messages, userMsg, assistantMsg] } : s));
+    setSessions((all) => all.map((s) => s.id === sessionId ? { ...s, title: s.messages.length === 0 && text ? sliceSafe(text, 20) : s.title, updatedAt: new Date().toISOString(), messages: [...s.messages, userMsg, assistantMsg] } : s));
     setInput(""); setAttachments([]); setPlanNext(false);
     setGeneratingIds((all) => all.includes(sessionId) ? all : [...all, sessionId]);
     streamBuffers.current.set(sessionId, "");
@@ -1667,10 +1668,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     }
     if (!result.ok) { onError(result.message); return; }
     const taskIds = result.data?.map((task) => task.id) ?? [];
-    const summary = `已提交视频生成（${backendLabel(videoRequest.backend)}${videoRequest.preset ? ` · ${rbPresetLabel(videoRequest.preset)}` : ""}）：${effectivePrompt.slice(0, 60)}${effectivePrompt.length > 60 ? "…" : ""}`;
+    const summary = `已提交视频生成（${backendLabel(videoRequest.backend)}${videoRequest.preset ? ` · ${rbPresetLabel(videoRequest.preset)}` : ""}）：${sliceSafe(effectivePrompt, 60)}${effectivePrompt.length > 60 ? "…" : ""}`;
     const assistantMsg: PlaygroundMessage = { id: crypto.randomUUID(), role: "assistant", content: summary, taskGroups: taskIds.length ? [taskIds] : undefined };
     const stamp = new Date().toISOString();
-    setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, updatedAt: stamp, messages: [...s.messages, { id: crypto.randomUUID(), role: "user" as const, content: `🎬 生成视频：${effectivePrompt.slice(0, 80)}` }, assistantMsg] } : s));
+    setSessions((all) => all.map((s) => s.id === session!.id ? { ...s, updatedAt: stamp, messages: [...s.messages, { id: crypto.randomUUID(), role: "user" as const, content: `🎬 生成视频：${sliceSafe(effectivePrompt, 80)}` }, assistantMsg] } : s));
     setShowVideoForm(false);
     onNotice(`已创建 ${videoRequest.count} 个生成任务`);
   }
@@ -1758,7 +1759,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   }
   function commitRename() {
     if (!renamingId) return;
-    const title = renameDraft.trim().slice(0, 40);
+    const title = sliceSafe(renameDraft.trim(), 40);
     if (title) setSessions((all) => all.map((s) => s.id === renamingId ? { ...s, title } : s));
     setRenamingId(undefined);
   }
@@ -1767,7 +1768,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [catSessionDraft, setCatSessionDraft] = useState("");
   function commitSessionCategory() {
     if (!catSessionId) return;
-    const normalized = catSessionDraft.trim().slice(0, 20);
+    const normalized = sliceSafe(catSessionDraft.trim(), 20);
     setSessions((all) => all.map((s) => s.id === catSessionId ? { ...s, category: normalized || undefined } : s));
     setCatSessionId(undefined);
   }
@@ -1869,7 +1870,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
                     taskGroups: (message.taskGroups ?? []).map((entry, index) => index === gi && !entry.includes(created.id) ? [...entry, created.id] : entry)
                   })
                 }));
-                onNotice(`已重新提交，新任务已加入本组（${created.prompt.slice(0, 20)}）`);
+                onNotice(`已重新提交，新任务已加入本组（${sliceSafe(created.prompt, 20)}）`);
               }} />)}</div>)}
             </div>)}
           <div ref={bottomRef} />
@@ -2259,7 +2260,7 @@ function PgToolSteps({ steps, running }: { steps: string[]; running: boolean }) 
   const callCount = steps.filter((step) => step.startsWith("→")).length;
   return <div className="pg-tool-steps-wrap">
     {!running && <button className="pg-tool-steps-toggle" onClick={() => setOpen((v) => !v)} title={expanded ? "收起执行过程" : "展开执行过程"}>
-      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {callCount || steps.length} 步工具调用<span className="pg-tool-steps-last">· {last.length > 40 ? `${last.slice(0, 40)}…` : last}</span>
+      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {callCount || steps.length} 步工具调用<span className="pg-tool-steps-last">· {last.length > 40 ? `${sliceSafe(last, 40)}…` : last}</span>
     </button>}
     {expanded && <div className="pg-tool-steps">{steps.map((step, i) => <div key={i} className="pg-tool-step">{step}</div>)}</div>}
   </div>;

@@ -116,9 +116,13 @@ export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentRep
   recommendations.push("如仍要强行本机运行，请先做单条 5 秒 720P 预检，并预留失败或内存溢出的可能。 ");
   return {
     grade: "D",
-    verdict: appleGpu
-      ? "本机不建议运行 MiniMax H3：Apple GPU 不属于当前验证的 NVIDIA CUDA 路径。"
-      : "本机不建议运行 MiniMax H3：当前硬件低于量化实验配置。",
+    // 显卡/内存读不到时**不能说"硬件低于配置"**——那是把"没读到"当成"不够"。
+    // 上面已经补了一条"未能读取显卡信息"的建议，结论若仍写硬件不行，两者互相矛盾。
+    verdict: !gpuKnown
+      ? "暂时无法判断本机是否适合运行 MiniMax H3：未能读取到显卡信息，请重新检测或改用云 API。"
+      : appleGpu
+        ? "本机不建议运行 MiniMax H3：Apple GPU 不属于当前验证的 NVIDIA CUDA 路径。"
+        : "本机不建议运行 MiniMax H3：当前硬件低于量化实验配置。",
     recommendations
   };
 }

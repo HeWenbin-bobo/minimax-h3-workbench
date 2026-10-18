@@ -137,3 +137,31 @@ describe("classifyEnvironment 内存读数未知", () => {
     expect(result.grade).toBe("D");
   });
 });
+
+// 显卡读不到（`si.graphics()` 走 WMI、超时兜底返回空列表）时，
+// 结论不能写成「当前硬件低于量化实验配置」——那是把"没读到"当成"不够"。
+describe("classifyEnvironment 显卡读数未知", () => {
+  it("读不到显卡时不给出「硬件低于配置」的结论，并提示重新检测", () => {
+    const result = classifyEnvironment({
+      gpus: [],
+      memoryTotalBytes: 64 * 1024 ** 3,
+      diskFreeBytes: 100 * 1024 ** 3,
+      comfyReachable: false,
+      comfyHasH3Nodes: false
+    });
+    expect(result.verdict).not.toContain("低于量化实验配置");
+    expect(result.verdict).toContain("未能读取到显卡信息");
+    expect(result.recommendations.some((r) => r.includes("未能读取显卡信息"))).toBe(true);
+  });
+
+  it("有显卡读数但确实不达标时仍给「硬件低于配置」", () => {
+    const result = classifyEnvironment({
+      gpus: [{ vendor: "Intel", model: "UHD 630", vramBytes: 1024 ** 3 }],
+      memoryTotalBytes: 16 * 1024 ** 3,
+      diskFreeBytes: 100 * 1024 ** 3,
+      comfyReachable: false,
+      comfyHasH3Nodes: false
+    });
+    expect(result.verdict).toContain("当前硬件低于量化实验配置");
+  });
+});

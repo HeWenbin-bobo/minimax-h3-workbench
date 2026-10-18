@@ -118,7 +118,12 @@ async function searchViaApi(base: string, apiKey: string | undefined, query: str
       title: str(item.title) || str(item.name),
       url: str(item.url),
       snippet: str(item.snippet) || str(item.content)
-    }));
+    }))
+    // **必须自己截断**：请求体里虽然带了 `count: MAX_RESULTS`，但第三方兼容实现
+    // 未必遵守（有的固定返回 20/50 条）。而其余三条路径（浏览器渲染 ×2、免 key 抓取 ×2）
+    // 都做了 slice——漏掉这一条时，结果会被全量拼进 system prompt，
+    // 白白占用上下文预算、还可能把模型引向一堆低相关结果。
+    .slice(0, MAX_RESULTS);
 }
 
 /** 取字符串字段；非字符串一律当空（避免把数字/对象塞进标题后渲染出 "[object Object]"）。 */

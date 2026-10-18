@@ -1105,7 +1105,10 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   sessionsRef.current = sessions;
   const threadRef = useRef<ChatMessage[]>([]);
   useEffect(() => {
-    if (!activeId) return;
+    // 没有活动会话时要**清空**占用：直接 return 的话，把最后一个会话删掉后
+    // 顶部仍显示上一个会话的「📦 上下文 59%」（那个数字属于已经不存在的会话）。
+    // 与下面 `if (!history.length)` 同一理由，只是这条路径此前漏了。
+    if (!activeId) { setContextStatus(undefined); return; }
     let cancelled = false;
     const probe = () => {
       // notice 是纯界面提示（如"上下文已压缩"），不能进历史——否则模型会把系统提示当自己说过的话复述。

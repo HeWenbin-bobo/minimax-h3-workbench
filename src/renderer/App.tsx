@@ -1999,9 +1999,14 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
   const [loaded, setLoaded] = useState(false);
   const needsContent = artifact.kind !== "html" && !artifact.content;
   useEffect(() => {
+    // **换产物时必须清掉上一份的读取结果**：组件是按位置复用的（同一 <PgPreviewPanel>），
+    // 只清 loaded / readError 不够——`content = artifact.content || diskContent` 里的
+    // diskContent 仍是上一份文件的内容，读新文件的几百毫秒里面板会显示**旧产物**，
+    // 用户以为点错了。
+    setDiskContent(undefined);
+    setReadError(undefined);
     if (!needsContent) { setLoaded(true); return; }
     let cancelled = false;
-    setReadError(undefined);
     setLoaded(false);
     void window.h3.readArtifactText(artifact.path).then((r) => {
       if (cancelled) return;

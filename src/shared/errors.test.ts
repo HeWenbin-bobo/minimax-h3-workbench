@@ -28,6 +28,17 @@ describe("describeError", () => {
     expect(text).toContain("请检查地址");
   });
 
+  // fetch 对被禁端口（WHATWG bad port 清单）直接拒绝，抛的是**无 code**、
+  // cause.message 为 "bad port" 的 TypeError。实测（probe-badport）未收录时界面显示
+  // 「网络错误 bad port」——中英混排，且用户不知道是自己填的端口有问题。
+  it("被禁端口（bad port）给出中文提示，不透出英文 bad port", () => {
+    const error = new Error("fetch failed");
+    (error as { cause?: unknown }).cause = new Error("bad port");
+    const text = describeError(error, "兜底");
+    expect(text).toContain("端口");
+    expect(text).not.toContain("bad port");
+  });
+
   // 地址漏写 http:// 时 undici 抛 `TypeError: Failed to parse URL from abc/v1/models`，
   // cause 是 "Invalid URL"。旧实现会拼成「网络错误 Invalid URL。请检查地址、端口与服务是否已启动。」
   // ——中英混排，还把用户引向"服务没起来"，而真实原因是地址格式不对。

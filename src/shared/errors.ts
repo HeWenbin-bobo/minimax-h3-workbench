@@ -48,7 +48,11 @@ const STREAM_BROKEN_MESSAGES: Record<string, string> = {
   terminated: "连接在传输过程中被对端关闭",
   "premature close": "连接被提前关闭",
   "other side closed": "连接被对端关闭",
-  aborted: "连接被中止"
+  aborted: "连接被中止",
+  // fetch 对被禁端口（1/7/9/11/13/…/6667 等，WHATWG fetch 的 bad port 清单）直接拒绝，
+  // 抛的是无 code、cause.message 为 "bad port" 的 TypeError。实测（probe-badport）
+  // 未收录时界面显示「网络错误 bad port」——中英混排，且用户不知道是自己填的端口有问题。
+  "bad port": "该端口被安全策略禁止访问，请换一个端口（如 8188、8080、3000）"
 };
 
 /** 网络层异常的关键词（同时用于 cause 与 AI SDK 包裹层文本）。 */

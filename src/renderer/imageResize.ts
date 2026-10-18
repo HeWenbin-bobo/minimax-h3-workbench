@@ -44,10 +44,15 @@ export async function downscaleDataUrl(dataUrl: string, maxEdge = 1568, quality 
   try {
     const image = await loadImage(dataUrl);
     const longEdge = Math.max(image.naturalWidth, image.naturalHeight);
-    // 本来就不大：不重编码（避免无谓的二次有损压缩）。
-    if (!longEdge || longEdge <= maxEdge) return dataUrl;
+    const tooLarge = dataUrl.length > MAX_DATA_URL_CHARS;
+    // 两个触发条件缺一不可：
+    // ① 长边超限（手机照片）；
+    // ② **编码后体积超限**——只看尺寸会漏掉"尺寸不大但体积很大"的图：
+    //    1500×1500 的 PNG 截图/无损照片长边没超 1568，原样返回却是好几 MB，
+    //    照样能把 localStorage 撑爆（用户看到"本地存储空间不足、重启丢对话"）。
+    if (!longEdge || (longEdge <= maxEdge && !tooLarge)) return dataUrl;
 
-    const scale = maxEdge / longEdge;
+    const scale = Math.min(1, maxEdge / longEdge);
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
     canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -57,6 +62,12 @@ export async function downscaleDataUrl(dataUrl: string, maxEdge = 1568, quality 
     // PNG 透明图用 image/png 保住透明通道；其余一律 JPEG（体积优势最大）。
     const isPng = dataUrl.startsWith("data:image/png");
     const next = canvas.toDataURL(isPng ? "image/png" : "image/jpeg", quality);
+    // PNG 重编码后仍然过大（无损格式压不下去）：退一步用 JPEG——**丢掉透明通道**
+    // 换"会话能存下去"，比整段对话丢失好。只要结果没更小就不采用。
+    if (isPng && next.length > MAX_DATA_URL_CHARS) {
+      const asJpeg = canvas.toDataURL("image/jpeg", quality);
+      if (asJpeg.length < next.length) return asJpeg.length < dataUrl.length ? asJpeg : dataUrl;
+    }
     // 极端情况下重编码反而更大（小图、已高度压缩图）：保留较小的那个。
     return next.length < dataUrl.length ? next : dataUrl;
   } catch {

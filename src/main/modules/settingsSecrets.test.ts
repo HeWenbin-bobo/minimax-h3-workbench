@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -112,5 +112,17 @@ describe("密钥文件脏值容错", () => {
       const store = new SettingsStore();
       await expect(store.getSecret("llmApiKey")).resolves.toBe("");
     }
+  });
+
+  // setSecret 是「读-改-写」：文件坏了却返回 {} 的话，只写回本次这一个密钥，
+  // 其余已保存的 Key 被静默清空（用户下次生成才发现"所有后端都要重填"）。
+  it("文件损坏时先备份成 .corrupt-*，不只写回本次密钥", async () => {
+    await writeFile(secretFile(), "{ 半截", "utf8");
+    const store = new SettingsStore();
+    await store.setSecret("llmApiKey", "sk-new");
+    const files = await readdir(userData);
+    expect(files.some((name) => name.startsWith("secrets.json.corrupt-"))).toBe(true);
+    // 新密钥本身仍应正常写入并读回。
+    await expect(store.getSecret("llmApiKey")).resolves.toBe("sk-new");
   });
 });

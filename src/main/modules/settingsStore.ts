@@ -132,6 +132,28 @@ function decryptSecret(encrypted: string): string {
   }
 }
 
+/**
+ * 读不出来的配置文件先挪成备份，再让调用方用默认值继续。
+ *
+ * 为什么必须备份：`update()` / `setSecret()` 都是**读-改-写**。若读取失败时
+ * 直接返回默认值（或空对象），下一次写盘就会把「默认值 + 本次 patch」整份落盘，
+ * 用户原有的配置/密钥被永久抹掉。把坏文件挪走有两个好处：
+ * ① 数据还在，用户/支持人员可以手工找回；
+ * ② 原路径让开，下次启动不会继续踩同一个坏文件。
+ *
+ * `ENOENT`（文件本来就不存在）不备份——那才是"确实没有配置"。
+ */
+async function backupCorruptFile(filePath: string, error: unknown): Promise<void> {
+  const code = (error as { code?: unknown })?.code;
+  if (code === "ENOENT") return;
+  const backup = `${filePath}.corrupt-${Date.now()}`;
+  await rename(filePath, backup).catch(() => undefined);
+  console.error(
+    `[settings] ${path.basename(filePath)} 读取失败，已备份为 ${path.basename(backup)}：`,
+    error instanceof Error ? error.message : error
+  );
+}
+
 export class SettingsStore {
   private readonly filePath = path.join(app.getPath("userData"), "settings.json");
   private readonly secretPath = path.join(app.getPath("userData"), "secrets.json");
@@ -140,7 +162,15 @@ export class SettingsStore {
     try {
       const raw = JSON.parse(await readFile(this.filePath, "utf8")) as Partial<AppSettings>;
       return normalizeSettings(raw, defaultSettings());
-    } catch {
+    } catch (error) {
+      // **读不出来 ≠ 没有设置**：`update()` 是读-改-写，旧实现这里直接返回默认值，
+      // 于是下一次保存会把「默认值 + patch」整份写回磁盘——
+      // 用户的地址、输出目录、模型名、系统提示词全部被抹掉。
+      // 触发条件不罕见：杀毒软件短暂锁文件（EBUSY/EACCES）、文件被手工改坏。
+      // 与 TaskStore.load 同一处理：非 ENOENT 的失败先把坏文件挪成备份，
+      // 至少让用户还有找回的机会。（这里不抛错：settings 被主进程多处读取，
+      // 抛错会让整个应用不可用，返回默认值更合适。）
+      await backupCorruptFile(this.filePath, error);
       return defaultSettings();
     }
   }
@@ -249,7 +279,12 @@ export class SettingsStore {
         if (typeof value === "string" && value) out[key] = value;
       }
       return out;
-    } catch {
+    } catch (error) {
+      // **读取失败必须备份**：`setSecret()` 是读-改-写，读失败返回 {} 后
+      // 只写回「本次这一个密钥」——其余四个已保存的 Key 被静默清空，
+      // 用户下次生成时才发现"所有后端都要重新填"。
+      // 与 `get()` 同一处理：非 ENOENT 的错误先把坏文件挪成 `.corrupt-*`。
+      await backupCorruptFile(this.secretPath, error);
       return {};
     }
   }

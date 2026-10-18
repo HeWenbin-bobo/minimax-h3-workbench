@@ -2157,6 +2157,9 @@ function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }:
 function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artifact: ArtifactInfo; onClose: () => void; width: number; onResize: (width: number) => void; onError: (e: unknown) => void }) {
   const [nonce, setNonce] = useState(0);
   const [diskContent, setDiskContent] = useState<string>();
+  // 主进程的截断说明（"文件较大，仅显示前 1MB" 等）。**必须与正文分开存**：
+  // 表格预览把正文直接喂 `parseCsvRows`，说明拼进去会变成一行假数据。
+  const [readNote, setReadNote] = useState<string>();
   const [readError, setReadError] = useState<string>();
   // 是否已读完（内容可能是合法的空串）。不区分的话，空文件会永远显示"（正在读取…）"。
   const [loaded, setLoaded] = useState(false);
@@ -2167,6 +2170,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
     // diskContent 仍是上一份文件的内容，读新文件的几百毫秒里面板会显示**旧产物**，
     // 用户以为点错了。
     setDiskContent(undefined);
+    setReadNote(undefined);
     setReadError(undefined);
     if (!needsContent) { setLoaded(true); return; }
     let cancelled = false;
@@ -2175,7 +2179,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
       if (cancelled) return;
       // 读取失败必须让人看见（CLAUDE.md「出错必须让人看见」）——否则面板永远停在
       // "（正在读取…）"，看起来像卡住，实际是读文件报错了（xlsx 预览整片失效就是这样被掩盖的）。
-      if (r.data !== undefined) setDiskContent(r.data);
+      if (r.data !== undefined) { setDiskContent(r.data.text); setReadNote(r.data.note); }
       else setReadError(r.message || "读取产物内容失败。");
       setLoaded(true);
     }).catch((e) => { if (!cancelled) { setReadError(describeError(e, "读取产物内容失败。")); setLoaded(true); } });
@@ -2264,8 +2268,8 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
       onLoad={focusFrame}
       title={artifact.name}
     />}
-    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : !loaded ? <p className="pg-preview-doc-empty">（正在读取…）</p> : content ? <SheetTable csv={content} /> : <p className="pg-preview-doc-empty">（这个表格没有任何内容）</p>}</div>}
-    {artifact.kind === "doc" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : !loaded ? <p className="pg-preview-doc-empty">（正在读取…）</p> : content ? renderMarkdown(content) : <p className="pg-preview-doc-empty">（这个文档没有任何内容）</p>}</div>}
+    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : !loaded ? <p className="pg-preview-doc-empty">（正在读取…）</p> : content ? <><SheetTable csv={content} />{readNote && <p className="pg-preview-doc-empty">{readNote}</p>}</> : <p className="pg-preview-doc-empty">（这个表格没有任何内容）</p>}</div>}
+    {artifact.kind === "doc" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : !loaded ? <p className="pg-preview-doc-empty">（正在读取…）</p> : content ? <>{renderMarkdown(content)}{readNote && <p className="pg-preview-doc-empty">{readNote}</p>}</> : <p className="pg-preview-doc-empty">（这个文档没有任何内容）</p>}</div>}
   </aside>;
 }
 

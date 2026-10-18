@@ -251,8 +251,12 @@ export interface WorkbenchApi {
   /**
    * 读取已落盘产物的文本内容（表格/文档预览用）。
    * 只允许 userData/artifacts/ 内的文件——与 h3preview 协议同一套路径白名单。
+   *
+   * 返回结构化对象而不是裸字符串：`text` 是**纯内容**，任何"被截断了多少"的说明
+   * 放在 `note` 里。早前把提示拼在 `text` 末尾，表格预览会把它当成**一行数据**
+   * 渲染出来（实测：3 行表格变成 4 行，多出一行只有一列的说明文字）。
    */
-  readArtifactText(filePath: string): Promise<ApiResponse<string>>;
+  readArtifactText(filePath: string): Promise<ApiResponse<{ text: string; note?: string }>>;
   /** 会话被彻底删除时清掉它的产物目录（userData/artifacts/<sessionId>/），避免永久占盘。 */
   purgeSessionArtifacts(sessionId: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;

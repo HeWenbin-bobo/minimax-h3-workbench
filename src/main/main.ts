@@ -1318,21 +1318,28 @@ function registerIpc(
       try {
         const book = XLSX.readFile(resolved);
         const first = book.SheetNames[0];
-        if (!first) return "";
+        if (!first) return { text: "" };
         const sheet = book.Sheets[first];
         // **必须自己限行**：`sheet_to_csv` 没有上限选项，整表转成字符串后要随 IPC
         // 传给渲染端。一个 10 万行 × 4 列的表格会转出十几 MB 文本——
         // 主进程拼一次、IPC 复制一次、渲染端再 JSON 解析一次，三份同时驻留。
         // 渲染端本来也只渲染前 500 行（`MAX_PREVIEW_ROWS`），这里多留些余量取 2000 行，
         // 并如实告知被截断了多少——不静默少给。
+        //
+        // **说明一定要放在 `note` 里，不能拼进 CSV 正文**：渲染端拿 `text` 直接喂
+        // `parseCsvRows`，拼在末尾的一句话会被当成**一行数据**渲染出来
+        // （实测：3 行表格变成 4 行，多出一行只有一列的怪文字）。
         const range = XLSX.utils.decode_range(sheet["!ref"] || "A1");
         const MAX_ROWS = 2_000;
         const rowCount = range.e.r - range.s.r + 1;
         if (rowCount > MAX_ROWS) {
           const capped = { ...sheet, "!ref": XLSX.utils.encode_range({ s: range.s, e: { r: range.s.r + MAX_ROWS - 1, c: range.e.c } }) };
-          return `${XLSX.utils.sheet_to_csv(capped)}\n\n（表格共 ${rowCount} 行，预览仅解析前 ${MAX_ROWS} 行；完整内容可在文件夹中打开）`;
+          return {
+            text: XLSX.utils.sheet_to_csv(capped),
+            note: `表格共 ${rowCount} 行，预览仅解析前 ${MAX_ROWS} 行；完整内容可在文件夹中打开`
+          };
         }
-        return XLSX.utils.sheet_to_csv(sheet);
+        return { text: XLSX.utils.sheet_to_csv(sheet) };
       } catch (error) {
         // SheetJS 对损坏文件抛的是英文内部错误（实测 "Unsupported ZIP encryption"）。
         // 预览面板会把它原样显示成"读取失败：Unsupported ZIP encryption"，
@@ -1354,12 +1361,16 @@ function registerIpc(
         const { bytesRead } = await handle.read(buffer, 0, MAX_PREVIEW_BYTES, 0);
         // 只截到完整字符边界：末尾可能被砍在多字节字符中间。
         const head = buffer.subarray(0, bytesRead).toString("utf8").replace(/�+$/, "");
-        return `${head}\n\n（文件较大，预览仅显示前 ${Math.round(MAX_PREVIEW_BYTES / 1024 / 1024 * 10) / 10}MB；完整内容可在文件夹中打开）`;
+        // 同 xlsx：截断说明走 `note`。表格预览拿 `text` 直接解析，拼进去会变成一行假数据。
+        return {
+          text: head,
+          note: `文件较大，预览仅显示前 ${Math.round(MAX_PREVIEW_BYTES / 1024 / 1024 * 10) / 10}MB；完整内容可在文件夹中打开`
+        };
       } finally {
         await handle.close();
       }
     }
-    return readFile(resolved, "utf8");
+    return { text: await readFile(resolved, "utf8") };
   });
   /**
    * 会话被彻底删除（用户点「彻底删除」或回收站 7 天到期）时清掉它的产物目录。

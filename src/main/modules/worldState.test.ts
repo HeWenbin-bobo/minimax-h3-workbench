@@ -68,16 +68,28 @@ describe("diffWorldState 注入", () => {
     expect(text).toContain("不要调用 web_search");
   });
 
-  it("时间变化被节流：正文沿用旧值（保持 system 前缀稳定），但**仍在场**", () => {
+  // 节流语义（本轮修正）：**同一天内超过 15 分钟就要刷新**。
+  //
+  // 旧规则是"跨天才刷新"，结果是同一会话里过了六小时，模型仍被告知"现在是 09:00"
+  // （实测 probe-time-stale：09:00 首次注入 → 15:30 第二轮拿到的还是 09:00）。
+  // 用户问"现在几点""离八点还有多久"会得到确定性的错答案，且越聊越离谱。
+  it("同一天内 15 分钟以内的变化被节流：正文沿用旧值，但 section 仍在场", () => {
     const first = diffWorldState(buildSections(baseInput), undefined);
-    const later = new Date("2026-03-14T02:45:00Z"); // 北京时间 10:45（同一天）
-    const result = diffWorldState(buildSections({ ...baseInput, now: later }), first.snapshot);
-    // 同一天：正文不刷新（沿用 10:30），但 section 必须仍出现在注入块里。
+    const soon = new Date("2026-03-14T02:40:00Z"); // 北京时间 10:40（+10 分钟）
+    const result = diffWorldState(buildSections({ ...baseInput, now: soon }), first.snapshot);
     expect(result.text).toContain("# 当前时间");
     expect(result.text).toContain("10:30");
-    expect(result.text).not.toContain("10:45");
+    expect(result.text).not.toContain("10:40");
     // 快照里保留旧时间——基线不被刷新，否则下一轮又判"变了"。
     expect(result.snapshot.find((entry) => entry.id === "current_time")?.content).toContain("10:30");
+  });
+
+  it("同一天内超过 15 分钟必须刷新正文（否则模型一直拿着过时的时间）", () => {
+    const first = diffWorldState(buildSections(baseInput), undefined);
+    const later = new Date("2026-03-14T07:30:00Z"); // 北京时间 15:30（+5 小时）
+    const result = diffWorldState(buildSections({ ...baseInput, now: later }), first.snapshot);
+    expect(result.text).toContain("15:30");
+    expect(result.text).not.toContain("10:30");
   });
 
   it("跨天必须刷新正文（否则模型一直拿着昨天的日期，还被告知以此为准）", () => {

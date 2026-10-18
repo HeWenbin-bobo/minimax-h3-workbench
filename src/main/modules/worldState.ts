@@ -96,6 +96,36 @@ function datePartOf(rendered: string): string {
 }
 
 /**
+ * 从渲染文本里取出**完整时刻**（北京时间，UTC+8），用于算出"这次注入已经过去多久"。
+ *
+ * 格式固定由 `formatClock` 产生：`2026年10月18日 周日 09:00（北京时间）…`。
+ * 解析失败返回 undefined（调用方按"该刷新"处理，宁可多注入一次）。
+ */
+function clockOf(rendered: string): Date | undefined {
+  const match = /(\d{4})年(\d{1,2})月(\d{1,2})日\s*周[一二三四五六日]\s*(\d{1,2}):(\d{2})/.exec(rendered);
+  if (!match) return undefined;
+  const [, year, month, day, hour, minute] = match;
+  // 文案固定写"北京时间"，与 formatClock 一样按 UTC+8 反解（不能按本机时区）。
+  const utc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour) - 8, Number(minute));
+  return new Date(utc);
+}
+
+/**
+ * 时间正文多久必须刷新一次。
+ *
+ * 早先的节流规则是"**跨天**才刷新"，理由是"分钟级变化每轮都触发，等于节流形同虚设"。
+ * 但那条规则带来一个更糟的后果：同一会话里过了六个小时，模型仍被告知"现在是 09:00"
+ * （实测 probe-time-stale：09:00 首次注入 → 15:30 第二轮拿到的还是 09:00）。
+ * 用户问"现在几点""离八点还有多久"会得到**确定性的错答案**，
+ * 而且这个错误随会话时长累积、越聊越离谱。
+ *
+ * 取 15 分钟：相比"每轮都变"（几秒一次）已足够节流，又保证模型看到的时间
+ * 最多落后一刻钟——对"现在几点/今天还剩多久"这类问题足够准。
+ * 对齐 Codex `time_reminder.rs` 的做法（按时间阈值重注入，而不是按天）。
+ */
+const TIME_REINJECT_AFTER_MS = 15 * 60 * 1_000;
+
+/**
  * 当前时间。模型不知道今天是哪天——问"最新的 iPhone 是哪款"时它会凭训练截止日臆造，
  * 报出一个几年前的型号（Codex 为此专门做了 time_reminder 通道）。
  */
@@ -103,12 +133,17 @@ function timeSection(now: Date): WorldSection {
   return {
     id: "current_time",
     render: () => `# 当前时间\n${formatClock(now)}（北京时间）。涉及"最新/今年/上个月"的时效问题请以此为准。`,
-    // 节流规则：**跨天必刷新正文，同一天内沿用旧正文**。
+    // 节流规则：**跨天必刷新；同一天内超过 15 分钟也要刷新**。
     //
-    // 对齐 Codex `time_reminder.rs` 的 `next_reinject_after`——它按时间阈值重注入。
     // 注意：节流只决定正文要不要刷新，**不决定要不要出现**（每轮都必须在场，见文件头）。
-    // 只比日期不比分钟：分钟级变化每轮都会触发，等于把节流形同虚设。
-    shouldReinject: (previous, next) => datePartOf(previous) !== datePartOf(next)
+    shouldReinject: (previous, next) => {
+      if (datePartOf(previous) !== datePartOf(next)) return true;
+      const previousClock = clockOf(previous);
+      const nextClock = clockOf(next);
+      // 任一侧解析不出来 → 当作需要刷新（宁可多发一次，也不要让时间永久停在旧值）。
+      if (!previousClock || !nextClock) return true;
+      return nextClock.getTime() - previousClock.getTime() >= TIME_REINJECT_AFTER_MS;
+    }
   };
 }
 

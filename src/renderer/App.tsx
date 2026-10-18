@@ -1069,8 +1069,18 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
         taskIds: undefined,
         // images 也直接进 <img src> 与发给模型的多模态载荷，非字符串项要剔掉。
         images: asArray<string>(rest.images)?.filter((url) => typeof url === "string"),
-        planSteps: asArray<PlanStep>(rest.planSteps),
-        artifacts: asArray<NonNullable<PlaygroundMessage["artifacts"]>[number]>(rest.artifacts)
+        // planSteps / artifacts 也要**逐元素**过滤：只判"是不是数组"不够——
+        // 元素是字符串/数字时，`entry.status` / `a.name` 访问得到 undefined，
+        // 但 `{entry.step}` 若拿到对象就会抛
+        // "Objects are not valid as a React child"（整页白屏）。
+        // 与 messages 那批同一口径：渲染端直接映射的数组，元素类型也要保证。
+        planSteps: asArray<PlanStep>(rest.planSteps)?.filter(
+          (entry): entry is PlanStep => Boolean(entry) && typeof entry === "object" && typeof (entry as PlanStep).step === "string"
+        ),
+        artifacts: asArray<NonNullable<PlaygroundMessage["artifacts"]>[number]>(rest.artifacts)?.filter(
+          (a) => Boolean(a) && typeof a === "object" && typeof (a as { name?: unknown }).name === "string"
+            && typeof (a as { path?: unknown }).path === "string"
+        )
       };
       return migrated.streaming ? { ...migrated, streaming: false, toolSteps: undefined } : migrated;
     })

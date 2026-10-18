@@ -292,6 +292,36 @@ describe("normalizeStoredSessions 数组字段归一", () => {
     expect(result[0].messages[0].artifacts).toBeUndefined();
   });
 
+  // 只判"是不是数组"不够：元素是对象时 `{entry.step}` 会抛
+  // "Objects are not valid as a React child" → 整个游乐场页白屏。
+  it("planSteps 数组里的非对象/缺 step 元素被剔除", () => {
+    const result = normalizeStoredSessions([{
+      id: "a",
+      messages: [{
+        role: "assistant", content: "x",
+        planSteps: [{ step: "第一步", status: "completed" }, "bad", 42, null, { status: "pending" }]
+      }]
+    }]);
+    expect(result[0].messages[0].planSteps).toEqual([{ step: "第一步", status: "completed" }]);
+  });
+
+  it("artifacts 数组里缺 name/path 的元素被剔除", () => {
+    const result = normalizeStoredSessions([{
+      id: "a",
+      messages: [{
+        role: "assistant", content: "x",
+        artifacts: [
+          { name: "a.md", path: "/p/a.md", size: 1, kind: "doc" },
+          { name: "缺路径.md" },
+          { path: "/p/b.md" },
+          "bad"
+        ]
+      }]
+    }]);
+    expect(result[0].messages[0].artifacts).toHaveLength(1);
+    expect(result[0].messages[0].artifacts?.[0].name).toBe("a.md");
+  });
+
   it("正常数组原样保留", () => {
     const result = normalizeStoredSessions([{
       id: "a",

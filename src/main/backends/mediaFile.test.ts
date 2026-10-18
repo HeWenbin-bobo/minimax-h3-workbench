@@ -1,8 +1,8 @@
-import { mkdtemp, truncate, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { MAX_UPLOAD_BYTES, readUploadFile } from "./mediaFile";
+import { MAX_UPLOAD_BYTES, readUploadFile, saveResponseToFile } from "./mediaFile";
 
 describe("readUploadFile", () => {
   it("正常大小文件可读，内容正确", async () => {
@@ -31,5 +31,29 @@ describe("readUploadFile", () => {
     await truncate(file, MAX_UPLOAD_BYTES + 1);
     const error = await readUploadFile(file, "参考视频").catch((e: Error) => e);
     expect((error as Error).message).toContain("超过 50MB 上限");
+  });
+});
+
+// 三个后端下载成片都走这里。旧写法 `Buffer.from(await response.arrayBuffer())`
+// 把整段视频读进内存——2K 长片数百 MB，主进程直接闪退。
+describe("saveResponseToFile（流式落盘）", () => {
+  const bodyOf = (chunks: string[]) => new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+      controller.close();
+    }
+  });
+
+  it("把响应体分块写入文件，内容完整", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "h3-dl-"));
+    const target = path.join(dir, "out.mp4");
+    await saveResponseToFile(new Response(bodyOf(["abc", "def"])), target);
+    expect(await readFile(target, "utf8")).toBe("abcdef");
+  });
+
+  it("没有响应体时报中文错误", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "h3-dl-none-"));
+    await expect(saveResponseToFile(new Response(null), path.join(dir, "x.mp4")))
+      .rejects.toThrow("下载响应没有内容。");
   });
 });

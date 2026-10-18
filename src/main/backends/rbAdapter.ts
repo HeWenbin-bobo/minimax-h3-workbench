@@ -1,8 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { describeError } from "../../shared/errors";
 import { assertSafeResultUrl } from "./resultUrl";
-import { readUploadFile } from "./mediaFile";
+import { readUploadFile, saveResponseToFile } from "./mediaFile";
 import type {
   BackendTestResult,
   GenerationAdapter,
@@ -375,7 +375,8 @@ export class RbAdapter implements GenerationAdapter {
     }
     await mkdir(this.options.outputDirectory, { recursive: true });
     const target = path.join(this.options.outputDirectory, `${taskId}.mp4`);
-    await writeFile(target, Buffer.from(await response.arrayBuffer()));
+    // 流式落盘：整段读进内存（`arrayBuffer()`）在长片上会让主进程直接 OOM。
+    await saveResponseToFile(response, target);
     return target;
   }
 }

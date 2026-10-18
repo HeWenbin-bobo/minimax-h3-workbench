@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type {
   BackendTestResult,
@@ -9,7 +9,7 @@ import type {
   TaskStatus
 } from "../../shared/types";
 import { describeError } from "../../shared/errors";
-import { readUploadFile } from "./mediaFile";
+import { readUploadFile, saveResponseToFile } from "./mediaFile";
 import { inspectH3Readiness } from "./comfyReadiness";
 import { buildFl2vaWorkflow, buildRef2vaWorkflow, type ComfyPrompt, type UploadedMedia } from "./workflows";
 
@@ -232,7 +232,8 @@ export class ComfyAdapter implements GenerationAdapter {
     });
     const response = await fetch(`${this.baseUrl}/view?${query.toString()}`, { signal: requestSignal(signal, 300_000) });
     if (!response.ok) throw new Error(`结果下载失败：${response.status}`);
-    await writeFile(target, Buffer.from(await response.arrayBuffer()));
+    // 流式落盘：整段读进内存（`arrayBuffer()`）在 2K 长片上会让主进程直接 OOM。
+    await saveResponseToFile(response, target);
     return target;
   }
 }

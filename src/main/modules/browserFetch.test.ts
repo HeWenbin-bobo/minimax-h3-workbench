@@ -69,7 +69,36 @@ describe("browserFetch 导航 DNS 守卫", () => {
 
 // 产物自检报告是模型唯一能看到的东西：措辞错了它会得出错误结论
 // （把"没报错"读成"画面好看"，或者把"没画布"当成正常）。
-const { formatProbeReport } = await import("./browserFetch");
+const { formatProbeReport, formatConsoleLine } = await import("./browserFetch");
+
+// 这两条过滤都是真机踩出来的：不滤的话每个干净产物都会被报成"有警告"，
+// 模型会为一条与它无关的框架提示反复改代码。
+describe("自检日志过滤（formatConsoleLine）", () => {
+  it("滤掉 Electron 自己的安全警告（每个页面都会打一条）", () => {
+    expect(formatConsoleLine("warning", "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; …")).toBeUndefined();
+  });
+
+  it("只收 error / warning，log 与 info 不进报告", () => {
+    expect(formatConsoleLine("log", "普通日志")).toBeUndefined();
+    expect(formatConsoleLine("info", "普通信息")).toBeUndefined();
+    expect(formatConsoleLine("debug", "调试")).toBeUndefined();
+  });
+
+  it("清掉 NUL 等控制字符，但保留换行（多行着色器报错要看得懂）", () => {
+    const line = formatConsoleLine("error", "第一行\n第二行\u0000");
+    expect(line).toBe("错误：第一行\n第二行");
+  });
+
+  it("超长消息被截断（着色器编译错误常一次吐几千字符）", () => {
+    const line = formatConsoleLine("error", "x".repeat(5_000))!;
+    expect(line.length).toBeLessThanOrEqual(410);
+  });
+
+  it("真实报错原样保留", () => {
+    expect(formatConsoleLine("error", "Uncaught ReferenceError: _near is not defined"))
+      .toBe("错误：Uncaught ReferenceError: _near is not defined");
+  });
+});
 
 describe("产物自检报告（formatProbeReport）", () => {
   it("加载失败时给出失败原因与下一步，不说页面正常", () => {

@@ -1010,6 +1010,10 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
     Boolean(session) && typeof session === "object" && typeof (session as PlaygroundSession).id === "string"
   ).map((session) => ({
     ...session,
+    // `title` 必须归成字符串：它直接进 JSX（`{session.title || "新对话"}`）。
+    // 若磁盘上是对象/数组，React 会抛 "Objects are not valid as a React child"
+    // ——整个游乐场页白屏（与 content 那批同一类，但这条路径此前漏了）。
+    title: typeof session.title === "string" ? session.title : "",
     // `createdAt` / `updatedAt` 必须是字符串：会话列表用
     // `sessionRecency(...).localeCompare(...)` 排序，数字（时间戳）会抛
     // "recency(...).localeCompare is not a function" —— 整个会话列表打不开。

@@ -40,7 +40,7 @@ let chain: Promise<void> = Promise.resolve();
 
 /** 用隐藏窗口加载 url 并返回渲染后的 HTML。串行执行；超时/加载失败/取消会抛中文错误。 */
 export function renderHtml(url: string, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
-  return enqueue(() => renderOnce(url, timeoutMs, "html", signal));
+  return enqueue(() => renderOnce(url, timeoutMs, "html", signal), signal);
 }
 
 /**
@@ -54,11 +54,24 @@ export function renderHtml(url: string, timeoutMs = DEFAULT_TIMEOUT_MS, signal?:
  * 搜索解析（parseBing/parseSogou）必须看 HTML 结构，所以两条路分开、各取所需。
  */
 export function renderPageText(url: string, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
-  return enqueue(() => renderOnce(url, timeoutMs, "text", signal));
+  return enqueue(() => renderOnce(url, timeoutMs, "text", signal), signal);
 }
 
-function enqueue<T>(operation: () => Promise<T>): Promise<T> {
-  const task = chain.then(operation);
+/**
+ * 串行队列。
+ *
+ * **排队期间就要能取消**：隐藏窗口一次只跑一个（前一个最长可达 45 秒），
+ * 用户在排队时点「停止」如果只在出队后才检查，就要干等前一个渲染跑完——
+ * 停止按钮看起来毫无反应（与本轮修的"open_page 漏传 signal"同一体验）。
+ * 所以入队时先看一眼、出队后再看一眼，两侧都抛 AbortError。
+ */
+function enqueue<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  const abortError = () => new DOMException("渲染已取消", "AbortError");
+  if (signal?.aborted) return Promise.reject(abortError());
+  const task = chain.then(() => {
+    if (signal?.aborted) throw abortError();
+    return operation();
+  });
   // 队列本身不能被单次失败污染，否则后续调用全部连坐失败。
   chain = task.then(() => undefined, () => undefined);
   return task;

@@ -43,8 +43,9 @@ export function assertPublicHttpUrl(rawUrl: string): URL {
  * 都解析到对应的内网地址。实测（probe-ssrf-nipio）`http://127.0.0.1.nip.io:<port>/object_info`
  * 通过了旧的纯字面校验，并**真的读回了本机服务的内容**。
  *
- * 只用于**能 await 的入口**（`open_page` 打开前）。导航事件回调是同步的、做不了 DNS 查询，
- * 那里仍用同步版挡字面内网地址。
+ * 用于**能 await 的入口**：`open_page` 打开前，以及 `browserFetch` 的
+ * `webRequest.onBeforeRequest`（该回调本身就是异步的，能容纳 DNS 查询）。
+ * `will-redirect` / `will-navigate` 是同步事件，那里只能退回字面校验。
  *
  * 已知上限（写在这里，别以为已经万无一失）：这是"解析一次、随后再连接"，
  * 对 **DNS 重绑定**（同一域名两次解析结果不同）无效。要彻底堵住得在连接层按实际 IP 校验，

@@ -1,18 +1,18 @@
 ---
 name: playground-branch-status
-description: v0.2.1 已发布；2026-10-18 探索模式连续修复，290 笔未推送（HEAD 722da58）
+description: v0.2.1 已发布；2026-10-18 探索模式连续修复，332 笔未推送（HEAD 36eb56c）
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-18T08:53:00.000Z
+  modified: 2026-10-18T11:33:00.000Z
 ---
 
-**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 290 笔（未推送）。**
+**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 332 笔（未推送）。**
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
-- HEAD = `722da58`。
-- 验证基线：`npm test` **464 项 / 36 文件**全绿；typecheck、build 通过；
+- HEAD = `36eb56c`。
+- 验证基线：`npm test` **496 项 / 38 文件**全绿；typecheck、build 通过；
   E2E test-01/02/03/04/05/06/07/08/09/10 逐个复跑通过。
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
@@ -207,6 +207,42 @@ SSH 握手失败 1 条、RB 直链回落 1 条、磁盘未知判级 1 条。
   换成 `gpt-4o-mock` 后通过。
 - `probe-explore-b` 用脚本给 textarea 赋值来验证 `maxlength`——属性写入不受该约束
   （只有真实键盘输入才会被拦）。断言改为"属性确实挂着 2000 + 超长提交有中文拒绝"。
+
+## 第五批（290 → 332 笔）
+
+这一批的主线是**「一次失败的读取/写入会永久吞掉用户数据」**与
+**「功能建好了但没人接线」**：
+
+| 类型 | 具体问题 |
+|---|---|
+| **读失败吞数据** | `tasks.json` / `settings.json` / `secrets.json` 读取或解析失败时直接返回「空/默认值」，而三者都是**读-改-写**：下一次写盘就把用户的任务历史、整份设置、**其余四个已保存密钥**永久抹掉。现在非 ENOENT 的失败先把坏文件 `rename` 成 `.corrupt-<时间戳>` |
+| **不存在的文件被静默调用** | `shell.showItemInFolder` 对已删除路径是空操作 → 补 `stat` 检查并回报中文错误 |
+| **建好了却没接线** | `onDownloadProgress`（安装包下载进度）+ `.download-progress` 样式齐全但**零订阅方** → 接通并显示「已完成 N%」 |
+| **目录名碰撞（安全）** | `sessionDirName` 只把危险字符换成 `_`：Windows 上 `basename("x:y")→"y"`，`a\|b`/`a_b` 同归 → 构造 sessionId 命中**别人**的产物目录，再触发 `artifact:purgeSession` 即不可逆删除。抽出 `modules/artifactDir.ts`，净化改动过原值时追加 12 位 sha256 |
+| **文案与状态相反** | 密钥输入框一律写「已保存的密钥不会回显」，全新用户以为已配好 → 改用从未被调用的 `hasSecret` IPC 判断真实状态 |
+| **同类只修一半** | `retry()` 补齐可缺省参数（`normalizeRequest` 共用）；`restoreSession` / 自动落位补草稿清理；`checkRoot()` 补 `ok:false` 报错；`pickAttachment` 补 `ok:false`；`parseBing` 的 `<h2>` 与 href 补全 |
+| **翻译/判定** | `Invalid URL`（地址漏写 http://）此前拼成「网络错误 Invalid URL。请检查端口」；token 估算的 CJK 正则只覆盖汉字，日文假名/韩文按英文密度估（低估 2~2.5 倍）；内存读数未知会把够用机器判成 D 级 |
+| **中文乱码** | 渲染端标题/项目名/重命名/分类、主进程工具摘要与 `setCategory` 仍用裸 `slice` → 统一 `sliceSafe` |
+| **性能/OOM** | 三个后端下载成片用 `arrayBuffer()` 整个读进内存（2K 长片数百 MB，主进程静默闪退）→ 流式 `pipeline` 落盘；GIF 附件按体积触发降级 |
+| **竞态/资源** | 浏览器渲染排队期间不可取消；`submit`/`retry`/`delete`/`restore`/`setCategory`/`purge` 写盘失败未回滚；`tasks.json` 的 `progress` 未夹到 0–100（显示 500%） |
+| **自己引入的回归（已修）** | 把 markdown 链接正则从 `https?` 收紧成 `https` → `[标题](http://…)` 整段露出方括号原文；改为仍匹配、仅 http 渲染成纯文本 |
+
+**结论**：`npm test` **496 项 / 38 文件**；E2E test-01…test-10 逐个复跑全过。
+332 笔仍未推送（等用户明确指示）。
+
+**新增测试（本批）**：`artifactDir` 4 条、`taskStore` 损坏备份 1 条、
+`settingsSecrets` 损坏备份 1 条、`capabilities` 内存未知 2 条、
+`mediaFile` 流式落盘 2 条、`webSearch` h2 属性与协议相对链接 2 条。
+
+**探针自身的坑（续）**：
+- `probe-preview-security.mjs` 用页面内 `fetch(h3preview://…)` 取响应头——
+  宿主 CSP 的 `connect-src` 不含 `h3preview:`，请求发出前就被挡掉：
+  两条「响应头」断言永远 FAIL（产品其实正确），而「越界被拒」只判 `status !== 200`，
+  fetch 抛错时 `status` 是 undefined → **假 PASS**。改用 CDP `Network.responseReceived`。
+- `probe-h-readiness-models.mjs` 只用 IPC 改 `comfyuiRoot` 却不 reload，
+  渲染端 state 仍是旧值（`probe-j` 有 `location.reload()`）；且它假定本机必判 D 级，
+  而 RTX 5090 + 189GB 内存判 C 级才是对的。
+
 
 
 

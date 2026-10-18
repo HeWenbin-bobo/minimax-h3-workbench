@@ -2135,7 +2135,10 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
 const MAX_PREVIEW_ROWS = 500;
 
 function SheetTable({ csv }: { csv: string }) {
-  const rows = parseCsvRows(csv);
+  // 解析结果必须记住：拖拽面板宽度时父组件每帧都在 setState，本组件随之重渲染，
+  // 而 `parseCsvRows` 是逐字符扫描整段 CSV（预览上限 1MB）——不 memo 的话
+  // 拖一次面板会做上百次全量解析，界面明显发涩。
+  const rows = useMemo(() => parseCsvRows(csv), [csv]);
   if (rows.length === 0) return <p className="pg-preview-doc-empty">（空表格）</p>;
   const [header, ...allBody] = rows;
   const body = allBody.slice(0, MAX_PREVIEW_ROWS);

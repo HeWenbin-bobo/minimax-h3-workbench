@@ -62,6 +62,20 @@ describe("checkFrameworkUpdate", () => {
     expect(result.message).toContain("500");
   });
 
+  // 回归：npm registry 被中间层劫持/限流时返回 HTML，裸 `response.json()` 抛
+  // 英文 `Unexpected token '<'`，而外层 catch 会把它原样拼进提示——
+  // 与「检查更新」那条同一类技术噪声。必须走同一个 readJson。
+  it("返回 HTML 时给出中文提示，不透出 Unexpected token", async () => {
+    const fetcher = vi.fn(async () => new Response("<!DOCTYPE html><html>blocked</html>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" }
+    }));
+    const result = await checkFrameworkUpdate("5.0.0", fetcher);
+    expect(result.updateAvailable).toBe(false);
+    expect(result.message).not.toMatch(/Unexpected token/i);
+    expect(result.message).toContain("不是有效数据");
+  });
+
   // 回归护栏：Accept 曾用 application/vnd.npm.install-v1+json，在应用主进程内实测稳定 406
   // （裸 Node/裸 Electron 均 200），导致框架更新检查永远失败。必须保持通配。
   it("请求 npm registry 时使用通配 Accept（避免主进程环境 406）", async () => {

@@ -65,7 +65,12 @@ export async function checkFrameworkUpdate(
       signal: AbortSignal.timeout(10_000)
     });
     if (!response.ok) return { bundledVersion, updateAvailable: false, message: `框架更新检查失败（HTTP ${response.status}）。` };
-    const payload = (await response.json()) as NpmPackageInfo;
+    // **非 JSON 要按"没拿到有效版本号"处理**：npm registry 被网络中间层劫持/限流时
+    // 会返回 HTML，裸 `response.json()` 抛英文 `Unexpected token '<'`，
+    // 而外层 catch 会把它原样拼进提示（`框架更新检查失败：Unexpected token '<'...`）——
+    // 与「检查更新」那条同一类噪声。这里复用同一个 readJson。
+    const payload = (await readJson(response)) as NpmPackageInfo | undefined;
+    if (!payload) return { bundledVersion, updateAvailable: false, message: "框架更新源返回的不是有效数据（可能被网络中间层拦截），请稍后重试。" };
     const latestVersion = normalizeVersion(payload.version || payload["dist-tags"]?.latest);
     if (!latestVersion) return { bundledVersion, updateAvailable: false, message: "框架更新源未返回有效版本号。" };
     const updateAvailable = compareVersions(latestVersion, bundledVersion) > 0;

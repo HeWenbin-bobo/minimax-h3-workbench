@@ -274,6 +274,24 @@ app.whenReady().then(async () => {
     await writeFile(screenshotPath, (await mainWindow.webContents.capturePage()).toPNG());
     app.quit();
   }
+}).catch((error) => {
+  // **启动失败必须让人看见**。
+  //
+  // 这个 async 回调里有若干可能真实失败的步骤：`orchestrator.initialize()` 读 tasks.json、
+  // `settingsStore.get()`、创建窗口、`loadApp` 加载渲染产物。任何一步抛错都会让
+  // 整个启动流程停在中途——没有窗口、没有日志窗口、没有任何界面，
+  // 用户双击快捷方式看到的是"什么都没发生"（进程还活着，因为 unhandledRejection
+  // 被兜住了，所以连崩溃提示都没有）。这正是最难排查的一类故障。
+  //
+  // 这里用系统对话框把原因与可执行的下一步直接摆出来，然后退出进程：
+  // 留在半初始化状态比退出更糟（协议 handler / IPC 可能只注册了一半）。
+  const message = describeError(error, "未知错误");
+  console.error("[main] 启动失败：", message);
+  dialog.showErrorBox(
+    "MiniMax H3 工作台启动失败",
+    `${message}\n\n可尝试：\n· 检查磁盘剩余空间与应用目录权限\n· 删除用户数据目录下的 settings.json / tasks.json 后重试（会重置设置）\n· 若反复出现，请附带本提示的完整内容反馈`
+  );
+  app.exit(1);
 });
 
 app.on("window-all-closed", () => {

@@ -21,7 +21,13 @@ export function resolveDimensions(
   // adaptive 是"跟随输入素材"的语义（MiniMax 云端会按首帧自适应），
   // 本地工作流没有这个能力，落到最常用的 16:9。
   const [w, h] = (ratio === "adaptive" ? "16:9" : ratio).split(":").map(Number);
-  if (!w || !h) return { width: align8((short * 16) / 9), height: short };
+  // **两个分量都必须是正数**。只判 `!w || !h` 会漏掉负数：
+  // `"-1:2"` 的 `w >= h` 为假 → 走竖屏分支 → `height = align8(short * h / w)` = **-1440**。
+  // 这个负高度会一路进到 ComfyUI 工作流的 `height` 字段（提交后才报参数错误），
+  // 也会让画幅预览显示一个负尺寸。非正数一律回落到 16:9。
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+    return { width: align8((short * 16) / 9), height: short };
+  }
   const landscape = w >= h;
   return landscape
     ? { width: align8((short * w) / h), height: short }

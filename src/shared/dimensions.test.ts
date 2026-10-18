@@ -43,4 +43,18 @@ describe("resolveDimensions", () => {
     expect(height).toBe(720);
     expect(width).toBeGreaterThan(1280);
   });
+
+  // 回归：只判 `!w || !h` 会漏掉**负数**。`"-1:2"` 的 `w >= h` 为假 → 走竖屏分支 →
+  // `height = align8(short * h / w)` = **-1440**，这个负高度会一路进到
+  // ComfyUI 工作流的 `height` 字段（提交后才报参数错误）。
+  // 这些值来自 IPC / 手改 settings，不是 UI 下拉能给出来的。
+  it("非法画幅（含负数）一律回落 16:9，绝不算出负尺寸", () => {
+    for (const ratio of ["-1:2", "0:0", "16:0", "", "abc", "1:-5", "::"] as never[]) {
+      for (const resolution of ["768P", "2K"] as const) {
+        const { width, height } = resolveDimensions(ratio, resolution);
+        expect(width, `${ratio}@${resolution}`).toBeGreaterThan(0);
+        expect(height, `${ratio}@${resolution}`).toBeGreaterThan(0);
+      }
+    }
+  });
 });

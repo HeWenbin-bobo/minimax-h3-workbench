@@ -1,17 +1,17 @@
 ---
 name: playground-branch-status
-description: v0.2.1 已发布；2026-10-18 探索模式连续修复，273 笔未推送（HEAD db9ac5f）
+description: v0.2.1 已发布；2026-10-18 探索模式连续修复，290 笔未推送（HEAD 722da58）
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-18T07:52:00.000Z
+  modified: 2026-10-18T08:53:00.000Z
 ---
 
-**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 273 笔（未推送）。**
+**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 290 笔（未推送）。**
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
-- HEAD = `db9ac5f`。
+- HEAD = `722da58`。
 - 验证基线：`npm test` **464 项 / 36 文件**全绿；typecheck、build 通过；
   E2E test-01/02/03/04/05/06/07/08/09/10 逐个复跑通过。
 
@@ -182,8 +182,32 @@ SSH 握手失败 1 条、RB 直链回落 1 条、磁盘未知判级 1 条。
 **新增测试**：SSH 适配器延后关闭 3 条、`secrets` 脏值 2 条、ComfyUI HTML 2 条、
 `extractArtifact` 别名 5 条、`submit`/`retry` 归一 5 条、会话归一 3 条。
 
-**结论**：`npm test` **479 项 / 37 文件**；E2E test-01…test-10 逐个复跑全过。
-273 笔仍未推送（等用户明确指示）。
+## 第四批（273 → 290 笔）
+
+主线是**「用户可感知的状态会莫名其妙消失或串台」**：
+
+| 类型 | 具体问题 |
+|---|---|
+| **草稿丢失** | 切页会卸载 `StudioPage`，填到一半的提示词整个消失（输入框还重新填上 demo 文案，用户甚至意识不到丢了）；跨会话切换时「生成视频」表单的描述也会串台 |
+| **状态串台** | 删光会话后顶部仍挂着上一个会话的「上下文 N%」；预览面板换产物时先显示上一份文件的磁盘内容 |
+| **静默失效** | 摘要失败的占位文本不被 `isSummaryMessage` 认出 → 下次压缩当"用户原话"累积；第三方搜索 API 结果不截断（其余三条路径都截 6 条） |
+| **假可点击** | markdown 把 `http://` 渲染成 `<a target="_blank">`，而主进程只放行 HTTPS → 点了毫无反应 |
+| **误判落点** | 选错 ComfyUI 目录 → 显示「0 / 5 个模型已就位 + 去下载」，而真实原因是目录不对 |
+| **卡死风险** | 就绪检测的 5 个 `systeminformation` 采集无超时（Windows 走 WMI）→ 「正在检测…」永久转圈 |
+| **写盘失败未回滚（补齐）** | `submit`/`retry` 之外，`deleteTasks`/`restoreTasks`/`setCategory`/`purgeTasks` 同样"先改内存再写盘" |
+| **性能** | 流式每个 chunk 都重新 markdown 解析全部历史；拖拽预览面板时每帧全量解析 CSV |
+
+**结论**：`npm test` **484 项 / 37 文件**；E2E test-01…test-10 逐个复跑全过
+（21/21、12/12、5/5、5/5、23/23、12/12、20/20、16/16、10/10、11/11）。
+290 笔仍未推送（等用户明确指示）。
+
+**探针自身又踩到 2 条假设错误**（记下来避免重复排查）：
+- `probe-explore-a` 用 `model: "mock-a"` 测「多模态载荷含 image_url」——但
+  `normalizeHistory` 会按**模型名**判断视觉能力，纯文本模型被剥图是正确行为。
+  换成 `gpt-4o-mock` 后通过。
+- `probe-explore-b` 用脚本给 textarea 赋值来验证 `maxlength`——属性写入不受该约束
+  （只有真实键盘输入才会被拦）。断言改为"属性确实挂着 2000 + 超长提交有中文拒绝"。
+
 
 
 

@@ -37,9 +37,15 @@ const NO_SUMMARY_PLACEHOLDER = "（无可用摘要：压缩时未能生成摘要
 /** 用户消息保留预算，对齐 Codex 的 COMPACT_USER_MESSAGE_MAX_TOKENS。 */
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
 
-/** 摘要内容是否为空（含只有前缀没正文的情况）。 */
+/**
+ * 这条消息是不是"压缩产物"（摘要或摘要不可用时的占位）。
+ *
+ * **占位文案也必须认**：它不以 `SUMMARY_PREFIX` 开头，只判前缀的话，
+ * 下一次压缩会把它当成**用户原话**保留下来——层层累积、白占预算，
+ * 而且模型会以为那句"(无可用摘要…)"是用户说的话。
+ */
 export function isSummaryMessage(content: string): boolean {
-  return content.startsWith(SUMMARY_PREFIX);
+  return content.startsWith(SUMMARY_PREFIX) || content.startsWith(NO_SUMMARY_PLACEHOLDER);
 }
 
 /**

@@ -105,6 +105,20 @@ describe("buildCompactedHistory 摘要兜底", () => {
     const result = buildCompactedHistory([user("甲")], "   \n  ");
     expect(result.at(-1)?.content).toContain("无可用摘要");
   });
+
+  // 反复压缩时，上一轮的占位文本不能被当成"用户原话"保留下来。
+  // 占位文案不以 SUMMARY_PREFIX 开头，旧实现 `isSummaryMessage` 只认前缀，
+  // 于是它会被 `userMessages` 收下，并在下一次压缩里继续占预算、层层累积。
+  it("占位文本被识别为压缩产物，不会在下次压缩时当用户消息保留", () => {
+    const first = buildCompactedHistory([user("用户原话")], "");
+    const placeholder = first.at(-1)!;
+    expect(isSummaryMessage(placeholder.content)).toBe(true);
+
+    const second = buildCompactedHistory([...first, user("新消息")], "新摘要");
+    // 只应保留"用户原话"与"新消息"两条真实用户消息 + 一条新摘要。
+    expect(second.filter((m) => !isSummaryMessage(m.content)).map((m) => m.content)).toEqual(["用户原话", "新消息"]);
+    expect(second).toHaveLength(3);
+  });
 });
 
 describe("summarizeHistory 超时纪律", () => {

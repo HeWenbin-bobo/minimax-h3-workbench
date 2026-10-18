@@ -75,7 +75,16 @@ export function describeError(error: unknown, fallback: string): string {
   // AbortSignal.timeout() 抛的 DOMException：超时和"用户主动取消"要分开说。
   if (error.name === "TimeoutError") return `连接超时：目标服务未在规定时间内响应。${HINT}`;
   if (error.name === "AbortError") return "操作已取消。";
+  // **地址本身写错**（漏 `http://`、多了空格、填成 `abc` 这类）：
+  // undici 抛 `TypeError: Failed to parse URL from abc/v1/models`，cause 是 "Invalid URL"。
+  // 不专门拦的话会走下面 causeCode 分支，拼成
+  // 「网络错误 Invalid URL。请检查地址、端口与服务是否已启动。」——中英混排，
+  // 而且把用户引向"检查服务有没有起来"，真实原因是他自己的地址格式不对。
   const cause = causeSignal(error);
+  const invalidUrl = cause.message === "Invalid URL" || /failed to parse url/i.test(error.message);
+  if (invalidUrl) {
+    return "接口地址格式不正确：需要以 http:// 或 https:// 开头（例如 https://api.example.com/v1）。";
+  }
   const causeCode = cause.code ?? cause.message;
   if (causeCode) return `网络连接失败：${NETWORK_CODES[causeCode] ?? STREAM_BROKEN_MESSAGES[causeCode.toLowerCase()] ?? `网络错误 ${causeCode}`}。${HINT}`;
   // AI SDK 的 APICallError 会把 errno 塞在 message 里（"Cannot connect to API: read ECONNRESET"），

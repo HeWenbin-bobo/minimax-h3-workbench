@@ -28,6 +28,19 @@ describe("describeError", () => {
     expect(text).toContain("请检查地址");
   });
 
+  // 地址漏写 http:// 时 undici 抛 `TypeError: Failed to parse URL from abc/v1/models`，
+  // cause 是 "Invalid URL"。旧实现会拼成「网络错误 Invalid URL。请检查地址、端口与服务是否已启动。」
+  // ——中英混排，还把用户引向"服务没起来"，而真实原因是地址格式不对。
+  it("地址格式错误时给出可执行的提示，不出现 Invalid URL 或端口排查建议", () => {
+    const error = new Error("Failed to parse URL from abc/v1/models");
+    (error as { cause?: unknown }).cause = new Error("Invalid URL");
+    const text = describeError(error, "兜底");
+    expect(text).toContain("接口地址格式不正确");
+    expect(text).toContain("http://");
+    expect(text).not.toContain("Invalid URL");
+    expect(text).not.toContain("端口");
+  });
+
   // AI SDK 的 APICallError 把 errno 拼在 message 里而不是 cause.code——
   // 实测 "Cannot connect to API: read ECONNRESET" 曾以裸英文透传到游乐场气泡。
   it("识别 message 内嵌的 errno（AI SDK APICallError 形态）", () => {

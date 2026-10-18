@@ -676,7 +676,10 @@ function ResourcesPage({ resources, settings, onSettingsChange, onError }: { res
     // 同 detect()/test()：IPC reject 时 setChecking(false) 不执行 → 按钮永久卡在「检查中…」。
     try {
       const response = await window.h3.checkLocalModels();
-      if (response.data) setModelStatus(response.data); else setModelStatus([]);
+      // 与上面自动检查的 effect 同一口径：`ok:false` 要报出来，
+      // 否则「重新检查」失败时界面只是变成空清单，用户以为是"目录里没有模型"。
+      if (response.ok && response.data) setModelStatus(response.data);
+      else { setModelStatus([]); if (!response.ok) onError(response.message || "读取模型清单失败"); }
     } catch (error) {
       onError(error);
       setModelStatus([]);

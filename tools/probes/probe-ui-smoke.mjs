@@ -88,9 +88,24 @@ await withApp({}, async (cdp) => {
   const contrast = await cdp.eval(`(() => {
     const lum = (c) => { const p = c.match(/\\d+/g).slice(0,3).map(Number).map((v) => { const s = v/255; return s <= 0.03928 ? s/12.92 : Math.pow((s+0.055)/1.055, 2.4); }); return 0.2126*p[0] + 0.7152*p[1] + 0.0722*p[2]; };
     const ratio = (fg, bg) => { const a = lum(fg), b = lum(bg); return +(((Math.max(a,b)+0.05)/(Math.min(a,b)+0.05)).toFixed(2)); };
+    // **背景要一路向上找到真正不透明的祖先**：只查一级时，中间层若也是
+    // rgba(0,0,0,0) 就会拿"透明黑"当底色算——实测产物卡片小字因此被算成 3.55:1
+    // （真实值 #5c656f on #f7f8fa = 5.57:1，本达标），属于探针自身的假告警。
+    const effectiveBg = (el) => {
+      for (let node = el; node; node = node.parentElement) {
+        const bg = getComputedStyle(node).backgroundColor;
+        if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') return bg;
+      }
+      return getComputedStyle(document.body).backgroundColor || 'rgb(255, 255, 255)';
+    };
     const probe = (sel) => { const el = document.querySelector(sel); if (!el) return null; const cs = getComputedStyle(el);
-      let bg = cs.backgroundColor;
-      if (bg === 'rgba(0, 0, 0, 0)') bg = getComputedStyle(el.parentElement).backgroundColor;
+      // **渐变背景不能按 background-color 算**：用户气泡的底色来自
+      // 背景图用了 brand-gradient 变量，而 background-color 一路透明到
+      // body 的白色——直接算会得到「白字白底 1:1」的假告警。
+      // 这里标注出来交给 probe-codex-ui.mjs（它按渐变端点色实测，气泡为 4.71:1）。
+      const gradientEl = (() => { for (let n = el; n; n = n.parentElement) { if (getComputedStyle(n).backgroundImage !== 'none') return n; } return null; })();
+      if (gradientEl) return { bg: 'gradient', fg: cs.color, ratio: null, note: '渐变底，由 probe-codex-ui 实测' };
+      const bg = effectiveBg(el);
       return { bg, fg: cs.color, ratio: ratio(cs.color, bg) }; };
     return JSON.stringify({ artifactCard: probe('.pg-artifact-card'), artifactSmall: probe('.pg-artifact-name small'), codeBlock: probe('.md-code'), bubble: probe('.pg-bubble') });
   })()`);

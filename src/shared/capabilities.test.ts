@@ -110,3 +110,30 @@ describe("classifyEnvironment 磁盘读数未知", () => {
     expect(result.recommendations.some((r) => r.includes("45GB"))).toBe(true);
   });
 });
+
+// 内存读数未知是同一类问题：`si.mem()` 在 Windows 上走 WMI，超时后
+// `systemInspector` 的兜底会把它置 0。照常比较的话，够用的机器会被判成 D 级。
+describe("classifyEnvironment 内存读数未知", () => {
+  it("内存读不到时按显存仍判 C 级，并提示自行确认内存", () => {
+    const result = classifyEnvironment({
+      gpus: [{ vendor: "NVIDIA", model: "RTX 4090", vramBytes: 24 * 1024 ** 3 }],
+      memoryTotalBytes: 0,
+      diskFreeBytes: 100 * 1024 ** 3,
+      comfyReachable: true,
+      comfyHasH3Nodes: true
+    });
+    expect(result.grade).toBe("C");
+    expect(result.recommendations.some((r) => r.includes("内存"))).toBe(true);
+  });
+
+  it("内存读数正常但确实不足时仍判 D 级（不误放行）", () => {
+    const result = classifyEnvironment({
+      gpus: [{ vendor: "NVIDIA", model: "RTX 4090", vramBytes: 24 * 1024 ** 3 }],
+      memoryTotalBytes: 8 * 1024 ** 3,
+      diskFreeBytes: 100 * 1024 ** 3,
+      comfyReachable: true,
+      comfyHasH3Nodes: true
+    });
+    expect(result.grade).toBe("D");
+  });
+});

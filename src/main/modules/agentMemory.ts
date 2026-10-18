@@ -15,18 +15,29 @@ export function buildAgentMemoryHint(tasks: GenerationTask[]): string {
   const topMode = (values: Array<string | undefined>, unit: string) => {
     const counts = new Map<string, number>();
     for (const value of values) {
-      if (value == null) continue;
+      // **空串必须跳过**，不能当成一个取值参与统计。
+      // `String(t.request?.duration ?? "")` 会给"没有这个字段"的任务塞一个 `""`，
+      // 而它与真实值平票时，Map 里**先插入**的那个胜出——于是缺字段的任务排在前面时，
+      // `best` 拿到空串、`best ? …` 判假，整条「常用时长 / 常用数量」提示**静默消失**。
+      // 实测（probe-memory2）：同样的 4 条任务，只是缺字段的排在前后不同，
+      // 提示就时有时无。用户看不到任何线索说"你的习惯没被采用"。
+      if (value == null || value === "") continue;
       counts.set(value, (counts.get(value) ?? 0) + 1);
     }
-    const [best, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? [];
+    // 平票时按字典序定序：`sort` 对平票元素保留插入顺序，结果会随任务顺序变化，
+    // 同一批任务在列表重排后给出的"习惯"会莫名其妙地换一个。
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const [best, n] = ranked[0] ?? [];
     return best ? `（${n}/${real.length} 条任务为 ${best}${unit}）` : "";
   };
 
-  const durations = real.map((t) => String(t.request?.duration ?? ""));
+  // 用 `Number.isFinite` 而不是 `?? ""`：字段可能是 `undefined`、也可能是脏数据。
+  // 缺字段时必须传 `undefined`（而不是空串），交给 topMode 跳过。
+  const durations = real.map((t) => (Number.isFinite(t.request?.duration) ? String(t.request!.duration) : undefined));
   const durationHint = topMode(durations, " 秒");
   if (durationHint) lines.push(`常用时长${durationHint}`);
 
-  const counts = real.map((t) => String(t.request?.count ?? ""));
+  const counts = real.map((t) => (Number.isFinite(t.request?.count) ? String(t.request!.count) : undefined));
   const countHint = topMode(counts, " 路");
   if (countHint) lines.push(`常用数量${countHint}`);
 

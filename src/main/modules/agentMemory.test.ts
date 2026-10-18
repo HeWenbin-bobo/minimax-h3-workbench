@@ -47,4 +47,27 @@ describe("buildAgentMemoryHint", () => {
     expect(hint.startsWith("\n\n")).toBe(true);
     expect(hint).toContain("用户明确说了的参数永远优先");
   });
+
+  // 回归：`String(t.request?.duration ?? "")` 会给"没有这个字段"的任务塞一个空串，
+  // 它与真实值平票时，Map 里**先插入**的胜出——缺字段的任务排在前面时，
+  // `best` 拿到空串、`best ? …` 判假，整条提示静默消失。
+  // 实测（probe-memory2）：同样的 4 条任务，只是缺字段的排在前后不同，提示就时有时无。
+  it("部分任务缺 duration/count 时，仍能提炼出其余任务的习惯（不受排序影响）", () => {
+    const withFields = () => task({ request: { duration: 6, count: 2 } as never });
+    const withoutFields = () => task({});
+    for (const tasks of [
+      [withoutFields(), withoutFields(), withFields(), withFields()],
+      [withFields(), withFields(), withoutFields(), withoutFields()]
+    ]) {
+      const hint = buildAgentMemoryHint(tasks);
+      expect(hint).toContain("常用时长（2/4 条任务为 6 秒）");
+      expect(hint).toContain("常用数量（2/4 条任务为 2 路）");
+    }
+  });
+
+  // 脏数据（duration 被写成字符串）不该被当成一个"习惯值"统计出来。
+  it("duration 非数字时不产生「常用时长」", () => {
+    const tasks = Array.from({ length: 3 }, () => task({ request: { duration: "abc" } as never }));
+    expect(buildAgentMemoryHint(tasks)).not.toContain("常用时长");
+  });
 });

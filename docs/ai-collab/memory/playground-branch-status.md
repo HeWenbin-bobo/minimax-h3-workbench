@@ -1,19 +1,23 @@
 ---
 name: playground-branch-status
-description: v0.2.1 已发布；2026-10-18 探索模式连续修复，365 笔未推送（HEAD 66585dd）
+description: v0.3.0 已发布；feature/agent-iteration 已 squash 合入 main 并推送（379 笔 → 一条 merge 提交）
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-18T15:22:00.000Z
+  modified: 2026-10-18T15:50:00.000Z
 ---
 
-**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 365 笔（未推送）。**
+**状态（2026-10-18）：`v0.3.0` 已发布。`feature/agent-iteration` 的 379 笔提交已**
+**squash 合入 `main`（`c708747`）并推送；tag `v0.3.0` 已推、CI 全绿、Release 已转正式。**
 
-- `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
-- HEAD = `66585dd`。
-- 验证基线：`npm test` **528 项 / 39 文件**全绿；typecheck、build 通过；
-  E2E test-01/02/03/04/05/06/07/08/09/10 逐个复跑通过。
+- `v0.3.0` Release 含三件套：`latest.yml` + `minimax-h3-workbench-setup-0.3.0.exe`（95.7MB）+ `.blockmap`。
+- `main` HEAD = `c708747`；`feature/agent-iteration` HEAD = `fb9488e`（内容与 main 一致）。
+- 验证基线：`npm test` **549 项 / 39 文件**全绿；typecheck、build 通过；
+  E2E test-01/02/03/05/06/07 复跑通过；`probe-preview`(22/22)、`probe-compaction`(22/22) 等探针全过。
+- 路径相关逻辑（`artifactDir` / `csv` / `dimensions`）已在 **WSL Ubuntu + Node 24**（与 CI 同版本）额外验证。
+- CI 手动触发：`POST /actions/workflows/build.yml/dispatches {"ref":"v0.3.0"}`
+  （该 fork 推 tag 不会自动跑，见 CLAUDE.md「坑①」）；`test` / 两个 package job / `release` 全部 success。
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
 - HEAD = `9639b6c`。

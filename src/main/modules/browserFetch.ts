@@ -7,8 +7,9 @@
  * 需要更低层的控制（拦截请求、改 UA、走原生 CDP 域）时，可在此基础上接
  * `webContents.debugger`（Electron 暴露的原始 CDP），无需新增依赖。
  */
+import { lookup } from "node:dns/promises";
 import { BrowserWindow, session } from "electron";
-import { assertPublicHttpUrl } from "../backends/resultUrl";
+import { assertPublicHttpUrl, assertPublicHttpUrlResolved } from "../backends/resultUrl";
 
 // 专用分区：渲染搜索页不与应用主窗口共享 Cookie/存储，避免互相污染。
 const PARTITION = "persist:h3-browser-fetch";
@@ -33,6 +34,49 @@ function harden(win: BrowserWindow, ses: Electron.Session): void {
   // 只实现其一会漏（electron.d.ts 对 setPermissionCheckHandler 有明确说明）。
   ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   ses.setPermissionCheckHandler(() => false);
+  installNavigationDnsGuard(ses);
+}
+
+/**
+ * 主框架导航的 **DNS 解析校验**（SSRF 第三跳）。
+ *
+ * `will-redirect` / `will-navigate` 是同步事件，只能比字面 hostname；而
+ * `127.0.0.1.nip.io` / `localtest.me` 这类**通配 DNS** 把内网 IP 编进域名，
+ * 字面完全正常、解析后落到回环地址（实测 probe-ssrf-nipio 读回了本机服务内容）。
+ * 302 跳过去同样成立——同步守卫拦不住。
+ *
+ * `webRequest.onBeforeRequest` 的回调是**异步**的，可以在这里做 DNS 再决定是否取消。
+ * 只校验 `mainFrame`：子资源（图片/字体）跳到内网读不回内容，逐条解析会把每个页面
+ * 拖慢几百毫秒。按 host 缓存 60 秒，避免同一页面重复解析。
+ *
+ * 同一个 session 只保留一个 handler（Electron 的 `onBeforeRequest` 是单监听器语义，
+ * 重复注册即覆盖），所以这里不需要去重标志；handler 本身无窗口状态，覆盖是安全的。
+ */
+function installNavigationDnsGuard(ses: Electron.Session): void {
+  ses.webRequest.onBeforeRequest(async (details, callback) => {
+    if (details.resourceType !== "mainFrame") { callback({}); return; }
+    let protocol = "";
+    try { protocol = new URL(details.url).protocol; } catch { callback({ cancel: true }); return; }
+    // 内部 scheme 与 data/blob（预览页）不过网络，放行。
+    if (!protocol.startsWith("http")) { callback({}); return; }
+    try {
+      await assertPublicHttpUrlResolved(details.url, cachedLookup);
+      callback({});
+    } catch {
+      callback({ cancel: true });
+    }
+  });
+}
+
+/** DNS 结果缓存（60 秒）。只缓存成功结果——失败要重新解析，不能缓存成"永久不可达"。 */
+const dnsCache = new Map<string, { at: number; addresses: Array<{ address: string }> }>();
+const DNS_CACHE_MS = 60_000;
+async function cachedLookup(host: string): Promise<Array<{ address: string }>> {
+  const hit = dnsCache.get(host);
+  if (hit && Date.now() - hit.at < DNS_CACHE_MS) return hit.addresses;
+  const addresses = await lookup(host, { all: true });
+  dnsCache.set(host, { at: Date.now(), addresses });
+  return addresses;
 }
 
 // 隐藏窗口是重资源：串行执行，避免并发开一堆窗口把内存打满。

@@ -1318,7 +1318,21 @@ function registerIpc(
       try {
         const book = XLSX.readFile(resolved);
         const first = book.SheetNames[0];
-        return first ? XLSX.utils.sheet_to_csv(book.Sheets[first]) : "";
+        if (!first) return "";
+        const sheet = book.Sheets[first];
+        // **必须自己限行**：`sheet_to_csv` 没有上限选项，整表转成字符串后要随 IPC
+        // 传给渲染端。一个 10 万行 × 4 列的表格会转出十几 MB 文本——
+        // 主进程拼一次、IPC 复制一次、渲染端再 JSON 解析一次，三份同时驻留。
+        // 渲染端本来也只渲染前 500 行（`MAX_PREVIEW_ROWS`），这里多留些余量取 2000 行，
+        // 并如实告知被截断了多少——不静默少给。
+        const range = XLSX.utils.decode_range(sheet["!ref"] || "A1");
+        const MAX_ROWS = 2_000;
+        const rowCount = range.e.r - range.s.r + 1;
+        if (rowCount > MAX_ROWS) {
+          const capped = { ...sheet, "!ref": XLSX.utils.encode_range({ s: range.s, e: { r: range.s.r + MAX_ROWS - 1, c: range.e.c } }) };
+          return `${XLSX.utils.sheet_to_csv(capped)}\n\n（表格共 ${rowCount} 行，预览仅解析前 ${MAX_ROWS} 行；完整内容可在文件夹中打开）`;
+        }
+        return XLSX.utils.sheet_to_csv(sheet);
       } catch (error) {
         // SheetJS 对损坏文件抛的是英文内部错误（实测 "Unsupported ZIP encryption"）。
         // 预览面板会把它原样显示成"读取失败：Unsupported ZIP encryption"，

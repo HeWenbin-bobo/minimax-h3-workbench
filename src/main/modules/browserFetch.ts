@@ -52,7 +52,11 @@ function harden(win: BrowserWindow, ses: Electron.Session): void {
  * 同一个 session 只保留一个 handler（Electron 的 `onBeforeRequest` 是单监听器语义，
  * 重复注册即覆盖），所以这里不需要去重标志；handler 本身无窗口状态，覆盖是安全的。
  */
-function installNavigationDnsGuard(ses: Electron.Session): void {
+function installNavigationDnsGuard(
+  ses: Electron.Session,
+  /** 注入 DNS 解析（默认带 60 秒缓存）。单测用它锁定行为，不必联网。 */
+  resolver: (host: string) => Promise<Array<{ address: string }>> = cachedLookup
+): void {
   ses.webRequest.onBeforeRequest(async (details, callback) => {
     if (details.resourceType !== "mainFrame") { callback({}); return; }
     let protocol = "";
@@ -60,7 +64,7 @@ function installNavigationDnsGuard(ses: Electron.Session): void {
     // 内部 scheme 与 data/blob（预览页）不过网络，放行。
     if (!protocol.startsWith("http")) { callback({}); return; }
     try {
-      await assertPublicHttpUrlResolved(details.url, cachedLookup);
+      await assertPublicHttpUrlResolved(details.url, resolver);
       callback({});
     } catch {
       callback({ cancel: true });
@@ -78,6 +82,9 @@ async function cachedLookup(host: string): Promise<Array<{ address: string }>> {
   dnsCache.set(host, { at: Date.now(), addresses });
   return addresses;
 }
+
+/** 仅测试用：直接装守卫并注入解析器（产品路径由 renderOnce → harden 调用）。 */
+export const installNavigationDnsGuardForTest = installNavigationDnsGuard;
 
 // 隐藏窗口是重资源：串行执行，避免并发开一堆窗口把内存打满。
 let chain: Promise<void> = Promise.resolve();

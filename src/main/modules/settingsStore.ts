@@ -133,23 +133,36 @@ function decryptSecret(encrypted: string): string {
 }
 
 /**
- * 读不出来的配置文件先挪成备份，再让调用方用默认值继续。
+ * 内容确实损坏时才把配置文件挪成备份。
  *
- * 为什么必须备份：`update()` / `setSecret()` 都是**读-改-写**。若读取失败时
+ * 为什么必须备份：`update()` / `setSecret()` 都是**读-改-写**。若解析失败时
  * 直接返回默认值（或空对象），下一次写盘就会把「默认值 + 本次 patch」整份落盘，
  * 用户原有的配置/密钥被永久抹掉。把坏文件挪走有两个好处：
  * ① 数据还在，用户/支持人员可以手工找回；
  * ② 原路径让开，下次启动不会继续踩同一个坏文件。
  *
- * `ENOENT`（文件本来就不存在）不备份——那才是"确实没有配置"。
+ * **但"读不到"和"内容坏了"是两回事**：
+ * - `ENOENT`：文件本来就不存在，什么都不做；
+ * - `EBUSY`/`EACCES`/`EPERM` 等 I/O 错误：文件很可能**是好的**，只是被杀毒软件
+ *   或别的程序临时占着。此时改名反而会把完好的配置挪走（用户下次启动看到默认值，
+ *   还以为设置丢了）。这类失败只记录，不动文件；
+ * - `SyntaxError`（JSON 解析失败）：内容确定是坏的，才备份。
  */
 async function backupCorruptFile(filePath: string, error: unknown): Promise<void> {
   const code = (error as { code?: unknown })?.code;
   if (code === "ENOENT") return;
+  const corrupt = error instanceof SyntaxError;
+  if (!corrupt) {
+    console.error(
+      `[settings] ${path.basename(filePath)} 读取失败（未改动文件）：`,
+      error instanceof Error ? error.message : error
+    );
+    return;
+  }
   const backup = `${filePath}.corrupt-${Date.now()}`;
   await rename(filePath, backup).catch(() => undefined);
   console.error(
-    `[settings] ${path.basename(filePath)} 读取失败，已备份为 ${path.basename(backup)}：`,
+    `[settings] ${path.basename(filePath)} 内容损坏，已备份为 ${path.basename(backup)}：`,
     error instanceof Error ? error.message : error
   );
 }

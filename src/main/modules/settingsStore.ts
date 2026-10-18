@@ -1,8 +1,9 @@
 import { app, safeStorage } from "electron";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AppSettings, SecretName } from "../../shared/types";
 import { SECRET_NAMES } from "../../shared/types";
+import { backupCorruptFile, readJsonFile } from "./jsonFile";
 
 const defaultSettings = (): AppSettings => ({
   localComfyUrl: "http://127.0.0.1:8188",
@@ -133,57 +134,24 @@ function decryptSecret(encrypted: string): string {
 }
 
 /**
- * 内容确实损坏时才把配置文件挪成备份。
- *
- * 为什么必须备份：`update()` / `setSecret()` 都是**读-改-写**。若解析失败时
- * 直接返回默认值（或空对象），下一次写盘就会把「默认值 + 本次 patch」整份落盘，
- * 用户原有的配置/密钥被永久抹掉。把坏文件挪走有两个好处：
- * ① 数据还在，用户/支持人员可以手工找回；
- * ② 原路径让开，下次启动不会继续踩同一个坏文件。
- *
- * **但"读不到"和"内容坏了"是两回事**：
- * - `ENOENT`：文件本来就不存在，什么都不做；
- * - `EBUSY`/`EACCES`/`EPERM` 等 I/O 错误：文件很可能**是好的**，只是被杀毒软件
- *   或别的程序临时占着。此时改名反而会把完好的配置挪走（用户下次启动看到默认值，
- *   还以为设置丢了）。这类失败只记录，不动文件；
- * - `SyntaxError`（JSON 解析失败）：内容确定是坏的，才备份。
+ * 读取失败后的备份与重试策略统一在 `modules/jsonFile.ts`（三个「读-改-写」的
+ * 配置文件共用，含 I/O 错误重试与 `.corrupt-*` 备份）。
  */
-async function backupCorruptFile(filePath: string, error: unknown): Promise<void> {
-  const code = (error as { code?: unknown })?.code;
-  if (code === "ENOENT") return;
-  const corrupt = error instanceof SyntaxError;
-  if (!corrupt) {
-    console.error(
-      `[settings] ${path.basename(filePath)} 读取失败（未改动文件）：`,
-      error instanceof Error ? error.message : error
-    );
-    return;
-  }
-  const backup = `${filePath}.corrupt-${Date.now()}`;
-  await rename(filePath, backup).catch(() => undefined);
-  console.error(
-    `[settings] ${path.basename(filePath)} 内容损坏，已备份为 ${path.basename(backup)}：`,
-    error instanceof Error ? error.message : error
-  );
-}
-
 export class SettingsStore {
   private readonly filePath = path.join(app.getPath("userData"), "settings.json");
   private readonly secretPath = path.join(app.getPath("userData"), "secrets.json");
 
   async get(): Promise<AppSettings> {
     try {
-      const raw = JSON.parse(await readFile(this.filePath, "utf8")) as Partial<AppSettings>;
+      const raw = await readJsonFile<Partial<AppSettings>>(this.filePath);
       return normalizeSettings(raw, defaultSettings());
     } catch (error) {
       // **读不出来 ≠ 没有设置**：`update()` 是读-改-写，旧实现这里直接返回默认值，
       // 于是下一次保存会把「默认值 + patch」整份写回磁盘——
       // 用户的地址、输出目录、模型名、系统提示词全部被抹掉。
-      // 触发条件不罕见：杀毒软件短暂锁文件（EBUSY/EACCES）、文件被手工改坏。
-      // 与 TaskStore.load 同一处理：非 ENOENT 的失败先把坏文件挪成备份，
-      // 至少让用户还有找回的机会。（这里不抛错：settings 被主进程多处读取，
-      // 抛错会让整个应用不可用，返回默认值更合适。）
-      await backupCorruptFile(this.filePath, error);
+      // 非 ENOENT 的失败先把原文件备份，至少让用户还有找回的机会。
+      // （这里不抛错：settings 被主进程多处读取，抛错会让整个应用不可用。）
+      await backupCorruptFile(this.filePath, error, "settings");
       return defaultSettings();
     }
   }
@@ -285,7 +253,8 @@ export class SettingsStore {
    */
   private async readSecrets(): Promise<Record<string, string>> {
     try {
-      const raw = JSON.parse(await readFile(this.secretPath, "utf8")) as unknown;
+      // 与 settings.json 同一套读取策略（I/O 错误重试；失败时备份 `.corrupt-*`）。
+      const raw = await readJsonFile<unknown>(this.secretPath);
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
       const out: Record<string, string> = {};
       for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
@@ -296,8 +265,7 @@ export class SettingsStore {
       // **读取失败必须备份**：`setSecret()` 是读-改-写，读失败返回 {} 后
       // 只写回「本次这一个密钥」——其余四个已保存的 Key 被静默清空，
       // 用户下次生成时才发现"所有后端都要重新填"。
-      // 与 `get()` 同一处理：非 ENOENT 的错误先把坏文件挪成 `.corrupt-*`。
-      await backupCorruptFile(this.secretPath, error);
+      await backupCorruptFile(this.secretPath, error, "settings");
       return {};
     }
   }

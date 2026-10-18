@@ -1,7 +1,8 @@
 import { app } from "electron";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { GenerationTask } from "../../shared/types";
+import { backupCorruptFile, readJsonFile } from "./jsonFile";
 
 const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 
@@ -29,7 +30,8 @@ export class TaskStore {
 
   async load(): Promise<GenerationTask[]> {
     try {
-      const raw = JSON.parse(await readFile(this.filePath, "utf8"));
+      // 与 settings/secrets 共用同一套读取策略（I/O 错误重试，失败时备份）。见 jsonFile.ts。
+      const raw = await readJsonFile<unknown>(this.filePath);
       // 逐条容错：一条坏数据不该让**全部**任务历史消失。
       // 旧实现直接 `tasks.map(...)` 并靠外层 catch 兜底：数组里只要有一个 null/非对象，
       // 访问 `task.status` 就抛 TypeError → catch 返回 [] → 用户的任务记录与回收站里的
@@ -126,17 +128,7 @@ export class TaskStore {
       // - **文件不存在**（ENOENT）：确实没有历史，返回 [] 正常；
       // - 其它失败：先把原文件挪成 `.corrupt-<时间戳>` 备份（保住数据、也避免
       //   下次启动继续踩同一个坏文件），再返回 []。用户仍可在备份里找回内容。
-      const code = (error as { code?: unknown })?.code;
-      if (code !== "ENOENT") {
-        const backup = `${this.filePath}.corrupt-${Date.now()}`;
-        await rename(this.filePath, backup).catch(() => undefined);
-        console.error(
-          "[tasks] 任务历史读取失败，已备份为",
-          backup,
-          "：",
-          error instanceof Error ? error.message : error
-        );
-      }
+      await backupCorruptFile(this.filePath, error, "tasks");
       return [];
     }
   }

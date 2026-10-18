@@ -226,6 +226,15 @@ describe("resolveChatPath", () => {
     expect(resolveChatPath("https://api.minimax.io.evil.com/v1")).toBe("/chat/completions");
   });
 
+  // 尾点是 FQDN 根锚定写法，DNS 解析与无尾点完全等价，官方接口照样能通。
+  // 只比字面量会让同一个服务走错端点（→ 404），而用户在连接设置里看不出区别。
+  it("带尾点的官方域名仍走私有端点（与 assertPublicHost 同一口径）", () => {
+    expect(resolveChatPath("https://api.minimax.io./v1")).toBe("/text/chatcompletion_v2");
+    expect(resolveChatPath("https://api.minimaxi.com./v1")).toBe("/text/chatcompletion_v2");
+    // 只剥尾点，不放松相似域名判定。
+    expect(resolveChatPath("https://api.minimax.io.evil.com./v1")).toBe("/chat/completions");
+  });
+
   it("非法 baseUrl 不抛错", () => {
     expect(resolveChatPath("not-a-url")).toBe("/chat/completions");
     expect(resolveChatPath("")).toBe("/chat/completions");

@@ -277,7 +277,12 @@ export class LlmService {
 // 用 hostname 精确比对，避免 api.minimax.io.evil.com 这类相似域名误命中。
 export function resolveChatPath(baseUrl: string): string {
   let host = "";
-  try { host = new URL(baseUrl).hostname.toLowerCase(); } catch { host = ""; }
+  try {
+    // **必须去掉尾点**：`api.minimax.io.` 是 FQDN 根锚定写法，DNS 解析与无尾点完全等价，
+    // 官方接口照样能通。这里若只比字面量，同一个服务会走错端点（→ 404），
+    // 而用户在「连接设置」里完全看不出两者有什么区别。与 `assertPublicHost` 同一口径。
+    host = new URL(baseUrl).hostname.toLowerCase().replace(/\.+$/, "");
+  } catch { host = ""; }
   const isOfficialMinimax = host === "api.minimax.io" || host === "api.minimaxi.com";
   return isOfficialMinimax ? "/text/chatcompletion_v2" : "/chat/completions";
 }

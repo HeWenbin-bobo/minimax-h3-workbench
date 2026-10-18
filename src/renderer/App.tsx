@@ -661,6 +661,10 @@ function ResourcesPage({ resources, settings, onSettingsChange, onError }: { res
     // 界面显示"已选好目录"、检查按钮按新目录去读，重启后却又变回旧目录。
     try {
       const response = await window.h3.selectDirectory();
+      // `ok:false` 也要报出来：对话框打不开（主进程 handler 异常、窗口已销毁）时
+      // 只判 `data` 会静默 return——用户点了「选择目录」毫无反应，
+      // 与连接页那个「选择」按钮踩过的是同一个坑（那边已经判了 ok）。
+      if (!response.ok) { onError(response.message || "无法打开目录选择器"); return; }
       if (!response.data) return;
       const saved = await window.h3.updateSettings({ comfyuiRoot: response.data });
       if (!saved.ok) { onError(saved.message || "保存目录失败"); return; }

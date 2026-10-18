@@ -221,8 +221,12 @@ export function App() {
         <span>{themeLabel(theme)}</span>
       </button>
       <button className={`sidebar-update ${updateInfo?.updateAvailable ? "available" : ""}`} onClick={update} disabled={checkingUpdate || installing}>
-        <span className="status-dot" /><span><strong>{installing ? "正在下载更新…" : updateInfo?.updateAvailable ? "立即更新" : checkingUpdate ? "正在检查…" : "检查更新"}</strong><small>{installing ? (updateProgress === undefined ? "正在连接下载源…" : `已完成 ${updateProgress}%，完成后自动重启`) : updateInfo?.updateAvailable ? `v${updateInfo.latestVersion} 可安装` : updateInfo?.currentVersion ? `轻量版 v${updateInfo.currentVersion}` : "点击检查新版本"}</small></span>
-        {installing && updateProgress !== undefined && <span className="download-progress" style={{ width: "100%" }}><i style={{ width: `${updateProgress}%` }} /></span>}
+        <span className="status-dot" /><span><strong>{installing ? "正在下载更新…" : updateInfo?.updateAvailable ? "立即更新" : checkingUpdate ? "正在检查…" : "检查更新"}</strong><small>{installing ? (updateProgress === undefined ? "正在连接下载源…" : `已完成 ${updateProgress}%，完成后自动重启`) : updateInfo?.updateAvailable ? `v${updateInfo.latestVersion} 可安装` : updateInfo?.currentVersion ? `轻量版 v${updateInfo.currentVersion}` : "点击检查新版本"}</small>
+          {/* 进度条要放在**文字块内部**：外层按钮是 `display:flex; align-items:center`，
+              直接当第三个 flex 子元素会被排在右侧、把文字挤窄。
+              文字块本身是 `display:grid`（行内再放一条即第三行，天然占满宽度）。 */}
+          {installing && updateProgress !== undefined && <span className="download-progress" aria-hidden><i style={{ width: `${updateProgress}%` }} /></span>}
+        </span>
       </button></aside>
     <main className="main-area">
       {page === "ready" && <ReadyPage report={report} busy={detecting} onDetect={detect} onNavigate={setPage} />}

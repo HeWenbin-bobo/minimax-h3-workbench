@@ -156,9 +156,15 @@ function parseTableRow(line: string): string[] {
 }
 
 // 行内：`code`、**bold**、[text](https-url)。先切行内元素再拼纯文本。
+//
+// **只把 https 渲染成链接**（不是 `https?`）：主进程的 `setWindowOpenHandler` 与
+// `shell:openExternal` 都只放行 HTTPS（CLAUDE.md 的安全约束，不能放宽）。
+// 若这里把 `http://` 也渲染成 <a target="_blank">，用户看到可点击样式、点下去
+// 却被静默拒绝——"点了没反应"，比直接显示成纯文本更糟。
+// http 链接因此保留为普通文本（可复制），不伪装成可点击。
 function inline(text: string, keyBase: number): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https:\/\/[^)\s]+)\)/g;
   let last = 0;
   let match: RegExpExecArray | null;
   let key = keyBase * 1000;

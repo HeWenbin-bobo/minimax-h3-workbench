@@ -86,7 +86,14 @@ export class SshTunnel {
     this.server = net.createServer((socket) => {
       this.sockets.add(socket);
       socket.on("close", () => this.sockets.delete(socket));
-      this.client!.forwardOut(
+      // **不能在这里用 `this.client!`**。`close()` 会把字段清空，而已经进入 accept 队列
+      // 的连接仍可能在此之后被回调——断言成非空的话 `forwardOut` 会抛 TypeError，
+      // 且它发生在 net 的 connection 监听器里，**没有任何调用方能接住**：
+      // 未捕获异常会把 Electron 主进程直接带走（实测 probe-tunnel-race：
+      // 在 connection 回调里对 undefined 调方法，抛出的 TypeError 就是未处理异常）。
+      const client = this.client;
+      if (!client) { socket.destroy(); return; }
+      client.forwardOut(
         socket.remoteAddress || "127.0.0.1",
         socket.remotePort || 0,
         this.config.remoteComfyHost,

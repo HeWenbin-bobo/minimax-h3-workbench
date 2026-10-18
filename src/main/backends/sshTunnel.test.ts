@@ -1,5 +1,9 @@
 import { EventEmitter } from "node:events";
+import net from "node:net";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+/** `net.createServer` 的 connection 监听器（由用例拦截后手动触发，模拟 close 之后的迟到连接）。 */
+let capturedConnectionListener: ((socket: unknown) => void) | undefined;
 
 /**
  * 模拟 ssh2 的 Client：真实实现同样是 EventEmitter，握手成功后仍会在连接中断时 emit 'error'。
@@ -142,6 +146,36 @@ describe("SshTunnel 断线处理", () => {
     expect(FakeClient.lastExecStream?.destroyed).toBe(true);
     tunnel.close();
   });
+  // `close()` 会清空 client 字段，而**已经进入 accept 队列的连接**仍可能在此之后
+  // 被 net 回调。旧写法用 `this.client!` 断言 → `forwardOut` 在 connection 监听器里
+  // 抛 TypeError，没有任何调用方能接住（实测 probe-tunnel-race：该 TypeError 就是
+  // 未处理异常），Electron 主进程会被直接带走。
+  it("close 之后仍被回调的连接不会抛未处理异常", async () => {
+    const realCreateServer = net.createServer.bind(net);
+    const spy = vi.spyOn(net, "createServer").mockImplementation(((listener: never) => {
+      capturedConnectionListener = listener as unknown as (socket: unknown) => void;
+      return realCreateServer(listener);
+    }) as never);
+    try {
+      const tunnel = new SshTunnel(config, "pw");
+      await tunnel.start();
+      tunnel.close();
+      // 模拟 close 之后才被回调的连接。
+      const socket = Object.assign(new EventEmitter(), {
+        remoteAddress: "127.0.0.1",
+        remotePort: 1234,
+        destroyed: false,
+        destroy() { this.destroyed = true; },
+        pipe() { return this; }
+      });
+      expect(() => capturedConnectionListener!(socket)).not.toThrow();
+      expect(socket.destroyed).toBe(true); // 明确拒掉，而不是挂在那
+    } finally {
+      spy.mockRestore();
+      capturedConnectionListener = undefined;
+    }
+  });
+
   it("未配置主机时给出中文提示", async () => {
     const tunnel = new SshTunnel({ ...config, host: "" }, "pw");
     await expect(tunnel.start()).rejects.toThrow(/请填写 SSH 主机和用户名/);

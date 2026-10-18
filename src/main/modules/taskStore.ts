@@ -113,7 +113,30 @@ export class TaskStore {
         });
       }
       return recovered;
-    } catch {
+    } catch (error) {
+      // **读不出来不等于"没有历史"**。
+      //
+      // 旧实现直接 `return []`：调用方（orchestrator.initialize）把空数组当成当前任务表，
+      // 之后任何一次写盘（提交新任务、甚至一条进度更新）都会把 `[]` **覆盖**回
+      // tasks.json —— 用户的历史记录与回收站内容被永久抹掉。
+      // 触发条件并不罕见：杀毒软件短暂锁文件（EBUSY/EACCES）、磁盘故障、
+      // 或文件被手工改坏（JSON 解析失败）。
+      //
+      // 现在分两种情况：
+      // - **文件不存在**（ENOENT）：确实没有历史，返回 [] 正常；
+      // - 其它失败：先把原文件挪成 `.corrupt-<时间戳>` 备份（保住数据、也避免
+      //   下次启动继续踩同一个坏文件），再返回 []。用户仍可在备份里找回内容。
+      const code = (error as { code?: unknown })?.code;
+      if (code !== "ENOENT") {
+        const backup = `${this.filePath}.corrupt-${Date.now()}`;
+        await rename(this.filePath, backup).catch(() => undefined);
+        console.error(
+          "[tasks] 任务历史读取失败，已备份为",
+          backup,
+          "：",
+          error instanceof Error ? error.message : error
+        );
+      }
       return [];
     }
   }

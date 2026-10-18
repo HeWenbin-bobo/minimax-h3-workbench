@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -51,6 +51,18 @@ describe("TaskStore.load 坏数据容错", () => {
   it("文件损坏（非 JSON）返回空数组", async () => {
     await writeFile(taskFile(), "{ 半截", "utf8");
     await expect(new TaskStore().load()).resolves.toEqual([]);
+  });
+
+  // 读不出来 ≠ 没有历史：旧实现直接返回 []，之后任何一次写盘（提交任务/进度更新）
+  // 都会把 [] 覆盖回 tasks.json，用户的任务历史与回收站被**永久抹掉**。
+  // 现在非 ENOENT 的失败会先把原文件挪成 `.corrupt-<时间戳>` 备份。
+  it("文件损坏时把原文件备份下来，不直接覆盖丢数据", async () => {
+    await writeFile(taskFile(), "{ 半截", "utf8");
+    await new TaskStore().load();
+    const files = await readdir(userData);
+    expect(files.some((name) => name.startsWith("tasks.json.corrupt-"))).toBe(true);
+    // 原路径已让开（下一次写盘不会再覆盖损坏文件）
+    await expect(readFile(taskFile(), "utf8")).rejects.toThrow();
   });
 
   it("未完成的任务标记为 interrupted 并写回磁盘", async () => {

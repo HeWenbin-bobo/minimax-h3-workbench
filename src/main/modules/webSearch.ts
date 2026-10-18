@@ -165,7 +165,14 @@ export function parseBing(html: string): SearchResult[] {
   let match: RegExpExecArray | null;
   while ((match = block.exec(html)) !== null && items.length < MAX_RESULTS) {
     const snippet = /<p[^>]*>([\s\S]*?)<\/p>/.exec(match[3]);
-    items.push({ url: match[1], title: stripHtml(match[2]), snippet: snippet ? stripHtml(snippet[1]).slice(0, 200) : "" });
+    // href 同样要补全：Bing 的真实结果里常出现 `/ck/a?…` 这类**站点相对**跳转链接，
+    // 原样交给模型后 `open_page` 拿到的是没有协议的字符串（`z.string().url()` 直接拒），
+    // 用户点开也无从下手。与 `parseSogou` 共用同一个 `resolveHref`。
+    items.push({
+      url: resolveHref(match[1], "https://www.bing.com"),
+      title: stripHtml(match[2]),
+      snippet: snippet ? stripHtml(snippet[1]).slice(0, 200) : ""
+    });
   }
   return items;
 }

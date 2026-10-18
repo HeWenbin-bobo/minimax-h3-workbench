@@ -797,7 +797,15 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
       // 用户改了地址再点「测试连接」，测到的永远是**旧地址**——
       // 他以为新地址可用（或不可用），结论与刚填的内容无关。
       // 与下面 `testLlm()` / `fetchModels()` 同一口径（它们早就这么做了）。
-      setSettings(await must(window.h3.updateSettings(draft)));
+      //
+      // 落盘后要把**归一化后的值**写回草稿（与 save() 同一口径）：
+      // 主进程会纠正非法输入（端口 99999 → 22、空地址 → 默认值），
+      // 只更新 settings 不回写 draft 的话，表单会一直显示用户原始输入——
+      // 测试明明通过了，地址栏却还挂着一个磁盘上并不存在的值。
+      // 用 `current === draft` 守卫：用户在这几百毫秒里继续输入时，不覆盖他的新内容。
+      const saved = await must(window.h3.updateSettings(draft));
+      setSettings(saved);
+      setDraft((current) => (current === draft ? saved : current));
       // 同一张卡片上刚输入的密钥也要先落盘：用户换了 Key 再点测试，
       // 测到旧 Key 会给出"鉴权失败"这种与当前输入无关的结论。
       // 规则与 save() 一致——**留空表示不修改**，只写非空值。
@@ -817,10 +825,12 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
   async function testLlm() {
     setLlmTesting(true); setLlmResult(undefined);
     try {
-      // 这两处同样是"先把草稿落盘"，必须把回读值同步给父组件：
+      // 这两处同样是"先把草稿落盘"，必须把回读值同步给父组件与草稿：
       // 否则切到别的页面再回来，`useState(settings)` 会按旧值重建表单，
       // 用户看到刚填的地址/模型"又变回去了"（实际磁盘上已经是新的）。
-      setSettings(await must(window.h3.updateSettings(draft)));
+      const saved = await must(window.h3.updateSettings(draft));
+      setSettings(saved);
+      setDraft((current) => (current === draft ? saved : current));
       if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey));
       const result = await window.h3.testLlm();
       if (result.data) setLlmResult(result.data); else onError(result.message);
@@ -830,7 +840,9 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
   async function fetchModels() {
     setFetchingModels(true);
     try {
-      setSettings(await must(window.h3.updateSettings(draft)));
+      const saved = await must(window.h3.updateSettings(draft));
+      setSettings(saved);
+      setDraft((current) => (current === draft ? saved : current));
       if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey));
       const response = await window.h3.listLlmModels();
       if (response.data?.ok) { setLlmModels(response.data.models); onNotice(response.data.message); }

@@ -68,7 +68,16 @@ export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentRep
   const diskKnown = input.diskFreeBytes > 0;
   if (diskKnown && input.diskFreeBytes < 70 * GiB) recommendations.push("至少释放 70GB 磁盘空间后再安装完整创作包。 ");
 
-  if (nvidia.length >= 2 && totalVram >= 48 * GiB && input.memoryTotalBytes >= 256 * GiB) {
+  // **内存读数未知时同理**：`systeminformation` 在 Windows 上走 WMI，
+  // 驱动异常时 `si.mem()` 可能超时——`systemInspector` 的兜底会把它置 0。
+  // 与磁盘一样，"读不到"不等于"不够"：照常比较的话，
+  // 一台 24GB 显存的机器会因为内存读数缺失被判成 D 级并显示
+  // 「当前硬件低于量化实验配置」，结论正好相反。
+  const memoryKnown = input.memoryTotalBytes > 0;
+  const memoryAtLeast = (bytes: number) => !memoryKnown || input.memoryTotalBytes >= bytes;
+
+  if (nvidia.length >= 2 && totalVram >= 48 * GiB && memoryAtLeast(256 * GiB)) {
+    if (!memoryKnown) recommendations.push("未能读取内存总量，请自行确认至少 256GB 再开始。 ");
     if (!input.comfyReachable) recommendations.push("安装或启动 ComfyUI 0.30.0+，然后重新检测。 ");
     if (input.comfyReachable && !input.comfyHasH3Nodes) recommendations.push("更新 ComfyUI，当前实例缺少 MiniMax H3 原生节点。 ");
     if (input.comfyHasH3Nodes && input.comfyMissingH3Models?.length) recommendations.push(`安装缺少的 ${input.comfyMissingH3Models.length} 个 H3 模型文件，然后完全重启 ComfyUI。`);
@@ -82,8 +91,9 @@ export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentRep
   // 磁盘门槛在"读不到"时放行（`!diskKnown || …`）：读不到不等于没空间。
   // 放行后补一条提示，让用户自己确认，而不是悄悄按"够用"处理。
   const diskEnough = !diskKnown || input.diskFreeBytes >= 45 * GiB;
-  if (nvidia.length >= 1 && totalVram >= 12 * GiB && input.memoryTotalBytes >= 32 * GiB && diskEnough) {
+  if (nvidia.length >= 1 && totalVram >= 12 * GiB && memoryAtLeast(32 * GiB) && diskEnough) {
     if (!diskKnown) recommendations.push("未能读取磁盘剩余空间，请自行确认至少留出 45GB 再开始。 ");
+    if (!memoryKnown) recommendations.push("未能读取内存总量，请自行确认至少 32GB 再开始。 ");
     if (!input.comfyReachable) recommendations.push("安装或启动 ComfyUI 0.30.0+，然后重新检测。 ");
     if (input.comfyReachable && !input.comfyHasH3Nodes) recommendations.push("更新 ComfyUI，当前实例缺少 MiniMax H3 原生节点。 ");
     if (input.comfyHasH3Nodes && input.comfyMissingH3Models?.length) recommendations.push(`安装缺少的 ${input.comfyMissingH3Models.length} 个 H3 模型文件，然后完全重启 ComfyUI。`);

@@ -266,6 +266,8 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   const [activeProjectId, setActiveProjectId] = useState<string>();
   const activeProject = activeProjectId ? projects.find((group) => (group[0].parentId || group[0].id) === activeProjectId) : undefined;
   const isRb = request.backend === "rb";
+  // 云后端（MiniMax / 瞬映）的请求体里都没有 seed 字段，由服务商自己决定随机性。
+  const isCloud = request.backend === "minimax" || isRb;
   const rbPreset = request.preset || (request.firstFramePath && request.lastFramePath ? "tail_frame" : "reference");
   const setRbPreset = (preset: string) => setRequest({ ...request, preset, duration: clampDuration(request.duration, durationOptionsFor("rb", preset)) });
   const clampedCount = Math.max(1, Math.min(4, request.count));
@@ -422,7 +424,12 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
         {isRb && (rbPreset === "reference" || rbPreset === "tail_frame") && <label>补帧<select value={request.interpolate ? "on" : "off"} onChange={(e) => setRequest({ ...request, interpolate: e.target.value === "on" })}><option value="off">关闭</option><option value="on">开启（更流畅）</option></select></label>}
         <label>结果数量<select value={request.count} onChange={(e) => setRequest({ ...request, count: Number(e.target.value) })}>{[1,2,3,4].map((x) => <option key={x} value={x}>{x} 路</option>)}</select></label>
       </div>
-      <label>基础随机种子<input type="number" value={request.baseSeed} onChange={(e) => setRequest({ ...request, baseSeed: Number(e.target.value) })}/></label>
+      {/* 随机种子只有 ComfyUI（local / ssh）真的用得上：`MiniMaxAdapter` 与 `RbAdapter`
+          的请求体里没有 seed 字段，云端按自己的随机策略出片。
+          对这两个后端显示输入框是"UI 有选项但下游没接线"——用户改了完全无效，
+          任务卡还会显示一个实际没生效的「Seed」。这里按后端隐藏，并说明原因。 */}
+      {isCloud ? <p className="footnote" style={{ margin: 0 }}>该云后端由服务商自行决定随机性，不支持指定种子。</p>
+        : <label>基础随机种子<input type="number" value={request.baseSeed} onChange={(e) => setRequest({ ...request, baseSeed: Number(e.target.value) })}/></label>}
       <div className="submit-area"><div>{request.backend === "minimax" ? <><span>云端估算</span><strong>约 ${estimateCloudCost(request.resolution, request.duration, request.count).toFixed(2)} / {request.count} 条</strong></> : request.backend === "rb" ? <><span>云端估算</span><strong>卡密计费 · {request.count} 条消耗 {request.count} 次</strong></> : <><span>本地生成</span><strong>不产生 API 费用</strong></>}</div><button className="primary" disabled={submitting} onClick={submit}>{submitting ? "提交中…" : `生成 ${request.count} 个结果`}</button></div>
     </div><div className="result-pane"><div className="result-pane-head">{activeProject
       ? <button className="text-button danger" onClick={deleteProject}>🗑 删除此项目</button>

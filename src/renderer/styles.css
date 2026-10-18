@@ -217,7 +217,10 @@ button { cursor: pointer; }
 .sidebar-update { margin-top: auto; width: 100%; display: flex; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); text-align: left; transition: 0.18s ease; }
 .sidebar-update:hover { border-color: var(--brand-border); box-shadow: 0 8px 24px rgba(255, 74, 82, 0.1); }
 .sidebar-update.available { color: #fff; border-color: transparent; background: var(--brand-gradient); box-shadow: 0 10px 24px rgba(255, 74, 82, 0.2); }
-.sidebar-update > span:last-child { display: grid; gap: 2px; }
+/* `flex: 1; min-width: 0`：文字块要占满状态点右侧的剩余宽度。
+   否则它按内容收缩（实测「检查更新 / 轻量版 v0.2.1」只有 55px），
+   而下载进度条就在这个块里（grid 的第三行）——跟着一起被压成 55px 宽，等于没有。 */
+.sidebar-update > span:last-child { display: grid; gap: 2px; flex: 1; min-width: 0; }
 .sidebar-update strong { font-size: 11px; }
 .sidebar-update small { color: var(--muted); font-size: 9px; }
 .sidebar-update.available small { color: rgba(255, 255, 255, 0.78); }
@@ -377,6 +380,9 @@ button { cursor: pointer; }
 .result-grid.single video, .result-grid.single .task-placeholder { height: 420px; }
 .task-card { position: relative; overflow: hidden; min-height: 270px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; display: flex; flex-direction: column; box-shadow: var(--shadow); }
 .task-card video { width: 100%; height: 205px; background: #11141a; object-fit: contain; }
+/* 视频文件不可用时的说明条：播放器（含浏览器自带的媒体错误图标）仍然保留，
+   这里只在它下面补一行可执行的提示，不改变卡片的整体结构。 */
+.task-media-hint { margin: 0; padding: 8px 15px; font-size: 10px; line-height: 1.6; color: var(--danger); background: var(--danger-wash); border-top: 1px solid var(--danger-border); }
 .task-placeholder { position: relative; flex: 1; min-height: 200px; display: grid; place-items: center; background: radial-gradient(circle at 75% 20%, rgba(122, 39, 255, 0.24), transparent 38%), radial-gradient(circle at 20% 90%, rgba(255, 39, 111, 0.18), transparent 35%), #141821; }
 .task-placeholder span { font-size: 48px; font-weight: 900; color: rgba(255, 255, 255, 0.1); }
 .task-placeholder i { position: absolute; top: 31%; font-style: normal; color: var(--subtle); font-size: 11px; }
@@ -442,8 +448,10 @@ button { cursor: pointer; }
 .toast { position: fixed; right: 24px; bottom: 24px; z-index: 4; background: var(--brand-gradient); color: #fff; border: 0; border-radius: 12px; padding: 14px 18px; box-shadow: 0 18px 55px rgba(255, 74, 82, 0.26); font-size: 11px; max-width: 430px; text-align: left; }
 .toast.error { background: linear-gradient(118deg, #c92a4a, #ef6a53); }
 .toast span { float: right; margin-left: 20px; }
-.splash { height: 100vh; display: grid; place-content: center; justify-items: center; color: var(--muted); background: var(--surface-sunken); }
+.splash { height: 100vh; display: grid; place-content: center; justify-items: center; gap: 10px; color: var(--muted); background: var(--surface-sunken); }
 .splash p { font-size: 11px; }
+/* 启动失败时的详情：错误文案可能较长，限宽并允许换行，别把布局撑出屏幕。 */
+.splash-detail { max-width: 460px; text-align: center; line-height: 1.7; color: var(--danger); word-break: break-word; }
 
 .pg-session.active { background: var(--brand-wash-strong); box-shadow: inset 2px 0 0 var(--pink); }
 .pg-main { display: flex; flex-direction: row; align-items: stretch; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); overflow: hidden; }
@@ -496,6 +504,8 @@ button { cursor: pointer; }
 .pg-msg.assistant .pg-bubble table { border-collapse: collapse; margin: 8px 0; font-size: 11px; width: auto; max-width: 100%; display: block; overflow-x: auto; }
 .pg-msg.assistant .pg-bubble th, .pg-msg.assistant .pg-bubble td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; white-space: nowrap; }
 .pg-msg.assistant .pg-bubble th { background: rgba(122, 39, 255, 0.08); font-weight: 600; }
+/* 表格被截断时的提示（见 markdown.tsx 的 MAX_TABLE_ROWS）：弱化但可读，与表体区分开。 */
+.pg-msg.assistant .pg-bubble .md-table-truncated { margin: 2px 0 8px; font-size: 10px; color: var(--muted); }
 
 /* HTML 产物（对标 WorkBuddy）：聊天内文件卡片 + 右侧宽幅预览面板（标签页顶栏 + 操作按钮）。 */
 /* 产物文件卡片：浅色面。此前是 #141821 近黑底但没设文字色，继承气泡的 --ink 变成黑底黑字。 */

@@ -1,5 +1,6 @@
 import { describeError } from "../../shared/errors";
 import type { ChatMessage, LlmStreamEvent } from "../../shared/types";
+import { sliceSafe } from "../../shared/text";
 import { searchWeb } from "./webSearch";
 
 export interface LlmServiceOptions {
@@ -9,10 +10,19 @@ export interface LlmServiceOptions {
   systemPrompt: string;
   searchBaseUrl?: string;
   searchApiKey?: string;
-  /** 搜索的浏览器渲染回退（由主进程注入；模块本身不 import electron，保持可单测）。 */
-  searchRenderHtml?: (url: string) => Promise<string>;
+  /**
+   * 搜索的浏览器渲染回退（由主进程注入；模块本身不 import electron，保持可单测）。
+   * 带 `signal`：用户点「停止」时要能立刻中断渲染——浏览器渲染最长 25 秒，
+   * 不接取消信号的话停止按钮看起来毫无反应。
+   */
+  searchRenderHtml?: (url: string, signal?: AbortSignal) => Promise<string>;
   /** 智能体模式（chatAgent）使用的框架版本——由 updateChecker 独立检查更新。 */
   frameworkVersion?: string;
+  /**
+   * 「等响应头」的超时（默认 120 秒，与 `consumeSse` 的空闲超时同口径）。
+   * 只给单测缩短用——产品里不必配。
+   */
+  headerTimeoutMs?: number;
 }
 
 export type ChunkSender = (event: LlmStreamEvent) => void;
@@ -41,28 +51,59 @@ export class LlmService {
     if (!this.options.apiKey && !/127\.0\.0\.1|localhost/.test(this.baseUrl)) {
       throw new Error("请先在连接设置中保存游乐场 LLM 的 API Key。");
     }
-    const payload = await this.buildPayload(messages, webSearch, browserOnly);
-    this.controller = new AbortController();
+    // 控制器必须**先建**再准备载荷：`buildPayload` 里含联网搜索（浏览器渲染可达数十秒），
+    // 期间若 busy 仍是 false，同会话并发守卫失效（用户能再发一条，两股流抢同一个气泡）；
+    // 用户点「停止」也没有 controller 可中止，只能干等搜索跑完。
+    const controller = new AbortController();
+    this.controller = controller;
     try {
-      const response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {})
-        },
-        body: JSON.stringify({
-          model: this.options.model,
-          messages: payload,
-          stream: true,
-          // 与智能体路径同一个理由：不设就用上游默认（实测该中转约 4096 tokens），
-          // 普通对话里让模型写长内容（长文档、长代码）同样会被静默截断。
-          max_tokens: 64_000
-        }),
-        signal: this.controller.signal
-      });
+      const payload = await this.buildPayload(messages, webSearch, browserOnly, controller.signal);
+      // **等响应头也要有超时**。
+      //
+      // `consumeSse` 的空闲超时只在**已经拿到响应头**之后才生效；上游若接受 TCP 连接
+      // 却永不回响应头（网关卡死、中间层黑洞、服务半开），`fetch` 会一直挂着，
+      // 而这里传的是用户取消信号（本身永不到期）——整轮对话永久卡住，
+      // 「停止」按钮点了也只是 abort 一个已经在等的 promise（其实能救，但用户不知道要等多久）。
+      // 实测（probe-chat-headers，本机起一个只接受连接不回头的 server）：8 秒后仍未落定。
+      //
+      // 单独计时而不是给 fetch 加 `AbortSignal.timeout`：那样会连**整个流式读取**一起限时，
+      // 长回答（几十秒到几分钟）会被误杀。拿到响应头就立刻 clear。
+      let headerTimedOut = false;
+      const HEADER_TIMEOUT_MS = this.options.headerTimeoutMs ?? 120_000; // 与 consumeSse 的空闲超时同口径
+      const headerTimer = setTimeout(() => {
+        headerTimedOut = true;
+        controller.abort();
+      }, HEADER_TIMEOUT_MS);
+      let response: Response;
+      try {
+        response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {})
+          },
+          body: JSON.stringify({
+            model: this.options.model,
+            messages: payload,
+            stream: true,
+            // 与智能体路径同一个理由：不设就用上游默认（实测该中转约 4096 tokens），
+            // 普通对话里让模型写长内容（长文档、长代码）同样会被静默截断。
+            max_tokens: 64_000
+          }),
+          signal: controller.signal
+        });
+      } catch (error) {
+        // 区分"我们等不到响应头"与"用户点了停止"——后者是正常收尾，不该报超时。
+        if (headerTimedOut) {
+          throw new Error(`服务商超过 ${HEADER_TIMEOUT_MS / 1000} 秒没有返回响应（地址可能填错、服务卡死或被网络中间层拦截）。请检查连接设置后重试。`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(headerTimer);
+      }
       if (!response.ok || !response.body) {
         const detail = await response.text().catch(() => "");
-        throw new Error(`LLM 请求失败：${response.status} ${detail.slice(0, 200)}`);
+        throw new Error(httpFailureMessage(response.status, detail));
       }
       // 流式响应走 SSE 解析；服务商忽略 stream:true 返回完整 JSON 时，从非流式结构取内容。
       const contentType = response.headers.get("content-type") || "";
@@ -70,7 +111,11 @@ export class LlmService {
         const received = await consumeSse(response.body, send);
         if (!received) {
           // 流式 200 却零内容（部分中转/模型的已知毛病）：自动降级发一次非流式请求，而不是直接报错。
-          const fallback = await this.nonstreamChat(payload);
+          // 把本轮 controller 显式传进去，**不能让它读 `this.controller`**：
+          // 用户在"流式读完了但没内容"的那一刻点「停止」时，`abort()` 会把字段置空，
+          // 于是补发请求只带超时信号、仍然真的发出去（最长 120 秒），
+          // 回来后还会把内容推进一个用户以为已经停掉的气泡。
+          const fallback = await this.nonstreamChat(payload, controller);
           if (fallback) send({ seq: 1, delta: fallback });
           else throw new Error("服务商未返回任何内容（流式与非流式均为空），请检查模型名称或更换服务商。");
         }
@@ -80,33 +125,60 @@ export class LlmService {
           content?: string;
           base_resp?: { status_msg?: string };
         };
-        const text = full.choices?.[0]?.message?.content ?? full.choices?.[0]?.delta?.content ?? full.choices?.[0]?.text ?? full.content;
+        // **不能用 `??` 链**：`??` 只在 null/undefined 时回退，空串是"有值"。
+        // 上游常见形态是 `choices[0].message.content` 为空串、真正内容在 `delta.content`
+        // 或顶层 `content` 里——用 `??` 会选中空串，然后把"明明有内容"报成
+        // "服务商未返回内容"。这里取第一个**非空**字符串。
+        const text = firstNonEmpty(full.choices?.[0]?.message?.content, full.choices?.[0]?.delta?.content, full.choices?.[0]?.text, full.content);
         if (text) send({ seq: 1, delta: text });
         else throw new Error(`服务商未返回内容：${full.base_resp?.status_msg || JSON.stringify(full).slice(0, 200)}`);
       }
     } finally {
-      this.controller = undefined;
+      // 只清自己的那份：`abort()` 与下一轮可能已经换上了新 controller，
+      // 无条件清会把新一轮的停止能力抹掉。
+      if (this.controller === controller) this.controller = undefined;
     }
   }
 
   // 非流式补发：流式空回复时的一次自动降级重试（同样载荷，stream:false）。
-  private async nonstreamChat(payload: Array<Record<string, unknown>>): Promise<string | undefined> {
+  // @param turn 本轮自己的 controller。**不能省略、也不要读 `this.controller`**——
+  //   后者可能已被 `abort()` 置空（用户点停止）或被下一轮换掉，两种情况都会让这次补发
+  //   失去取消能力（最长白跑 120 秒，返回后还会写进一个用户以为已停止的气泡）。
+  private async nonstreamChat(payload: Array<Record<string, unknown>>, turn: AbortController): Promise<string | undefined> {
     try {
+      // 必须带超时并合并取消信号。这里是"流式已经失败一次"之后的补发，
+      // 上游此时往往正处于异常状态；裸 fetch 一挂住，`chat()` 就永不返回，
+      // 该会话的 `busy` 与取消器一直被占着——用户点了「停止」也只能等，
+      // 之后这条会话再也发不出消息（同会话并发守卫会一直拒绝）。
+      const timeout = AbortSignal.timeout(120_000);
       const response = await fetch(`${this.baseUrl}${resolveChatPath(this.baseUrl)}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {})
         },
-        body: JSON.stringify({ model: this.options.model, messages: payload, stream: false })
+        body: JSON.stringify({
+          model: this.options.model,
+          messages: payload,
+          stream: false,
+          // 与流式路径同一理由：不设就用上游默认（实测约 4096 token），长回答会被静默截断。
+          max_tokens: 64_000
+        }),
+        signal: AbortSignal.any([turn.signal, timeout])
       });
       if (!response.ok) return undefined;
       const full = (await response.json().catch(() => ({}))) as {
         choices?: Array<{ message?: { content?: string }; text?: string }>;
         content?: string;
       };
-      return full.choices?.[0]?.message?.content ?? full.choices?.[0]?.text ?? full.content ?? undefined;
-    } catch {
+      // 与流式空回复分支同一理由：`??` 不会跳过空串，取第一个非空值。
+      return firstNonEmpty(full.choices?.[0]?.message?.content, full.choices?.[0]?.text, full.content);
+    } catch (error) {
+      // 用户取消必须**向上抛**：调用方按 `AbortError` 识别取消并静默收尾。
+      // 若在这里吞成 `undefined`，上层会抛"服务商未返回任何内容"——用户明明
+      // 点的是停止，却看到一条红色失败提示（与本轮修的"取消被当成搜索失败"同类）。
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      if (turn.signal.aborted) throw new DOMException("对话已取消", "AbortError");
       return undefined;
     }
   }
@@ -121,8 +193,15 @@ export class LlmService {
       if (!response.ok) {
         return { ok: false, models: [], message: `该服务商不支持模型列表接口（HTTP ${response.status}），请手动填写模型名。` };
       }
-      const payload = (await response.json().catch(() => ({}))) as { data?: Array<{ id?: string }> };
-      const models = (payload.data ?? []).map((item) => item.id).filter((id): id is string => Boolean(id)).sort();
+      const payload = (await response.json().catch(() => ({}))) as { data?: unknown };
+      // `data` 必须是数组：部分中转在出错时返回 `{data:"..."}` 或 `{data:{...}}`，
+      // 不判的话 `(...).map is not a function` 会以英文技术错误透出，而这个按钮
+      // 只是"获取模型列表"的便利功能，失败应稳定落到"请手动填写"。
+      const entries = Array.isArray(payload.data) ? payload.data : [];
+      const models = entries
+        .map((item) => (item && typeof item === "object" ? (item as { id?: unknown }).id : undefined))
+        .filter((id): id is string => typeof id === "string" && Boolean(id))
+        .sort();
       if (models.length === 0) return { ok: false, models: [], message: "服务商返回了空模型列表，请手动填写模型名。" };
       return { ok: true, models, message: `获取到 ${models.length} 个模型。` };
     } catch (error) {
@@ -133,16 +212,16 @@ export class LlmService {
   // 联网搜索：优先用户配置的搜索 API；未配置时由 searchWeb 回落免 key 直抓 Bing/搜狗。
   // browserOnly=true 走「浏览器搜索」：只用应用自带 Chromium 渲染，跳过 API 与 HTTP 直抓。
   // 结果拼接为参考段落注入本轮 system 消息。
-  private async search(query: string, browserOnly = false): Promise<string> {
+  private async search(query: string, browserOnly = false, signal?: AbortSignal): Promise<string> {
     return searchWeb(query, {
       apiBaseUrl: this.options.searchBaseUrl,
       apiKey: this.options.searchApiKey,
       renderHtml: this.options.searchRenderHtml,
       browserOnly
-    });
+    }, signal);
   }
 
-  private async buildPayload(messages: ChatMessage[], webSearch: boolean, browserOnly = false): Promise<Array<Record<string, unknown>>> {
+  private async buildPayload(messages: ChatMessage[], webSearch: boolean, browserOnly = false, signal?: AbortSignal): Promise<Array<Record<string, unknown>>> {
     const system: Record<string, unknown> = {
       role: "system",
       content: this.options.systemPrompt || "你是 MiniMax H3 视频工作台内置的智能助手。"
@@ -151,9 +230,23 @@ export class LlmService {
       const lastUser = [...messages].reverse().find((m) => m.role === "user");
       if (lastUser?.content) {
         try {
-          const results = await this.search(lastUser.content.slice(0, 200), browserOnly);
-          if (results) system.content = `${system.content}\n\n以下是网络搜索结果，回答时可引用：\n${results}`;
+          // 把本轮取消信号透给搜索：否则用户点「停止」后，搜索仍会跑完
+          // （浏览器渲染可达数十秒）才轮到下面的 fetch —— 停止看起来没反应。
+          const results = await this.search(lastUser.content.slice(0, 200), browserOnly, signal);
+          // **中止要立即向上抛，不能被下面的 catch 吞掉**：那个 catch 的语义是
+          // "搜索失败 → 基于自身知识回答"，把取消当失败会让用户点了停止后仍继续发请求。
+          if (signal?.aborted) throw new DOMException("对话已取消", "AbortError");
+          // 空串（配置了搜索 API 但对端返回 0 条）必须**明确告知**，不能什么都不追加。
+          // 不告知的话模型以为自己检索过了，直接凭训练知识作答——正是本项目反复踩到的
+          // "凭旧知识回答实时问题"。免 key 路径在没有结果时会抛错走下面的 catch，
+          // API 路径原本是静默返回空串，两条路径行为不一致（实测 probe-search-empty）。
+          system.content = results
+            ? `${system.content}\n\n以下是网络搜索结果，回答时可引用：\n${results}`
+            : `${system.content}\n\n（联网搜索已执行但未返回任何结果。涉及实时信息时请如实说明本次未能检索到，不要凭记忆给出具体数字或日期；可建议用户换个关键词或稍后再问。）`;
         } catch (error) {
+          // 取消不是"搜索失败"：原样抛给调用方，走既有的 AbortError 分支。
+          if (error instanceof DOMException && error.name === "AbortError") throw error;
+          if (signal?.aborted) throw new DOMException("对话已取消", "AbortError");
           system.content = `${system.content}\n\n（联网搜索失败：${describeError(error, "未知错误")}，请基于自身知识回答。）`;
         }
       }
@@ -178,8 +271,78 @@ export class LlmService {
 
 // 对话端点按域名运行时推导：MiniMax 官方域名走其私有端点，其余（中转/自定义）一律标准 OpenAI 路径。
 // 不存储在设置里——彻底避免改 baseUrl 后残留旧端点的脏状态。
+//
+// 官方有两个域名：国际站 api.minimax.io、中国站 api.minimaxi.com，两者都用 /text/chatcompletion_v2。
+// 只认 .io 会让中国站用户走 /chat/completions（该站不存在此路径 → 404）。
+// 用 hostname 精确比对，避免 api.minimax.io.evil.com 这类相似域名误命中。
 export function resolveChatPath(baseUrl: string): string {
-  return /api\.minimax\.io/i.test(baseUrl) ? "/text/chatcompletion_v2" : "/chat/completions";
+  let host = "";
+  try {
+    // **必须去掉尾点**：`api.minimax.io.` 是 FQDN 根锚定写法，DNS 解析与无尾点完全等价，
+    // 官方接口照样能通。这里若只比字面量，同一个服务会走错端点（→ 404），
+    // 而用户在「连接设置」里完全看不出两者有什么区别。与 `assertPublicHost` 同一口径。
+    host = new URL(baseUrl).hostname.toLowerCase().replace(/\.+$/, "");
+  } catch { host = ""; }
+  const isOfficialMinimax = host === "api.minimax.io" || host === "api.minimaxi.com";
+  return isOfficialMinimax ? "/text/chatcompletion_v2" : "/chat/completions";
+}
+
+/**
+ * 取第一个**非空**字符串。
+ *
+ * 为什么不能用 `a ?? b ?? c`：`??` 只跳过 null/undefined，**空串是有值**。
+ * 上游常见形态是 `choices[0].message.content === ""`、真正内容在 `delta.content`
+ * 或顶层 `content` 里；用 `??` 会选中空串，把"明明有内容"报成"服务商未返回内容"。
+ */
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+/**
+ * HTTP 失败 → 给用户看的中文错误。
+ *
+ * 不能直接把响应体拼进去：反向代理/网关出错时返回的是 **HTML 错误页**，
+ * 实测（probe-http-error）上游 502 时界面显示的是
+ * `LLM 请求失败：502 <!DOCTYPE html><html><head><title>502 Bad Gateway</title>…`
+ * ——整段标签糊在气泡里，用户既读不出信息，也不知道该做什么。
+ *
+ * 这里按状态码给可执行的结论，只在响应体**看起来是 JSON**（即服务商自己的错误对象）
+ * 时才截取其中的 message。HTML / 空体一律不回显。
+ */
+function httpFailureMessage(status: number, body: string): string {
+  const hint = status === 401 || status === 403 ? "请到「连接设置」检查 API Key 是否正确、是否已过期。"
+    : status === 404 ? "请检查 API 地址与模型名（有些服务商的路径不是 /v1）。"
+      : status === 429 ? "请求过于频繁或额度已用尽，请稍后重试。"
+        : status >= 500 ? "服务商侧异常（可能是临时故障或网关错误），请稍后重试。"
+          : "请检查连接设置中的地址、Key 与模型名。";
+  const detail = extractApiErrorMessage(body);
+  return `LLM 请求失败（HTTP ${status}）。${hint}${detail ? `\n服务商说明：${detail}` : ""}`;
+}
+
+/** 从错误响应体里取服务商自己写的 message。非 JSON（HTML 错误页等）一律返回空串。 */
+function extractApiErrorMessage(body: string): string {
+  const text = String(body || "").trim();
+  if (!text || text.startsWith("<")) return "";
+  try {
+    const payload = JSON.parse(text) as {
+      error?: { message?: unknown } | string;
+      message?: unknown;
+      base_resp?: { status_msg?: unknown };
+    };
+    const candidates = [
+      typeof payload.error === "string" ? payload.error : payload.error?.message,
+      payload.message,
+      payload.base_resp?.status_msg
+    ];
+    const found = candidates.find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+    // 上限 200：服务商的 message 偶尔会把整段堆栈塞进来。
+    return found ? sliceSafe(found.trim(), 200) : "";
+  } catch {
+    return "";
+  }
 }
 
 // ---------- 智能体模式（Vercel AI SDK 工具循环，Codex/Claude Code 形态） ----------
@@ -189,7 +352,7 @@ export interface AgentToolCallbacks {
   webSearch: (query: string) => Promise<string>;
   /** 视频生成工具：提交生成任务并返回给用户的说明文本。 */
   generateVideo: (params: { prompt: string; duration: number; count: number }) => Promise<string>;
-  /** 打开网页工具（open_page）：用应用自带 Chromium 渲染指定 URL 并返回 HTML，让模型能真正"打开浏览器"。 */
+  /** 打开网页工具（open_page）：用应用自带 Chromium 渲染指定 URL 并返回**可见正文**（innerText），让模型能真正"打开浏览器"。 */
   openPage: (url: string) => Promise<string>;
   /** 文件产物工具（create_file）：把内容保存为文件并返回给模型的确认文本。 */
   createFile: (params: { kind: "html" | "csv" | "tsv" | "md" | "xlsx"; name: string; content: string }) => Promise<string>;
@@ -242,19 +405,21 @@ function humanizeToolOutput(toolName: string, output: unknown): string {
 /** 工具调用入参的人类可读摘要：状态条展示用，别把原始 JSON 糊到用户脸上。 */
 function humanizeToolInput(toolName: string, input: unknown): string {
   if (input == null) return "";
-  if (typeof input === "string") return input.slice(0, 120);
+  // 全部走 `sliceSafe`：这些摘要会显示在气泡的步骤日志里（"→ 正在搜索：…"），
+  // 裸 slice 切在 emoji 代理对中间会渲染成 `�`（与渲染端那批截断同一处理）。
+  if (typeof input === "string") return sliceSafe(input, 120);
   if (typeof input === "object") {
     const record = input as Record<string, unknown>;
-    if (toolName === "web_search" && typeof record.query === "string") return record.query.slice(0, 120);
+    if (toolName === "web_search" && typeof record.query === "string") return sliceSafe(record.query, 120);
     if (toolName === "generate_video") {
-      const prompt = typeof record.prompt === "string" ? record.prompt.slice(0, 80) : "";
+      const prompt = typeof record.prompt === "string" ? sliceSafe(record.prompt, 80) : "";
       const duration = typeof record.duration === "number" ? `${record.duration} 秒` : "";
       const count = typeof record.count === "number" ? `${record.count} 路` : "";
       return [prompt, duration, count].filter(Boolean).join(" · ");
     }
-    return JSON.stringify(input).slice(0, 120);
+    return sliceSafe(JSON.stringify(input), 120);
   }
-  return String(input).slice(0, 120);
+  return sliceSafe(String(input), 120);
 }
 
 /** 一轮智能体对话的收尾统计。usage 供上下文压缩记账；拿不到时调用方回落到字符估算。 */
@@ -262,6 +427,20 @@ export interface AgentRunResult {
   textLength: number;
   toolCalls: number;
   usage?: { inputTokens: number };
+}
+
+/**
+ * 把 AI SDK 拼出的对话 URL 改写成该上游真正使用的端点。
+ *
+ * SDK 固定拼 `baseURL + /chat/completions`；MiniMax 官方却是 `/text/chatcompletion_v2`。
+ * 普通对话路径早按 resolveChatPath 推导，智能体此前没有 → 同一 baseUrl 下两条路径打到
+ * 不同端点（实测 probe-agent-endpoint），用 MiniMax 官方预设开智能体必然 404。
+ * 只改末尾端点、保留查询串；非默认路径时才调用（默认路径无需改写）。
+ */
+export function rewriteChatEndpoint(url: string, baseUrl: string): string {
+  const chatPath = resolveChatPath(baseUrl);
+  if (chatPath === "/chat/completions") return url;
+  return url.replace(/\/chat\/completions(?=\?|$)/, chatPath);
 }
 
 export async function chatAgent(
@@ -289,11 +468,24 @@ export async function chatAgent(
     import("@ai-sdk/openai-compatible"),
     import("zod")
   ] as const);
+  // 智能体路径的对话端点：AI SDK 固定拼 `baseURL + /chat/completions`，
+  // 但部分上游并不用这个路径（MiniMax 官方是 /text/chatcompletion_v2）。
+  // 普通对话早已按 resolveChatPath 推导，智能体此前没有——同一个 baseUrl 下
+  // 两条路径打到**不同端点**（实测 probe-agent-endpoint），用 MiniMax 官方预设
+  // 开智能体必然 404。SDK 没有自定义 path 的选项，故用 fetch 中间件改写。
   const provider = createOpenAICompatible({
     name: "workbench-llm",
     baseURL: options.baseUrl,
     apiKey: options.apiKey || undefined,
-    headers: options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : undefined
+    headers: options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : undefined,
+    ...(resolveChatPath(options.baseUrl) === "/chat/completions"
+      ? {}
+      : {
+          fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+            return fetch(rewriteChatEndpoint(url, options.baseUrl!), init);
+          }
+        })
   });
   const model = provider.chatModel(options.model);
   const toModelMessages = (list: ChatMessage[]) => list.map((message) => {
@@ -360,7 +552,18 @@ export async function chatAgent(
           duration: z.number().int().min(4).max(15).describe("时长秒数，4–15 之间的整数。用户没说就按 6。"),
           count: z.number().int().min(1).max(4).describe("生成数量，1–4 之间的整数。用户没说就按 1。")
         }),
-        execute: async (params) => callbacks.generateVideo(params)
+        // 与其他工具一致：失败要变成**给模型的说明**，而不是抛出。
+        // `orchestrator.submit` 会做参数校验并抛中文错误（未保存卡密、RB 预设只收 4/6/8 秒、
+        // 图生视频缺参考图…）。抛出去的话 AI SDK 会把整轮判为失败，主进程随即
+        // "回落普通对话"——而普通对话没有生成工具，用户的视频请求直接丢失，
+        // 看到的还是一句"智能体模式请求失败"。返回文本则模型能据实告诉用户该去补什么。
+        execute: async (params) => {
+          try {
+            return await callbacks.generateVideo(params);
+          } catch (error) {
+            return `创建视频任务失败：${describeError(error, "未知错误")}。请如实告诉用户失败原因和需要先补什么（例如到「连接设置」保存对应后端的密钥/卡密），不要假装任务已创建，也不要重复调用本工具重试。`;
+          }
+        }
       })
       }),
       // open_page：看具体网页。搜索给了链接但要看正文/详情时用它（比搜索更精准一步）。
@@ -393,7 +596,7 @@ export async function chatAgent(
 
 何时不用：用户只是想要一段可以直接读的文字回答（那就直接在回复里写），或只是问个问题。不要为了"显得专业"而把普通回答塞进文件。
 
-类型选择：结构化数据用 csv/tsv（首行是表头，保存为 .xlsx，Excel 可直接打开）；可交互的网页、小工具、游戏、3D 场景用 html（要完整，含 <!DOCTYPE html>；3D 可用 three.js 等 CDN，但注意预览沙箱禁止外发网络，CDN 需内联或改用纯 CSS/canvas 实现）；纯文本报告用 md。
+类型选择：结构化数据用 csv/tsv（首行是表头，保存为 .xlsx，Excel 可直接打开）；可交互的网页、小工具、游戏、3D 场景用 html（要完整，含 <!DOCTYPE html>）；纯文本报告用 md。
 
 用户要文件时**直接生成完整内容**——不要道歉、不要教他自己去做、不要只给示例、不要把内容同时贴在回复里（文件卡片已经承载了内容，重复一遍是浪费）。
 
@@ -584,38 +787,90 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
 
 // 解析 SSE 流：按行拆 data: 载荷，提取 choices[0].delta.content；残行跨 chunk 缓存。
 // 返回是否收到过任何内容——零内容时调用方报错（空回复检测）。
-export async function consumeSse(body: ReadableStream<Uint8Array>, send: ChunkSender): Promise<boolean> {
+//
+// **必须带空闲超时**：`reader.read()` 在上游卡住（连接半开、网关挂起、模型停在那不吐字）
+// 时会永远不返回。智能体路径（chatAgent）有 `timeout.chunkMs` 兜着，普通对话这条没有——
+// 用户看到的是光标一直闪、点「停止」前一秒和十秒都没区别。120 秒沿用智能体的分块间隔标准。
+export async function consumeSse(
+  body: ReadableStream<Uint8Array>,
+  send: ChunkSender,
+  idleTimeoutMs = 120_000
+): Promise<boolean> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let seq = 0;
   let received = false;
+  // 处理一行 data: 载荷。返回 true 表示遇到 [DONE]（调用方应结束）。
+  const handleLine = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return false;
+    const data = trimmed.slice(5).trim();
+    if (data === "[DONE]") return true;
+    try {
+      const parsed = JSON.parse(data) as {
+        choices?: Array<{ delta?: { content?: string } }>;
+      };
+      const delta = parsed.choices?.[0]?.delta?.content;
+      if (delta) {
+        received = true;
+        send({ seq: (seq += 1), delta });
+      }
+    } catch {
+      // 忽略不完整/非 JSON 行（如注释心跳）。
+    }
+    return false;
+  };
   try {
+    // **[DONE] 之后必须主动取消流**：`releaseLock()` 只放读锁，**不会断开底层连接**。
+    // 实测（probe-sse-done，本机起一个发完 `[DONE]` 但不断开连接的 SSE 服务）：
+    // 连跑 3 轮后仍有 3 条 socket 开着、一条都没关。部分中转正是这种形态
+    // （回答给完就静默挂着），长会话下来累积成连接泄漏，最终撞上游的连接数上限。
+    // 正常读到流结束（done=true）时不必取消——那时连接已经关了，取消是无害的空操作。
+    const finish = async (): Promise<boolean> => {
+      await reader.cancel().catch(() => undefined);
+      return received;
+    };
     for (;;) {
-      const { done, value } = await reader.read();
+      // 给每次读取加空闲超时：`reader.read()` 在上游卡住时永不返回。
+      // 超时后主动 cancel 流并抛中文错误，让调用方按"连接中断"处理并释放 busy。
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const idle = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`服务商超过 ${Math.round(idleTimeoutMs / 1000)} 秒没有继续返回内容，连接可能已中断。`)),
+          idleTimeoutMs
+        );
+      });
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      const readPromise = reader.read();
+      try {
+        chunk = await Promise.race([readPromise, idle]);
+      } catch (error) {
+        // 超时：**必须先把挂起的 read 处理掉再抛**。
+        // 挂起的 `reader.read()` 一旦因为超时被放弃，后续 `releaseLock()` 会让它
+        // reject 成 `ERR_INVALID_STATE: Releasing reader` —— 那是个没人接的 rejection，
+        // 在 Electron 主进程里足以把进程带走（与 abort 回调那次同类）。
+        // 正确顺序：cancel 流（让挂起的 read 以 done/abort 落定）→ 吞掉它的结果 → 抛中文错误。
+        await reader.cancel().catch(() => undefined);
+        void readPromise.catch(() => undefined);
+        throw error;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      const { done, value } = chunk;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === "[DONE]") return received;
-        try {
-          const parsed = JSON.parse(data) as {
-            choices?: Array<{ delta?: { content?: string } }>;
-          };
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
-            received = true;
-            send({ seq: (seq += 1), delta });
-          }
-        } catch {
-          // 忽略不完整/非 JSON 行（如注释心跳）。
-        }
+        if (handleLine(line)) return await finish();
       }
     }
+    // 流结束：缓冲区里可能还剩**最后一行/半行**（服务端最后一帧之后不带换行）。
+    // 旧实现直接丢弃 → 最后一帧内容丢失（实测复现：含单帧数据的流返回空内容）。
+    // 先冲刷解码器的残留字节（多字节字符被切断时），再把残余当一行处理。
+    buffer += decoder.decode();
+    if (buffer.trim() && handleLine(buffer)) return await finish();
     return received;
   } finally {
     reader.releaseLock();

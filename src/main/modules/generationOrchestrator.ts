@@ -3,6 +3,7 @@ import { describeError } from "../../shared/errors";
 import type { GenerationRequest, GenerationTask, TaskStatus } from "../../shared/types";
 import { MAX_PROMPT_LENGTH } from "../../shared/types";
 import { AdapterRegistry } from "../backends/adapterRegistry";
+import { sliceSafe } from "../../shared/text";
 import { TaskStore } from "./taskStore";
 
 type TaskListener = (task: GenerationTask) => void;
@@ -60,12 +61,21 @@ export class GenerationOrchestrator {
   async deleteTasks(taskIds: string[]): Promise<GenerationTask[]> {
     const ids = new Set(taskIds);
     const affected: GenerationTask[] = [];
+    // 写盘失败要把改动回滚（同 submit/retry）：`save()` 会把磁盘满/只读抛出来，
+    // 而这里是就地把 deletedAt 打上——不回滚的话，用户看到"删除失败"的提示，
+    // 下一次刷新列表却已经少了这一组，完全自相矛盾；后续任何一次进度写盘
+    // 还会把这次"失败的删除"真的落盘。
+    const before = new Map<string, { deletedAt?: string; message?: string }>();
+    const remember = (task: GenerationTask) => {
+      if (!before.has(task.id)) before.set(task.id, { deletedAt: task.deletedAt, message: task.message });
+    };
     for (const task of this.tasks) {
       if (!ids.has(task.id) || task.deletedAt) continue;
       // 整组语义：删任一路即删整组（UI 以项目为单位）。
       const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
       for (const sibling of siblings) {
         if (sibling.deletedAt) continue;
+        remember(sibling);
         sibling.deletedAt = new Date().toISOString();
         if (!["succeeded", "failed", "cancelled", "interrupted"].includes(sibling.status)) {
           sibling.message = "已删除（生成中止）";
@@ -74,7 +84,19 @@ export class GenerationOrchestrator {
         affected.push(sibling);
       }
     }
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      // 注意：`cancel()` 造成的状态变化不回滚——那次中止是真的发生了，
+      // 假装没发生反而更误导（任务确实已停止）。
+      for (const [id, prev] of before) {
+        const task = this.tasks.find((entry) => entry.id === id);
+        if (!task) continue;
+        task.deletedAt = prev.deletedAt;
+        task.message = prev.message;
+      }
+      throw error;
+    }
     affected.forEach(this.listener);
     return affected;
   }
@@ -82,30 +104,79 @@ export class GenerationOrchestrator {
   async restoreTasks(taskIds: string[]): Promise<GenerationTask[]> {
     const ids = new Set(taskIds);
     const affected: GenerationTask[] = [];
+    // 同 deleteTasks：写盘失败要还原 deletedAt，否则"恢复失败"的提示与刷新后的列表相矛盾。
+    const before = new Map<string, string | undefined>();
     for (const task of this.tasks) {
       if (!ids.has(task.id) || !task.deletedAt) continue;
       const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
       for (const sibling of siblings) {
         if (!sibling.deletedAt) continue;
+        if (!before.has(sibling.id)) before.set(sibling.id, sibling.deletedAt);
         delete sibling.deletedAt;
         affected.push(sibling);
       }
     }
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      for (const [id, deletedAt] of before) {
+        const task = this.tasks.find((entry) => entry.id === id);
+        if (task && deletedAt) task.deletedAt = deletedAt;
+      }
+      throw error;
+    }
     affected.forEach(this.listener);
     return affected;
   }
 
-  async purgeTasks(taskIds: string[], deleteFile?: (path: string) => Promise<void>): Promise<GenerationTask[]> {
+  /**
+   * 彻底清除（不可逆）。
+   *
+   * @param expandGroups 是否按 parentId 扩展成"整组删除"。
+   *   - UI 的「彻底删除」传 true：界面上是按项目成组展示的，用户点的是那一整组；
+   *   - **7 天到期清理必须传 false**：它只挑出 `deletedAt` 已过期的任务，
+   *     若仍按组扩展，同一组里"1 天前才删、还剩 6 天可恢复"的任务会被一起抹掉。
+   *     实测（probe-purge-expired）：a1（8 天前删除）+ a2（1 天前删除）同组，
+   *     清理后 a2 也消失了——违背"删除后 7 天内可恢复"的承诺，且不可逆。
+   */
+  async purgeTasks(
+    taskIds: string[],
+    deleteFile?: (path: string) => Promise<void>,
+    expandGroups = true
+  ): Promise<GenerationTask[]> {
     const ids = new Set(taskIds);
     const affected: GenerationTask[] = [];
-    const groupIds = new Set(this.tasks.filter((t) => ids.has(t.id) && t.deletedAt).map((t) => t.parentId));
-    for (const task of this.tasks.filter((t) => groupIds.has(t.parentId) && t.deletedAt)) {
+    // 需要清除的任务。
+    // - 默认（UI「彻底删除」）：按 parentId **扩展成整组**——界面上是按项目成组展示的，
+    //   用户点的是那一整组，只删其中一路会留下半截项目；
+    // - `expandGroups = false`（7 天到期清理）：**只删点名的那些**。
+    const targets = expandGroups
+      ? (() => {
+          const groupIds = new Set(this.tasks.filter((t) => ids.has(t.id) && t.deletedAt).map((t) => t.parentId));
+          return this.tasks.filter((t) => t.deletedAt && groupIds.has(t.parentId));
+        })()
+      : this.tasks.filter((t) => t.deletedAt && ids.has(t.id));
+    const targetIds = new Set(targets.map((t) => t.id));
+    // 同 delete/restore：写盘失败要还原内存列表（`this.tasks` 是整体替换的，回滚即赋回原引用）。
+    // 注意**文件已经删掉了**，回滚记录只会留下"指向不存在文件的条目"——
+    // 这里选择回滚记录而不是假装成功：任务记录留在回收站、用户能看见并可再点一次，
+    // 比"记录消失但文件还在/或反过来"更容易解释（下次清理会重新尝试）。
+    const before = this.tasks;
+    for (const task of targets) {
       if (task.outputPath && deleteFile) await deleteFile(task.outputPath).catch(() => undefined);
       this.tasks = this.tasks.filter((t) => t.id !== task.id);
       affected.push(task);
     }
-    await this.store.save(this.tasks);
+    // 自检护栏：删掉的必须正是 targets（改这段逻辑时，这里先失败比静默多删好）。
+    if (affected.length !== targetIds.size) {
+      throw new Error(`内部错误：预期清除 ${targetIds.size} 条，实际 ${affected.length} 条。`);
+    }
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      this.tasks = before;
+      throw error;
+    }
     return affected;
   }
 
@@ -117,10 +188,19 @@ export class GenerationOrchestrator {
   async setCategory(taskId: string, category: string): Promise<GenerationTask[]> {
     const task = this.tasks.find((entry) => entry.id === taskId);
     if (!task) throw new Error("任务不存在。");
-    const normalized = category.trim().slice(0, 20);
+    // 用 sliceSafe：分类会**落盘**并显示在筛选条上，裸 slice 切在 emoji 代理对中间
+    // 会留下 `�`，且每次启动读回都是坏的（与渲染端标题/重命名那批同一处理）。
+    const normalized = sliceSafe(category.trim(), 20);
     const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
+    // 同 submit/delete：写盘失败要还原，否则"分类保存失败"的提示与界面/磁盘三方不一致。
+    const before = siblings.map((sibling) => ({ sibling, category: sibling.category }));
     for (const sibling of siblings) sibling.category = normalized || undefined;
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      for (const entry of before) entry.sibling.category = entry.category;
+      throw error;
+    }
     siblings.forEach(this.listener);
     return siblings;
   }
@@ -130,8 +210,11 @@ export class GenerationOrchestrator {
     const now = Date.now();
     const expired = this.tasks.filter((t) => t.deletedAt && now - new Date(t.deletedAt).getTime() > GenerationOrchestrator.RETENTION_MS);
     const files = expired.map((t) => t.outputPath).filter((p): p is string => Boolean(p));
+    // **必须传 false**（不按组扩展）：这里只挑出真正过期的任务，
+    // 若按 parentId 扩展成整组，同一组里"1 天前才删、还剩 6 天可恢复"的任务会被一起抹掉。
+    // 实测（probe-purge-expired）：a1（8 天前删）+ a2（1 天前删）同组，清理后 a2 也消失了。
     if (expired.length > 0) {
-      await this.purgeTasks(expired.map((t) => t.id), deleteFile);
+      await this.purgeTasks(expired.map((t) => t.id), deleteFile, false);
     }
     return files;
   }
@@ -140,12 +223,18 @@ export class GenerationOrchestrator {
     validateRequest(request);
     const parentId = randomUUID();
     const now = new Date().toISOString();
-    const count = Math.max(1, Math.min(4, Math.round(request.count || 4)));
+    // 只在**没给**时才用默认 4。旧写法 `request.count || 4` 把显式的 0 也当成"没给"，
+    // 于是 `count: 0` 会变成 4 路——云端按次计费时等于替用户多扣 4 次。
+    // 给 0 的调用方（IPC 可达、智能体工具也会传）本意是"最少"，夹到 1 才对。
+    const count = Math.max(1, Math.min(4, Math.round(request.count ?? 4)));
+    // **校验器允许缺省的字段必须补上默认值**，见 normalizeRequest 的注释。
+    // 写进任务的 request 与传给 runTask 的必须是**同一份**（重试时才不会漂移）。
+    const normalized = normalizeRequest(request);
     const created = Array.from({ length: count }, (_, index): GenerationTask => ({
       id: randomUUID(),
       parentId,
       index,
-      seed: request.baseSeed + index,
+      seed: normalized.baseSeed + index,
       backend: request.backend,
       mode: request.mode,
       status: "queued",
@@ -154,15 +243,31 @@ export class GenerationOrchestrator {
       createdAt: now,
       updatedAt: now,
       message: "等待生成",
-      request
+      request: normalized
     }));
-    this.tasks.unshift(...created);
+    // **写盘失败要把内存态回滚**。
+    // `save()` 现在会把写盘失败抛给调用方（磁盘满、目录只读），而这里先改了内存：
+    // `unshift` 加进了新任务、`trimHistory` 还可能淘汰了旧组。不回滚的话，
+    // 用户看到"提交失败"的报错，界面上却仍多出一批停在「等待生成」的幽灵任务，
+    // 重启后又消失（因为磁盘上根本没写成功）——典型的"报错了但界面更乱"。
+    const before = this.tasks;
+    this.tasks = [...created, ...before];
     this.trimHistory();
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      this.tasks = before;
+      throw error;
+    }
     created.forEach(this.listener);
 
     const concurrency = request.backend === "minimax" ? 2 : 1;
-    void runPool(created, concurrency, (task) => this.runTask(request, task));
+    // `runTask` 内部有 try/catch，但 `finally` 里的 `store.save` 与 `update()` 里的
+    // `listener`（向窗口推送）仍在保护范围外。裸 `void runPool(...)` 会让那类失败
+    // 变成未处理的 rejection（Electron 主进程会直接退出）。
+    // 用 `normalized` 而不是原始 request：后端读的是 request.width/height/duration 等，
+    // 与实际写进任务记录、并在重试时复用的那份必须同源（否则重试会退回未补默认值的版本）。
+    void runPool(created, concurrency, (task) => this.runTask(normalized, task)).catch(() => undefined);
     return created;
   }
 
@@ -173,28 +278,47 @@ export class GenerationOrchestrator {
     if (!task.request) throw new Error("该任务没有保存原始参数，无法重试。请重新提交。");
     if (!["failed", "cancelled", "interrupted"].includes(task.status)) throw new Error("只有失败或已取消的任务才能重试。");
     const request = { ...task.request, baseSeed: Math.floor(Math.random() * 1_000_000) };
+    // **重试也必须过同一道校验**。`task.request` 来自 `tasks.json`（外部数据），
+    // `TaskStore.load` 只归一了 prompt，backend/duration/width 等仍是原样：
+    // - `backend: "evil"` 会被 `AdapterRegistry.get` 的分支链**静默落到 SSH**，
+    //   用户得到"请填写 SSH 主机和用户名"，与实际动作完全无关；
+    // - 非法的 duration/preset 组合会真的发到云端（失败照样扣卡密次数）。
+    // 放在建任务之前：脏记录应当被明确拒绝，而不是先建一条注定失败、还会计费的任务。
+    validateRequest(request);
+    // 和 submit 一样补齐可缺省字段：老记录（或手改过的 tasks.json）可能没有
+    // width/height/ratio/resolution，直接透传会让工作流缺必填输入。
+    const normalized = normalizeRequest(request);
     const parentId = randomUUID();
     const now = new Date().toISOString();
     const created: GenerationTask = {
       id: randomUUID(),
       parentId,
       index: task.index,
-      seed: request.baseSeed,
-      backend: request.backend,
-      mode: request.mode,
+      seed: normalized.baseSeed,
+      backend: normalized.backend,
+      mode: normalized.mode,
       status: "queued",
       progress: 0,
-      prompt: request.prompt.trim(),
+      prompt: normalized.prompt.trim(),
       createdAt: now,
       updatedAt: now,
       message: "等待重试",
-      request: task.request
+      // 存**本次实际使用**的请求（含新 baseSeed），不能存 task.request（旧种子）——
+      // 否则任务自报 seed=新值、存档 request.baseSeed=旧值，两者矛盾（实测复现）。
+      request: normalized
     };
-    this.tasks.unshift(created);
+    // 与 submit 同一理由：写盘失败要把内存态回滚，否则会留下一条永远「等待重试」的幽灵任务。
+    const before = this.tasks;
+    this.tasks = [created, ...before];
     this.trimHistory();
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      this.tasks = before;
+      throw error;
+    }
     this.listener({ ...created });
-    void runPool([created], request.backend === "minimax" ? 2 : 1, (item) => this.runTask(request, item));
+    void runPool([created], normalized.backend === "minimax" ? 2 : 1, (item) => this.runTask(normalized, item)).catch(() => undefined);
     return created;
   }
 
@@ -210,8 +334,16 @@ export class GenerationOrchestrator {
     task.message = "已取消";
     this.controllers.get(taskId)?.abort();
     if (task.providerTaskId) {
-      const adapter = await this.adapters.get(task.backend);
-      await adapter.cancel?.(task.providerTaskId).catch(() => undefined);
+      // 通知云端取消是**尽力而为**，整段必须兜住：
+      // `adapters.get()` 会去读密钥（`getSecret`），而密钥可能解不开——那次会抛错。
+      // 不兜的话异常发生在"已标记取消"与 `update()` 之间，于是任务永远停在半截状态：
+      // 内存里说取消了、磁盘没写、渲染端也收不到通知（界面一直显示"取消中"）。
+      try {
+        const adapter = await this.adapters.get(task.backend);
+        await adapter.cancel?.(task.providerTaskId);
+      } catch {
+        // 云端取消失败不改变本地结论：本地已中止轮询，用户看到的就是"已取消"。
+      }
     }
     return this.update(task, "cancelled", task.progress, "已取消");
   }
@@ -230,7 +362,14 @@ export class GenerationOrchestrator {
         cancelNotified = true;
         // ComfyAdapter.cancel 忽略参数并请求全局 /interrupt（本地/SSH 后端并发为 1，目标即当前任务）；
         // MiniMax 无 cancel 方法，云端任务由 abort 信号停止轮询即可。
-        void this.adapters.get(request.backend).then((a) => a.cancel?.(task.providerTaskId ?? "").catch(() => undefined));
+        //
+        // **必须 catch 到链末**：`adapters.get()` 会读密钥（`getSecret` → 解不开时抛错），
+        // 而这里在 abort 回调中、没有任何调用方能接住 —— 裸 `void promise.then(...)`
+        // 会变成未处理的 rejection，Node/Electron 主进程**直接退出**（用户点一下取消，软件就没了）。
+        void this.adapters
+          .get(request.backend)
+          .then((a) => a.cancel?.(task.providerTaskId ?? ""))
+          .catch(() => undefined);
       }, { once: true });
       const result = await adapter.generate(
         request,
@@ -240,7 +379,11 @@ export class GenerationOrchestrator {
         (providerTaskId) => {
           // 云后端提交成功即回传 ID：中途取消时 cancel()/abort 监听才能通知云端终止（云任务按次计费）。
           task.providerTaskId = providerTaskId;
-          void this.store.save(this.tasks);
+          // `save()` 现在会把写盘失败抛出来（供能 await 的调用方感知），
+          // 这里是 fire-and-forget 回调，必须自己兜住，否则变成未处理的 rejection。
+          void this.store.save(this.tasks).catch((error) => {
+            console.error("[tasks] 保存任务失败（providerTaskId 回传）：", error instanceof Error ? error.message : error);
+          });
         }
       );
       Object.assign(task, result);
@@ -263,24 +406,101 @@ export class GenerationOrchestrator {
 
   private update(task: GenerationTask, status: TaskStatus, progress: number, message?: string): GenerationTask {
     task.status = status;
-    task.progress = Math.max(0, Math.min(100, Math.round(progress)));
+    // `Math.max(0, Math.min(100, Math.round(NaN)))` 仍是 NaN —— 夹取对 NaN 无效。
+    // 适配器若传了 NaN（算错、上游字段缺失），进度条宽度会变成 `NaN%`，
+    // 卡片布局错乱且落盘后长期存在（下次启动读回仍是 NaN）。
+    task.progress = Number.isFinite(progress) ? Math.max(0, Math.min(100, Math.round(progress))) : task.progress || 0;
     task.updatedAt = new Date().toISOString();
     task.message = message;
     this.listener({ ...task });
-    void this.store.save(this.tasks);
+    // 同上：`update()` 是同步方法，无法 await，写盘失败只能记录。
+    // 真正需要让用户看见的失败点在下单/删除等能返回结果的调用上（它们 `await save()`）。
+    void this.store.save(this.tasks).catch((error) => {
+      console.error("[tasks] 保存任务进度失败：", error instanceof Error ? error.message : error);
+    });
     return task;
   }
 }
 
+/**
+ * 补齐「校验器允许缺省、但下游当必有」的字段。**submit 与 retry 共用这一处**。
+ *
+ * `validateRequest` 对 baseSeed / width / height / ratio / resolution 都是
+ * "给了才校验类型"（`!== undefined`），但下游把它们当必有：
+ * - `baseSeed + index` → `undefined + 0` 是 **NaN**，写进任务记录与 ComfyUI 的
+ *   `noise_seed`（JSON 里变成 null），任务卡片显示 "Seed NaN"，且落盘后长期存在；
+ * - 缺 width/height 时 ComfyUI 工作流那两个必填输入会被 JSON.stringify 直接丢掉，
+ *   提交到 ComfyUI 才报参数错误（用户看到的是云端 400，与真实原因无关）；
+ * - ratio/resolution 缺省时 MiniMax 请求体里就没有这两个字段。
+ *
+ * 返回的新对象要**同时**用于「写进任务的 request」与「传给 runTask」——
+ * 两处不同源会让重试读到未补默认值的旧对象（种子/尺寸与实际执行不一致）。
+ */
+function normalizeRequest(request: GenerationRequest): GenerationRequest {
+  const baseSeed = Number.isFinite(request.baseSeed) ? request.baseSeed : Math.floor(Math.random() * 1_000_000);
+  return {
+    ...request,
+    baseSeed,
+    width: Number.isFinite(request.width) ? request.width : 1280,
+    height: Number.isFinite(request.height) ? request.height : 720,
+    // 白名单外的字符串（拼错的、数字、旧版本脏值）一律回落到最常用值，
+    // 而不是原样塞进云端请求体。
+    ratio: (["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"] as const).includes(request.ratio) ? request.ratio : "16:9",
+    resolution: request.resolution === "2K" ? "2K" : "768P"
+  };
+}
+
 function validateRequest(request: GenerationRequest): void {
+  // 入口即做类型兜底：`tasks:submit` 是可达 IPC，参数由渲染端/智能体给出，
+  // 不保证类型。`prompt: 123` 会一路走到 `request.prompt.trim()` 抛
+  // "p.trim is not a function"（英文技术错误直接透给用户）；
+  // 而 `duration: NaN` 能同时绕过 `< 4` 与 `> 15` 两个比较，被原样送进工作流。
+  if (!request || typeof request !== "object") throw new Error("生成参数无效。");
+  // 后端必须在白名单内：`AdapterRegistry.get()` 的分支链以 SSH 兜底，
+  // 未知/拼错的 kind（"RB"、""、null）会**静默落到 SSH**，
+  // 用户得到的错误是"请填写 SSH 主机和用户名"——与实际动作完全无关。
+  if (!["local", "ssh", "minimax", "rb"].includes(request.backend)) throw new Error("生成后端无效。");
+  if (typeof request.prompt !== "string") throw new Error("视频描述必须是文本。");
+  if (!Number.isFinite(request.duration)) throw new Error("视频时长必须是数字。");
+  if (request.count !== undefined && !Number.isFinite(request.count)) throw new Error("生成数量必须是数字。");
+  if (request.baseSeed !== undefined && !Number.isFinite(request.baseSeed)) throw new Error("随机种子必须是数字。");
+  if (request.width !== undefined && !Number.isFinite(request.width)) throw new Error("画面宽度必须是数字。");
+  if (request.height !== undefined && !Number.isFinite(request.height)) throw new Error("画面高度必须是数字。");
   // 长度上限在工作台/游乐场 UI 已由 maxlength 挡住，但 IPC 与智能体工具是可达入口：
   // 不在这里兜住的话，超长提示词会被真的塞进云端请求体。
-  if ((request.prompt?.length ?? 0) > MAX_PROMPT_LENGTH) {
+  if (request.prompt.length > MAX_PROMPT_LENGTH) {
     throw new Error(`视频描述不能超过 ${MAX_PROMPT_LENGTH} 字。`);
   }
   if (request.backend === "rb") {
-    // RB 预设自带时长约束（easy_15/30 固定，flashvsr 只收视频）；prompt 仅 flashvsr 不需要。
-    if (request.preset !== "flashvsr_upscale" && !request.prompt?.trim()) throw new Error("请输入视频描述。");
+    // RB 预设自带时长约束（flashvsr 只收视频，无 prompt、无时长）：
+    // reference / tail_frame 官网只接受 4/6/8 秒；easy_15 / easy_30 是固定时长（忽略 duration）。
+    // 必须在这里兜住——工作台 UI 会 clamp，但 tasks:submit 与智能体的 generate_video 工具
+    // 都是可达入口（后者会把 4–15 秒原样传进来）。非法 seconds+preset 组合会真的发到云端，
+    // **失败也照样扣卡密次数**（CLAUDE.md 记过这条）。
+    //
+    // **preset 本身也要过白名单**：下面所有分支都是"如果是已知预设就放行"，
+    // 未知值（拼错的 "tailframe"、空串、模型瞎编的名字）会一路落到
+    // `buildJobBody` 的 `preset = request.preset || ...` —— 原样发给云端。
+    // 云端拒绝时卡密**照样按次扣**，而用户看到的错误与自己填的内容毫无关系。
+    const RB_PRESETS = ["reference", "tail_frame", "easy_15", "easy_30", "flashvsr_upscale"];
+    if (request.preset !== undefined && !RB_PRESETS.includes(request.preset)) {
+      throw new Error(`瞬映 RB 预设无效：${request.preset}。可选：${RB_PRESETS.join(" / ")}。`);
+    }
+    if (request.preset === "flashvsr_upscale") {
+      if (!request.sourceVideoPath) throw new Error("视频变清晰模式必须选择源视频。");
+      return;
+    }
+    if (!request.prompt?.trim()) throw new Error("请输入视频描述。");
+    if (request.preset === "easy_15" || request.preset === "easy_30") return; // 固定时长，不用校验
+    // **tail_frame 必须同时给首帧与尾帧**。界面上这两个选择器没有标「（可选）」
+    // （reference 的参考图明确标了），语义就是必填；而 `uploadRefs` 会按预设过滤，
+    // 缺图时 job body 里一个 images 都没有——云端必然拒绝，**却照样扣卡密次数**。
+    if (request.preset === "tail_frame" && (!request.firstFramePath || !request.lastFramePath)) {
+      throw new Error("首尾过渡模式必须同时选择首帧和尾帧。");
+    }
+    if (![4, 6, 8].includes(request.duration)) {
+      throw new Error("瞬映 RB 的参考图/首尾帧模式只支持 4、6、8 秒。");
+    }
     return;
   }
   if (!request.prompt?.trim()) throw new Error("请输入视频描述。");

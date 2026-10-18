@@ -1,36 +1,43 @@
-import type { PromptFragment } from "../../shared/agentPrompt";
+import type { ChatMessage } from "../../shared/types";
 
 /**
- * 世界状态**差异注入**（移植 OpenAI Codex `core/src/context/world_state/mod.rs`）。
+ * 世界状态注入（移植 OpenAI Codex `core/src/context/world_state/mod.rs` 的 section 模型）。
  *
- * 问题：有些事实每轮都成立（今天几号、能不能联网、能产出什么文件），把它们塞进静态提示词
- * 会重复发送、浪费 token；但它们**会变**（用户关掉了联网、跨天了），不重注入模型就拿着过期事实做事。
+ * 问题：有些事实每轮都成立（今天几号、能不能联网、能产出什么文件），但它们**会变**
+ * （用户关掉了联网、跨天了、上下文快满了），模型必须拿到**当前**事实才不犯错。
  *
- * Codex 的解法是"只注入差异"：每个 section 渲染成两半——
- * 人类可读的 `render()`，以及用于在历史里反查该 section 是否已存在的标记 `marker`。
- * 每轮拿当前状态与快照比：
- * - 变了 → 注入新内容 + REPLACEMENT 提示（"以下取代先前的同一小节"）
- * - 消失 → 注入 REMOVAL 提示（"不再适用，不要再用"）
- * - 没变 → 什么都不发
+ * **两个移植时踩到的坑（都已修正，读代码看不出来、实测才现形）**：
  *
- * `PreviousSectionState::Unknown` 的处理：如果历史里能认出该 section 的标记，但进程内没有快照
- * （主进程重启过），**按"已存在"处理**。否则会把全部内容重发一遍，正是差异注入要避免的浪费。
+ * 1. **载体必须是"对话片段"，不能是 system prompt**。真实 key A/B 实测（probe-time-channel /
+ *    probe-time-fullprompt）：环境事实拼进 system prompt 时，模型会**直接无视**——问"今天几号"，
+ *    它答"我无法得知今天的日期"，哪怕日期就写在 system 里。测过的 6 种 system 通道
+ *    （末尾追加 / 开头 / 第二条 system 消息 / developer 角色）**全部失败**；
+ *    而作为 **user 消息片段**注入则 100% 生效（4 种位置均通过）。Codex 正是把 world state
+ *    作为**对话片段**注入的。故 `injectWorldState` 把事实拼成一条 user 消息附在历史末尾。
+ *
+ * 2. **每个 section 每轮都必须出现**。因为片段拼在**每轮重建**的请求里（历史尾部的 user 消息
+ *    是每轮临时拼的，不落盘），"没变就不发"会让模型从第 2 轮起再也看不到任何环境事实。
+ *    所以 `diffWorldState` 每轮渲染全部 section；差异只用于**节流正文刷新**。
  */
 
 export type SectionId = "current_time" | "network_access" | "artifacts" | "context_budget";
 
+/** section 的中文名。注入文本是给模型读的中文事实，不能把内部 id 直接拼进去。 */
+const SECTION_LABELS: Record<SectionId, string> = {
+  current_time: "当前时间",
+  network_access: "联网状态",
+  artifacts: "产物能力",
+  context_budget: "上下文余量"
+};
+
 export interface WorldSection {
   id: SectionId;
-  /** 注入给模型的正文（不含包裹——包裹由 withFragment 负责）。 */
+  /** 注入给模型的正文（自带 `# 标题` 小节头）。 */
   render: () => string;
   /**
-   * 该 section 在历史里出现时携带的标记（对齐 Codex `fragment.marker`）。
-   * 与 render 分开：正文会随事实变化，标记必须稳定，否则下一轮反查找不到。
-   */
-  marker: string;
-  /**
-   * 内容变了也未必值得立刻重注入（节流）。返回 false 表示"这次变化先不发"
-   * （对齐 Codex `time_reminder.rs` 的 `next_reinject_after`）。
+   * 内容变了也未必值得立刻刷新正文（节流）。返回 false 表示"这次变化先不刷新，沿用旧正文"
+   * （对齐 Codex `time_reminder.rs` 的 `next_reinject_after`）。**注意：只影响正文是否刷新，
+   * 不影响该 section 是否出现——每个 section 每轮都必须在场（载体是每轮重建的 system prompt）。**
    */
   shouldReinject?: (previous: string, next: string) => boolean;
 }
@@ -41,7 +48,7 @@ export interface SectionSnapshot {
   content: string;
 }
 
-/** 每个会话一份快照。主进程内存态：重启后丢基线，退化为"按历史标记判断"（安全降级，只多花一次 token）。 */
+/** 每个会话一份快照。主进程内存态：重启后丢基线，下一轮一律按新正文渲染（最多多花一次 token）。 */
 export type WorldStateSnapshot = SectionSnapshot[];
 
 export interface WorldStateInput {
@@ -67,11 +74,20 @@ export interface WorldStateInput {
   now?: Date;
 }
 
-/** ISO 风格时间戳 → 中文可读时刻（含星期）。模型对绝对日期才有用，故不带时区缩写歧义。 */
+/**
+ * ISO 风格时间戳 → 中文可读时刻（含星期）。模型对绝对日期才有用，故不带时区缩写歧义。
+ *
+ * **必须显式换算到 UTC+8，不能用 `date.getHours()`**：后者取的是**本机时区**，
+ * 而文案固定写「北京时间」。本机不在 UTC+8 时（海外用户、改过系统时区、
+ * CI/容器里 UTC），模型会拿到错的时间却被告知这是北京时间——
+ * 它据此回答"最新/今年/上个月"这类问题，一错就是一整天。
+ * 用 `getTime() + 8h` 再读 UTC 字段，得到与宿主时区无关的固定结果。
+ */
 function formatClock(date: Date): string {
-  const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
+  const beijing = new Date(date.getTime() + 8 * 60 * 60 * 1_000);
+  const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][beijing.getUTCDay()];
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${weekday} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${beijing.getUTCFullYear()}年${beijing.getUTCMonth() + 1}月${beijing.getUTCDate()}日 ${weekday} ${pad(beijing.getUTCHours())}:${pad(beijing.getUTCMinutes())}`;
 }
 
 /** 从渲染文本里取出日期部分（"2026年3月14日"）。用于判断是否跨天。 */
@@ -80,23 +96,54 @@ function datePartOf(rendered: string): string {
 }
 
 /**
+ * 从渲染文本里取出**完整时刻**（北京时间，UTC+8），用于算出"这次注入已经过去多久"。
+ *
+ * 格式固定由 `formatClock` 产生：`2026年10月18日 周日 09:00（北京时间）…`。
+ * 解析失败返回 undefined（调用方按"该刷新"处理，宁可多注入一次）。
+ */
+function clockOf(rendered: string): Date | undefined {
+  const match = /(\d{4})年(\d{1,2})月(\d{1,2})日\s*周[一二三四五六日]\s*(\d{1,2}):(\d{2})/.exec(rendered);
+  if (!match) return undefined;
+  const [, year, month, day, hour, minute] = match;
+  // 文案固定写"北京时间"，与 formatClock 一样按 UTC+8 反解（不能按本机时区）。
+  const utc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour) - 8, Number(minute));
+  return new Date(utc);
+}
+
+/**
+ * 时间正文多久必须刷新一次。
+ *
+ * 早先的节流规则是"**跨天**才刷新"，理由是"分钟级变化每轮都触发，等于节流形同虚设"。
+ * 但那条规则带来一个更糟的后果：同一会话里过了六个小时，模型仍被告知"现在是 09:00"
+ * （实测 probe-time-stale：09:00 首次注入 → 15:30 第二轮拿到的还是 09:00）。
+ * 用户问"现在几点""离八点还有多久"会得到**确定性的错答案**，
+ * 而且这个错误随会话时长累积、越聊越离谱。
+ *
+ * 取 15 分钟：相比"每轮都变"（几秒一次）已足够节流，又保证模型看到的时间
+ * 最多落后一刻钟——对"现在几点/今天还剩多久"这类问题足够准。
+ * 对齐 Codex `time_reminder.rs` 的做法（按时间阈值重注入，而不是按天）。
+ */
+const TIME_REINJECT_AFTER_MS = 15 * 60 * 1_000;
+
+/**
  * 当前时间。模型不知道今天是哪天——问"最新的 iPhone 是哪款"时它会凭训练截止日臆造，
  * 报出一个几年前的型号（Codex 为此专门做了 time_reminder 通道）。
  */
 function timeSection(now: Date): WorldSection {
   return {
     id: "current_time",
-    marker: "# 当前时间",
     render: () => `# 当前时间\n${formatClock(now)}（北京时间）。涉及"最新/今年/上个月"的时效问题请以此为准。`,
-    // 节流规则：**跨天必重注入，同一天内不重注入**。
+    // 节流规则：**跨天必刷新；同一天内超过 15 分钟也要刷新**。
     //
-    // 对齐 Codex `time_reminder.rs` 的 `next_reinject_after`——它按时间阈值重注入，
-    // 而不是"注入一次后永不再发"。此前写成恒 false 是个真 bug：会话跨过午夜后，
-    // 模型会一直拿着昨天的日期，而提示词还明确告诉它"时效问题以此为准"——
-    // 比不给时间更糟（给了错的时间还让它相信）。
-    //
-    // 只比日期不比分钟：分钟级变化每轮都会触发，等于把差异注入退化回"每轮全发"。
-    shouldReinject: (previous, next) => datePartOf(previous) !== datePartOf(next)
+    // 注意：节流只决定正文要不要刷新，**不决定要不要出现**（每轮都必须在场，见文件头）。
+    shouldReinject: (previous, next) => {
+      if (datePartOf(previous) !== datePartOf(next)) return true;
+      const previousClock = clockOf(previous);
+      const nextClock = clockOf(next);
+      // 任一侧解析不出来 → 当作需要刷新（宁可多发一次，也不要让时间永久停在旧值）。
+      if (!previousClock || !nextClock) return true;
+      return nextClock.getTime() - previousClock.getTime() >= TIME_REINJECT_AFTER_MS;
+    }
   };
 }
 
@@ -109,7 +156,6 @@ function networkSection(input: WorldStateInput): WorldSection {
     : `**本轮不可用**（用户关闭了「联网」与「浏览器搜索」）。不要调用 web_search；涉及实时信息时如实说明你无法联网核实，不要凭记忆编造具体数字或日期。`;
   return {
     id: "network_access",
-    marker: "# 联网状态",
     render: () => `# 联网状态\n${body}`
   };
 }
@@ -120,7 +166,6 @@ function artifactsSection(input: WorldStateInput): WorldSection {
     : `**本轮不可用**（当前为计划模式：只出方案、不产出文件）。`;
   return {
     id: "artifacts",
-    marker: "# 产物能力",
     render: () => `# 产物能力\n${body}`
   };
 }
@@ -132,14 +177,13 @@ function artifactsSection(input: WorldStateInput): WorldSection {
  * 然后被压缩/截断打断在半路——用户看到的是"做一半停了"。提前告知剩余量，
  * 模型才会主动收尾（先交付已完成的、把大任务拆小）。
  *
- * 节流（关键，否则每轮都变、每轮都注入）：只在**跨过档位**时重注入。
- * 按剩余百分比分档：充裕 / 偏紧 / 紧张 / 告急。同档内变化不打扰模型。
+ * 节流（关键，否则每轮正文都变、扰动 system 前缀）：只在**跨过档位**时刷新正文。
+ * 按剩余百分比分档：充裕 / 偏紧 / 紧张 / 告急。同档内沿用旧正文（但 section 仍在场）。
  */
 function contextBudgetSection(input: WorldStateInput): WorldSection {
   const budget = input.contextBudget;
   return {
     id: "context_budget",
-    marker: "# 上下文余量",
     render: () => {
       if (!budget || budget.modelLimitTokens <= 0) return "";
       const remaining = Math.max(0, budget.remainingTokens);
@@ -188,68 +232,72 @@ export function buildSections(input: WorldStateInput): WorldSection[] {
   return sections;
 }
 
-/** 用标记包裹正文。标记必须与 `WorldSection.marker` 一致，否则下一轮反查不到。 */
-export function withFragment(section: WorldSection): string {
-  return `${section.marker}\n${section.render()}`;
-}
-
 export interface WorldStateDiff {
-  /** 要追加到 system prompt 的增量块。无变化时为空串。 */
+  /** 本轮的**完整**环境事实块（每个 section 都在），直接拼进 system prompt。 */
   text: string;
   /** 本轮结束后的快照，调用方负责存回。 */
   snapshot: WorldStateSnapshot;
 }
 
 /**
- * 计算本轮要注入的增量。
+ * 渲染本轮要注入 system prompt 的完整环境事实块。
  *
- * @param previous 上一个快照。undefined 表示进程内没有基线（重启后）。
- * @param historyText 历史消息拼接文本，用于无快照时反查 section 是否已出现过
- *                    （对齐 Codex 的 `PreviousSectionState::Unknown`）。
+ * 与 Codex 的关键差异（务必记住）：Codex 把片段追加进**持久历史**，故"没变就不发"安全；
+ * 我们的载体是**每轮重建的 system prompt**，不发就等于永久丢失。所以这里**每个 section 每轮都渲染**，
+ * 差异只体现在"正文要不要刷新"上：
+ * - 首次 / 变化且未被节流 → 用新正文
+ * - 变化但被节流（时间同天、余量同档）→ 沿用上一轮正文，保持 system 前缀稳定（利于上游前缀缓存）
+ *
+ * @param previous 上一轮快照。undefined 表示进程内无基线（重启/首轮），此时一律用新正文。
  */
 export function diffWorldState(
   sections: WorldSection[],
-  previous: WorldStateSnapshot | undefined,
-  historyText: string
+  previous: WorldStateSnapshot | undefined
 ): WorldStateDiff {
-  const notices: string[] = [];
+  const blocks: string[] = [];
   const snapshot: WorldStateSnapshot = [];
 
   for (const section of sections) {
     const content = section.render();
-    snapshot.push({ id: section.id, content });
-
     const prior = previous?.find((entry) => entry.id === section.id);
-
-    if (prior) {
-      if (prior.content === content) continue; // 没变：不发（差异注入的全部意义）
-      // 变了，但该 section 声明了不重注入（如时间节流）：保留旧内容当基线，不打扰模型。
-      if (section.shouldReinject && !section.shouldReinject(prior.content, content)) {
-        snapshot[snapshot.length - 1] = { id: section.id, content: prior.content };
-        continue;
-      }
-      // 变了 → 替换通知。Codex 用显式的 REPLACEMENT 措辞，否则模型会把新旧两份都当真。
-      notices.push(`（${section.marker}已变化，以下内容取代此前的同一小节）\n${withFragment(section)}`);
+    // 节流：变了但声明"先别刷新"（时间同天 / 余量同档）→ 沿用旧正文。
+    // 沿用而非跳过：正文必须在场，只是保持稳定，避免每轮扰动 system 前缀。
+    if (prior && prior.content !== content && section.shouldReinject && !section.shouldReinject(prior.content, content)) {
+      snapshot.push({ id: section.id, content: prior.content });
+      blocks.push(prior.content);
       continue;
     }
-
-    // 无快照：进程重启过。若历史里已能认出该标记，按"已存在"处理——当作基线已发送过，本轮不重发。
-    if (historyText.includes(section.marker)) continue;
-    notices.push(withFragment(section));
+    snapshot.push({ id: section.id, content });
+    blocks.push(content);
   }
 
-  // 消失的 section：上一轮有、这一轮不在候选集里。
+  // 消失的 section：上一轮有、这一轮不在候选集里。显式作废，避免模型凭上一轮印象继续用。
+  // 文案用**中文小节名**而不是内部 id：这段是给模型读的中文环境事实，
+  // 冒出 `current_time` / `context_budget` 这类标识符既是噪声，也和其余中文文案不一致。
   if (previous) {
     for (const entry of previous) {
       if (sections.some((section) => section.id === entry.id)) continue;
-      notices.push(`（${entry.id} 已不再适用，先前关于它的说明作废）`);
+      blocks.push(`（「${SECTION_LABELS[entry.id] ?? "该说明"}」已不再适用，先前关于它的内容作废）`);
     }
   }
 
-  return { text: notices.join("\n\n"), snapshot };
+  return { text: blocks.join("\n\n"), snapshot };
 }
 
-/** 历史消息拼成反查文本。两侧都查：交接摘要（role=user）也可能带着上一窗口的标记。 */
-export function historyTextOf(messages: Array<{ role: string; content: string }>): string {
-  return messages.map((message) => message.content ?? "").join("\n");
+/**
+ * 把环境事实注入待发送历史。
+ *
+ * **必须作为一条 user 消息**（不能拼进 system prompt）——真实 key A/B 实测：拼进 system 时
+ * 模型直接无视（问日期答"我无法得知"，哪怕日期就在 system 里）；作为 user 片段则每次都生效。
+ * 见文件头注释。
+ *
+ * 位置：追加在末尾。实测 user 通道的多种位置（末条之前 / 末条之后 / 独立一条）都生效，
+ * 取"追加到末尾"最简单，且天然是"最新的环境事实"，不会被后续对话覆盖成旧值。
+ *
+ * @param messages 待发送历史（不改原数组）
+ * @param worldStateText `diffWorldState().text`。空串时原样返回，不产生多余消息。
+ */
+export function injectWorldState(messages: ChatMessage[], worldStateText: string): ChatMessage[] {
+  if (!worldStateText.trim()) return messages;
+  return [...messages, { role: "user", content: worldStateText }];
 }

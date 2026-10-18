@@ -78,3 +78,30 @@ history.push(CompactionSummary::new(summary_text));   // 摘要置末，role = "
 | `RetainClientToolOutputs` | 我们的工具输出不进历史（在渲染端） |
 | 本地 tokenizer 精确截断 | 引入 tokenizer 依赖不划算，按字符比例截断够用 |
 | `fallback_buffer_tokens` | 我们没有 fallback prompt 机制，留参数位 |
+
+## 8. 补充（2026-10-17 探索模式）：world state 的两个致命陷阱
+
+第 7 节当时写"world state 不移植"，但后来（`93ad965`）还是移植了——**并踩了两个坑**，
+读代码都看不出来，只有抓真实请求体 / 真实 key A/B 才现形。修正在 `84e8a45` + `69a26d7`。
+
+### 坑 1：world state 必须作为**对话片段**注入，不能拼进 system prompt
+
+真实 key A/B（`probe-time-fullprompt`）：环境事实拼进 system prompt 时，模型**直接无视**——
+问"今天几号"答"我无法得知"，哪怕日期就在 system 里。
+
+- system 末尾追加 / 开头 / 第二条 system 消息 / developer 角色 → **6 种 system 通道全失败**
+- 作为 **user 消息片段** → **100% 生效**
+
+**这正是 Codex 把 world state 做成"fragment（对话片段）"的原因**——本移植最初把它拼进
+system prompt，等于白做。修法：`injectWorldState()` 拼成一条 user 消息附在历史末尾。
+
+### 坑 2：每个 section 每轮都要出现（不能"没变就不发"）
+
+Codex 的"没变就不发"成立的前提是片段进**持久历史**。本应用的片段拼在**每轮重建**的请求里、
+不落盘 → 不发就等于永久丢失（实测第 2 轮起环境事实全没了）。修法：每轮渲染全部 section，
+差异只用于节流正文刷新。
+
+### 教训
+
+**移植机制前先确认"载体"一致**（持久历史 vs 每轮重建、system vs 对话片段）。载体一变，
+"没变就不发""拼进提示词"这些语义全反了。详见记忆 `codex-world-state-channel.md`。

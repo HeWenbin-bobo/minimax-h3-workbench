@@ -28,6 +28,30 @@ describe("describeError", () => {
     expect(text).toContain("请检查地址");
   });
 
+  // fetch 对被禁端口（WHATWG bad port 清单）直接拒绝，抛的是**无 code**、
+  // cause.message 为 "bad port" 的 TypeError。实测（probe-badport）未收录时界面显示
+  // 「网络错误 bad port」——中英混排，且用户不知道是自己填的端口有问题。
+  it("被禁端口（bad port）给出中文提示，不透出英文 bad port", () => {
+    const error = new Error("fetch failed");
+    (error as { cause?: unknown }).cause = new Error("bad port");
+    const text = describeError(error, "兜底");
+    expect(text).toContain("端口");
+    expect(text).not.toContain("bad port");
+  });
+
+  // 地址漏写 http:// 时 undici 抛 `TypeError: Failed to parse URL from abc/v1/models`，
+  // cause 是 "Invalid URL"。旧实现会拼成「网络错误 Invalid URL。请检查地址、端口与服务是否已启动。」
+  // ——中英混排，还把用户引向"服务没起来"，而真实原因是地址格式不对。
+  it("地址格式错误时给出可执行的提示，不出现 Invalid URL 或端口排查建议", () => {
+    const error = new Error("Failed to parse URL from abc/v1/models");
+    (error as { cause?: unknown }).cause = new Error("Invalid URL");
+    const text = describeError(error, "兜底");
+    expect(text).toContain("接口地址格式不正确");
+    expect(text).toContain("http://");
+    expect(text).not.toContain("Invalid URL");
+    expect(text).not.toContain("端口");
+  });
+
   // AI SDK 的 APICallError 把 errno 拼在 message 里而不是 cause.code——
   // 实测 "Cannot connect to API: read ECONNRESET" 曾以裸英文透传到游乐场气泡。
   it("识别 message 内嵌的 errno（AI SDK APICallError 形态）", () => {
@@ -106,5 +130,35 @@ describe("isNetworkError", () => {
     expect(isNetworkError(new Error("Failed after 2 attempts. Last error: AI_APICallError: Internal Server Error"))).toBe(false);
     expect(isNetworkError(new Error("尚未保存瞬映卡密。"))).toBe(false);
     expect(isNetworkError(undefined)).toBe(false);
+  });
+});
+
+// 文件系统 errno 也必须翻成中文：保存产物 / 写设置 / 删回收站文件都会碰到，
+// 裸英文（"ENOSPC: no space left on device, write"）用户看不懂也不知道该怎么办。
+describe("describeError 文件系统错误", () => {
+  const fsError = (message: string, code?: string) => Object.assign(new Error(message), code ? { code } : {});
+
+  it("磁盘满 → 中文原因 + 英文细节", () => {
+    const text = describeError(fsError("ENOSPC: no space left on device, write", "ENOSPC"), "兜底");
+    expect(text).toContain("磁盘空间不足");
+    expect(text).toContain("no space left");
+  });
+
+  it("权限不足（EACCES / EPERM）", () => {
+    expect(describeError(fsError("EACCES: permission denied", "EACCES"), "兜底")).toContain("没有访问权限");
+    expect(describeError(fsError("EPERM: operation not permitted", "EPERM"), "兜底")).toContain("权限不足");
+  });
+
+  it("文件被占用 / 路径是目录", () => {
+    expect(describeError(fsError("EBUSY: resource busy", "EBUSY"), "兜底")).toContain("被其他程序占用");
+    expect(describeError(fsError("EISDIR: illegal operation on a directory", "EISDIR"), "兜底")).toContain("是一个目录");
+  });
+
+  it("没有 code 字段时按 message 里的 errno 令牌识别", () => {
+    expect(describeError(fsError("ENOSPC: no space left on device, write"), "兜底")).toContain("磁盘空间不足");
+  });
+
+  it("普通业务异常仍原样返回（不误判）", () => {
+    expect(describeError(new Error("尚未保存瞬映卡密。"), "兜底")).toBe("尚未保存瞬映卡密。");
   });
 });

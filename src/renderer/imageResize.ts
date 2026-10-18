@@ -1,0 +1,85 @@
+/**
+ * 附件图片压缩。
+ *
+ * 为什么必须做：主进程允许图片最大 15MB，而 base64 会膨胀到约 20MB。
+ * 这些 data URL 直接进会话消息，而会话整体 `JSON.stringify` 进 localStorage
+ * （配额约 5–10MB）。**一张照片就能让之后所有会话的持久化全部失败**——
+ * 用户看到"本地存储空间不足"，但真实原因是某张图太大，重启后整段对话丢失。
+ *
+ * 长边压到 1568px 是视觉模型常用的输入上限附近（再大也只是烧 token），
+ * JPEG 质量 0.85 在人眼几乎无损。一张 4000×3000 的手机照片通常从数 MB 降到数百 KB。
+ *
+ * 无法解码时（极少数格式、损坏文件）**原样返回**：宁可不压，也不能把用户的内容丢掉。
+ */
+
+/** 单张附件 data URL 的软上限（约 1.2MB）。超过它的 GIF 必须降级，否则会撑爆 localStorage。 */
+const MAX_DATA_URL_CHARS = 1_600_000;
+
+export async function downscaleDataUrl(dataUrl: string, maxEdge = 1568, quality = 0.85): Promise<string> {
+  if (!dataUrl.startsWith("data:image/")) return dataUrl;
+  // **GIF 通常原样返回**：canvas 只能画出第一帧，重编码成 JPEG 会
+  // ① 把动图悄悄变成静态图（用户上传的动图"不动了"）；② 丢掉透明通道。
+  // 而 GIF 一般只有几十到几百 KB，本来就不是撑爆 localStorage 的那类。
+  //
+  // **但超大 GIF 必须降级**：主进程允许 15MB，base64 后约 20MB——原样塞进会话，
+  // 之后所有会话的持久化都会失败（"本地存储空间不足"，重启整段对话丢失）。
+  // 这种情况下宁可退化成静态图（画质与体积优先），也不能让整个会话存不下去。
+  if (dataUrl.startsWith("data:image/gif")) {
+    if (dataUrl.length <= MAX_DATA_URL_CHARS) return dataUrl;
+    try {
+      const image = await loadImage(dataUrl);
+      const scale = Math.min(1, maxEdge / Math.max(image.naturalWidth, image.naturalHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const context = canvas.getContext("2d");
+      if (!context) return dataUrl;
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const next = canvas.toDataURL("image/jpeg", quality);
+      return next.length < dataUrl.length ? next : dataUrl;
+    } catch {
+      return dataUrl; // 解码不了就原样带回（宁可占空间，也不丢用户内容）
+    }
+  }
+  try {
+    const image = await loadImage(dataUrl);
+    const longEdge = Math.max(image.naturalWidth, image.naturalHeight);
+    const tooLarge = dataUrl.length > MAX_DATA_URL_CHARS;
+    // 两个触发条件缺一不可：
+    // ① 长边超限（手机照片）；
+    // ② **编码后体积超限**——只看尺寸会漏掉"尺寸不大但体积很大"的图：
+    //    1500×1500 的 PNG 截图/无损照片长边没超 1568，原样返回却是好几 MB，
+    //    照样能把 localStorage 撑爆（用户看到"本地存储空间不足、重启丢对话"）。
+    if (!longEdge || (longEdge <= maxEdge && !tooLarge)) return dataUrl;
+
+    const scale = Math.min(1, maxEdge / longEdge);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return dataUrl;
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    // PNG 透明图用 image/png 保住透明通道；其余一律 JPEG（体积优势最大）。
+    const isPng = dataUrl.startsWith("data:image/png");
+    const next = canvas.toDataURL(isPng ? "image/png" : "image/jpeg", quality);
+    // PNG 重编码后仍然过大（无损格式压不下去）：退一步用 JPEG——**丢掉透明通道**
+    // 换"会话能存下去"，比整段对话丢失好。只要结果没更小就不采用。
+    if (isPng && next.length > MAX_DATA_URL_CHARS) {
+      const asJpeg = canvas.toDataURL("image/jpeg", quality);
+      if (asJpeg.length < next.length) return asJpeg.length < dataUrl.length ? asJpeg : dataUrl;
+    }
+    // 极端情况下重编码反而更大（小图、已高度压缩图）：保留较小的那个。
+    return next.length < dataUrl.length ? next : dataUrl;
+  } catch {
+    return dataUrl;
+  }
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("图片解码失败"));
+    image.src = src;
+  });
+}

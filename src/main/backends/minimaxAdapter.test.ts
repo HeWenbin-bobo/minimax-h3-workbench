@@ -99,3 +99,79 @@ describe("MiniMaxAdapter 任务状态识别", () => {
     expect(queryIndex).toBe(2);
   });
 });
+
+// 鉴权探测：401 与 403 都应判为失败。只认 401 会把 403（Key 被禁用 / 无该模型权限 /
+// 地区限制）误报成"已通过鉴权"，用户看到绿色"连接成功"却根本用不了。
+describe("MiniMaxAdapter.test 鉴权判定", () => {
+  const stubStatus = (status: number) =>
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status })));
+
+  it("200 → 通过", async () => {
+    stubStatus(200);
+    expect((await adapter().test()).ok).toBe(true);
+  });
+
+  it("401 → 失败", async () => {
+    stubStatus(401);
+    expect((await adapter().test()).ok).toBe(false);
+  });
+
+  it("403 → 失败（无权限不等于已通过鉴权）", async () => {
+    stubStatus(403);
+    expect((await adapter().test()).ok).toBe(false);
+  });
+});
+
+// 切换模式时界面只是不显示对应选择器，`request.*Path` 里的旧值仍在。
+// 全都发上去会出现**两个 first_frame**（image 的 sourceImage + text 残留的 firstFrame）。
+describe("MiniMaxAdapter.buildContent 按模式取素材", () => {
+  it("image 模式即使残留首尾帧，也只发一个 first_frame", async () => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const pathMod = await import("node:path");
+    const dir = await mkdtemp(pathMod.join(tmpdir(), "h3-mm-"));
+    const img = pathMod.join(dir, "a.png");
+    await writeFile(img, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const content = await (adapter() as unknown as {
+      buildContent: (r: GenerationRequest) => Promise<Array<{ type: string; role?: string }>>;
+    }).buildContent({ ...request, mode: "image", sourceImagePath: img, firstFramePath: img, lastFramePath: img });
+
+    const roles = content.filter((item) => item.type === "image_url").map((item) => item.role);
+    expect(roles).toEqual(["first_frame"]);
+  });
+
+  it("video 模式只发参考视频，不带任何图片", async () => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const pathMod = await import("node:path");
+    const dir = await mkdtemp(pathMod.join(tmpdir(), "h3-mm-"));
+    const vid = pathMod.join(dir, "v.mp4");
+    await writeFile(vid, Buffer.from([0, 0, 0, 1]));
+
+    const content = await (adapter() as unknown as {
+      buildContent: (r: GenerationRequest) => Promise<Array<{ type: string; role?: string }>>;
+    }).buildContent({ ...request, mode: "video", sourceVideoPath: vid, sourceImagePath: vid, firstFramePath: vid });
+
+    expect(content.filter((item) => item.type === "image_url")).toHaveLength(0);
+    expect(content.filter((item) => item.type === "video_url")).toHaveLength(1);
+  });
+
+  it("text 模式仍支持首帧 + 尾帧（各一个角色）", async () => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const pathMod = await import("node:path");
+    const dir = await mkdtemp(pathMod.join(tmpdir(), "h3-mm-"));
+    const first = pathMod.join(dir, "f.png");
+    const last = pathMod.join(dir, "l.png");
+    await writeFile(first, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    await writeFile(last, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const content = await (adapter() as unknown as {
+      buildContent: (r: GenerationRequest) => Promise<Array<{ type: string; role?: string }>>;
+    }).buildContent({ ...request, mode: "text", firstFramePath: first, lastFramePath: last });
+
+    const roles = content.filter((item) => item.type === "image_url").map((item) => item.role);
+    expect(roles).toEqual(["first_frame", "last_frame"]);
+  });
+});

@@ -1,7 +1,8 @@
-import { readFile, mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { describeError } from "../../shared/errors";
 import { assertSafeResultUrl } from "./resultUrl";
+import { readUploadFile, saveResponseToFile } from "./mediaFile";
 import type {
   BackendTestResult,
   GenerationAdapter,
@@ -57,15 +58,33 @@ export class RbAdapter implements GenerationAdapter {
       const response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs?limit=1`, {
         headers: this.headers()
       }, 15_000, signal);
-      const authenticated = response.status !== 401 && response.status !== 403;
+      // 401/403 = 卡密问题；5xx/429 = 服务此刻不可用（不能报成"卡密有效"）。
+      // 用一个正常请求（列 1 条任务）探活，非鉴权类成功即视为通过。
+      const status = response.status;
+      if (status === 401 || status === 403) {
+        return {
+          ok: false,
+          label: "瞬映 RB 云生成",
+          latencyMs: Date.now() - start,
+          details: { httpStatus: status },
+          message: `卡密无效或已失效（HTTP ${status}）。`
+        };
+      }
+      if (status === 429 || status >= 500) {
+        return {
+          ok: false,
+          label: "瞬映 RB 云生成",
+          latencyMs: Date.now() - start,
+          details: { httpStatus: status },
+          message: `瞬映服务暂时不可用（HTTP ${status}），无法确认卡密状态，请稍后重试。`
+        };
+      }
       return {
-        ok: authenticated,
+        ok: true,
         label: "瞬映 RB 云生成",
         latencyMs: Date.now() - start,
-        details: { httpStatus: response.status },
-        message: authenticated
-          ? "卡密已通过鉴权检查。"
-          : `卡密无效或已失效（HTTP ${response.status}）。`
+        details: { httpStatus: status },
+        message: "卡密已通过鉴权检查。"
       };
     } catch (error) {
       return {
@@ -119,12 +138,31 @@ export class RbAdapter implements GenerationAdapter {
   ): Promise<{ images: string[]; videos: string[] }> {
     const images: string[] = [];
     const videos: string[] = [];
-    const candidates = [
-      { filePath: request.sourceImagePath, kind: "image" as const },
-      { filePath: request.firstFramePath, kind: "image" as const },
-      { filePath: request.lastFramePath, kind: "image" as const },
-      { filePath: request.sourceVideoPath, kind: "video" as const }
-    ];
+    // **按预设决定传哪些素材**，不能无脑把所有已选路径都传上去。
+    //
+    // 切换预设时界面只是不显示对应的选择器，`request.*Path` 里的旧值仍然在：
+    // 用户在「贴合参考图」选了图、再切到「15 秒」(easy_15)，界面已无任何素材入口，
+    // 但参考图仍会被上传并写进 job body——实测（本地跑 buildJobBody）确认。
+    // easy_15/30 的官网契约是固定时长、不带素材；多余的参考图轻则被忽略，
+    // 重则改变生成结果或直接被拒（失败照样扣卡密次数）。
+    const preset = request.preset || (request.firstFramePath && request.lastFramePath ? "tail_frame" : "reference");
+    const candidates = preset === "flashvsr_upscale"
+      // 视频变清晰只收源视频。
+      ? [{ filePath: request.sourceVideoPath, kind: "video" as const }]
+      : preset === "tail_frame"
+        // 首尾过渡只收这两张，不接纳参考图/参考视频。
+        ? [
+            { filePath: request.firstFramePath, kind: "image" as const },
+            { filePath: request.lastFramePath, kind: "image" as const }
+          ]
+        : preset === "easy_15" || preset === "easy_30"
+          // 固定时长预设不接受任何素材。
+          ? []
+          // reference：≤8 图 + 参考视频。
+          : [
+              { filePath: request.sourceImagePath, kind: "image" as const },
+              { filePath: request.sourceVideoPath, kind: "video" as const }
+            ];
     for (const candidate of candidates) {
       if (!candidate.filePath) continue;
       const ref = await this.uploadFile(candidate.filePath, candidate.kind, signal);
@@ -134,11 +172,13 @@ export class RbAdapter implements GenerationAdapter {
   }
 
   private async uploadFile(filePath: string, kind: "image" | "video", signal?: AbortSignal): Promise<string> {
-    const bytes = await readFile(filePath);
     const extension = path.extname(filePath).toLowerCase();
     if (kind === "image" && ![".jpg", ".jpeg", ".png", ".webp"].includes(extension)) {
       throw new Error("瞬映 RB 参考图仅支持 JPEG/PNG/WebP。");
     }
+    // **先验大小再读**：这里是整份读进内存再塞 multipart，用户选了上 GB 的视频时
+    // 会直接把主进程撑爆（OOM 闪退，连错误都来不及提示）。
+    const bytes = await readUploadFile(filePath, kind === "image" ? "参考图" : "参考视频");
     const uploadPath = kind === "image" ? "/api/v1/uploads" : "/api/v1/uploads/video";
     const form = new FormData();
     // 图片端点用 files（多文件数组），视频端点用 file（单文件）。
@@ -265,28 +305,55 @@ export class RbAdapter implements GenerationAdapter {
         error?: { message?: string };
         message?: string;
       };
-      if (!response.ok) throw new Error(`瞬映 RB 查询失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
+      if (!response.ok) {
+        // 5xx / 429 属临时性（网关过载、限流），与原任务无关：继续轮询。
+        // 卡密**已按次扣除**，云端任务仍在跑——一次 502 就把任务判死，
+        // 用户既拿不到成片、也退不回次数（与网络抖动那条同一类）。
+        const transient = response.status >= 500 || response.status === 429;
+        if (transient) {
+          consecutiveNetworkErrors += 1;
+          const detail = payload.error?.message || payload.message || "";
+          if (consecutiveNetworkErrors >= MAX_CONSECUTIVE_NETWORK_ERRORS) {
+            throw new Error(`连续 ${consecutiveNetworkErrors} 次查询瞬映任务失败（HTTP ${response.status}）${detail ? `：${detail}` : ""}。任务可能仍在云端生成，请到瞬映工作台确认。`);
+          }
+          onProgress("running", progress, `瞬映暂时不可用（HTTP ${response.status}），正在重试（第 ${consecutiveNetworkErrors} 次）`);
+          await delay(5_000, signal);
+          continue;
+        }
+        // 4xx（除 429）是真错误：卡密失效、任务不存在等，重试没有意义。
+        throw new Error(`瞬映 RB 查询失败：${response.status} ${payload.error?.message || payload.message || ""}`.trim());
+      }
       const hasVideo = payload.has_video ?? payload.hasVideo;
       const status = (payload.status || "").toLowerCase();
       // 实测官网真实词汇表是 done / failed（progress 为"已完成"/"已失败"），并非 OpenAI 式的 succeeded。
       // 旧实现只认 succeeded：任务早已生成完成（has_video=true）却永远匹配不上，界面卡在"正在生成 92%"，
       // 成片永远不下载——卡密已扣、结果拿不到。这里把两种写法都收下。
       const isDone = status === "succeeded" || status === "done" || status === "success" || status === "completed";
+      // 提取/转码等"生成后处理"阶段：属进行中而非失败。
+      // **必须记住它并在下面的统一进度上报里沿用**，否则紧接着的
+      // `onProgress("running", …, "瞬映 RB 正在生成")` 会把它当场覆盖——
+      // 用户永远看不到"正在提取结果"，只会以为还在采样。
+      const postProcessing = status === "extracting" || status === "decoding" || status === "processing";
+      // "已完成但视频还没就绪（转码中）"也是一种后处理：下面同样不能用 running 覆盖。
+      let decoding = postProcessing;
       if (isDone) {
         if (hasVideo || payload.video_url || payload.videoUrl) {
           return { videoUrl: payload.video_url ?? payload.videoUrl };
         }
         // 已完成但视频尚未就绪（转码中）：继续轮询。
+        decoding = true;
         onProgress("decoding", Math.min(92, progress), "视频转码中");
       } else if (status === "failed" || status.includes("fail") || status.includes("error")) {
         // 兼容失败态的各种写法（failed / extract_failed …）：带服务端原文抛出，别再静默轮询。
         throw new Error(payload.error?.message || payload.message || `瞬映 RB 任务失败（状态：${payload.status || "unknown"}）`);
-      } else if (status === "extracting" || status === "decoding" || status === "processing") {
-        // 生成完成后的提取/转码阶段（官网状态机）：属进行中，不是失败。
+      } else if (postProcessing) {
         onProgress("decoding", Math.min(92, progress), "正在提取生成结果");
       }
       progress = Math.min(92, progress + 2);
-      onProgress("running", progress, status === "queued" ? "云端排队中" : "瞬映 RB 正在生成");
+      // 后处理阶段不要用 running 覆盖：沿用上面刚报的 decoding。
+      if (!decoding) {
+        onProgress("running", progress, status === "queued" ? "云端排队中" : "瞬映 RB 正在生成");
+      }
       await delay(5_000, signal);
     }
   }
@@ -294,13 +361,23 @@ export class RbAdapter implements GenerationAdapter {
   // 结果下载：/video 直链失败时回落查询接口给的 video_url（官网两种形态都出现过）。
   // video_url 来自远端响应，属不可信输入——落回下载前必须过 SSRF 校验（见 assertSafeResultUrl）。
   private async downloadVideo(jobId: string, taskId: string, videoUrl: string | undefined, signal?: AbortSignal): Promise<string> {
-    let response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/video`, {
-      headers: this.headers()
-    }, 300_000, signal);
-    if (!response.ok && videoUrl) {
+    // **网络层失败也要能回落**：旧写法把直链请求放在 if 外，`fetchWithRetry` 抛异常时
+    // 直接跳出函数，那个专门为"直链不可用"准备的 video_url 回落永远轮不到。
+    // 云端任务此刻已扣卡密次数，成片却拿不到——与"轮询一次抖动就判死"同一类损失。
+    // 用户主动取消仍要原样抛出（不能被回落当成"直链失败"继续下载）。
+    let response: Response | undefined;
+    try {
+      response = await this.fetchWithRetry(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/video`, {
+        headers: this.headers()
+      }, 300_000, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+    }
+    if ((!response || !response.ok) && videoUrl) {
       const safeUrl = assertSafeResultUrl(videoUrl);
       response = await this.fetchWithRetry(safeUrl.toString(), { redirect: "manual" }, 300_000, signal);
     }
+    if (!response) throw new Error("生成结果下载失败：无法连接瞬映下载地址，且任务没有返回可用的直链。");
     if (!response.ok) {
       // 带上服务端响应片段：定位是 404（产物未就绪）还是鉴权/网关问题。
       const detail = (await response.text().catch(() => "")).slice(0, 200);
@@ -308,7 +385,8 @@ export class RbAdapter implements GenerationAdapter {
     }
     await mkdir(this.options.outputDirectory, { recursive: true });
     const target = path.join(this.options.outputDirectory, `${taskId}.mp4`);
-    await writeFile(target, Buffer.from(await response.arrayBuffer()));
+    // 流式落盘：整段读进内存（`arrayBuffer()`）在长片上会让主进程直接 OOM。
+    await saveResponseToFile(response, target);
     return target;
   }
 }
@@ -317,12 +395,30 @@ export class RbAdapter implements GenerationAdapter {
 // 这里 re-export 保持既有调用方与单测的 import 路径不变。
 export { assertSafeResultUrl } from "./resultUrl";
 
+/**
+ * 可取消的 sleep。
+ *
+ * **正常结束必须摘掉 abort 监听器**：`{ once: true }` 只在**取消时**生效。
+ * 瞬映轮询每 5 秒一轮、最长 1 小时 ≈ 720 次，每次都往同一个 signal 上挂一个
+ * 从不移除的闭包——长任务里持续增长，取消时要遍历几百个失效监听器。
+ * 与 comfyAdapter / minimaxAdapter 同一套写法。
+ */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
+    const abort = () => reject(new DOMException("任务已取消", "AbortError"));
+    // **已经中止的 signal 必须立刻返回**：`addEventListener("abort")` 只对
+    // 后续发生的 abort 生效，已经派发过的事件不会再触发监听器（实测确认）。
+    // 撤销可能在上一段 `await fetch()` 返回之后的任意时刻发生——此时轮到本函数，
+    // 事件早已派发完毕，监听器永远不会被调用，于是「停止」后仍要白等满 3–10 秒。
+    if (signal?.aborted) { abort(); return; }
+    const onAbort = () => {
       clearTimeout(timer);
-      reject(new DOMException("任务已取消", "AbortError"));
-    }, { once: true });
+      abort();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }

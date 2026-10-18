@@ -29,8 +29,29 @@ export interface VolumeInfo {
 export function pickVolumeForOutput(volumes: VolumeInfo[], outputDirectory?: string): VolumeInfo | undefined {
   if (volumes.length === 0) return undefined;
   const dir = outputDirectory?.toLowerCase();
-  const matched = dir ? volumes.find((item) => dir.startsWith(String(item.mount).toLowerCase())) : undefined;
-  const freeOf = (item: VolumeInfo) => Number(item.size) - Number(item.used);
+  // 必须按**路径前缀边界**匹配，不能裸 startsWith：mount 是 "/home" 时，
+  // "/homepage/out" 也会命中，于是磁盘指标读错卷（实测 probe-volume 复现）。
+  // 合法边界：目录恰好等于 mount，或 mount 之后紧跟路径分隔符
+  //（Windows 的 "C:" 天然以 "C:\" 或 "C:/" 继续，也走这条）。
+  const matchesMount = (pathDir: string, mount: string): boolean => {
+    if (!mount) return false;
+    if (pathDir === mount) return true;
+    if (!pathDir.startsWith(mount)) return false;
+    // 挂载点自身以分隔符结尾（Linux/macOS 的根 "/"、Windows 的 "C:\"）时，
+    // 前缀匹配已经落在边界上——再去看下一个字符会把 "/" 永远判为不匹配，
+    // 于多卷场景下把输出目录错配到别的卷（实测 probe-volume-root）。
+    if (/[\\/]$/.test(mount)) return true;
+    const next = pathDir.charAt(mount.length);
+    return next === "/" || next === "\\";
+  };
+  const matched = dir ? volumes.find((item) => matchesMount(dir, String(item.mount).toLowerCase())) : undefined;
+  // **剩余空间必须是有限数**。`fsSize()` 偶尔会给出 `size: NaN` 或 `used: NaN`
+  // （WMI 字段缺失时），而 `NaN > NaN` 恒为 false——`reduce` 会**原样保留第一个 NaN 卷**，
+  // 于是界面报出「磁盘剩余 NaN GB」。数值不可用的卷退到队尾，优先选能算出剩余空间的。
+  const freeOf = (item: VolumeInfo) => {
+    const free = Number(item.size) - Number(item.used);
+    return Number.isFinite(free) ? free : Number.NEGATIVE_INFINITY;
+  };
   return matched ?? volumes.reduce((best, item) => (freeOf(item) > freeOf(best) ? item : best), volumes[0]);
 }
 
@@ -40,9 +61,36 @@ export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentRep
   const totalVram = nvidia.reduce((sum, gpu) => sum + gpu.vramBytes, 0);
   const recommendations: string[] = [];
 
-  if (input.diskFreeBytes < 70 * GiB) recommendations.push("至少释放 70GB 磁盘空间后再安装完整创作包。 ");
+  // 磁盘读数未知时不要拿 0 当"空间不足"：
+  // `systemInspector` 在 `pickVolumeForOutput` 找不到卷（fsSize 返回空/异常）时
+  // 会把 `diskFreeBytes` 置为 0。若照常判定，用户会看到「至少释放 70GB 磁盘空间」，
+  // 而他的磁盘可能一块都没满——这种假告警比不提示更误导。
+  // 真正的 0 字节可用与"读不到"在语义上都无法生成，故统一按"未知"处理。
+  //
+  // **C 级门槛同样要按"未知"放行**：那里原来直接写 `diskFreeBytes >= 45 GiB`，
+  // 于是读不到磁盘时，一块 24GB 显存的机器会被判成 D 级并显示
+  // "当前硬件低于量化实验配置"——硬件明明够，结论却相反（与 70GB 告警同一类错误）。
+  // 读不到就不作为否决条件，改为提示用户自行确认空间。
+  const diskKnown = input.diskFreeBytes > 0;
+  if (diskKnown && input.diskFreeBytes < 70 * GiB) recommendations.push("至少释放 70GB 磁盘空间后再安装完整创作包。 ");
 
-  if (nvidia.length >= 2 && totalVram >= 48 * GiB && input.memoryTotalBytes >= 256 * GiB) {
+  // **内存读数未知时同理**：`systeminformation` 在 Windows 上走 WMI，
+  // 驱动异常时 `si.mem()` 可能超时——`systemInspector` 的兜底会把它置 0。
+  // 与磁盘一样，"读不到"不等于"不够"：照常比较的话，
+  // 一台 24GB 显存的机器会因为内存读数缺失被判成 D 级并显示
+  // 「当前硬件低于量化实验配置」，结论正好相反。
+  const memoryKnown = input.memoryTotalBytes > 0;
+  const memoryAtLeast = (bytes: number) => !memoryKnown || input.memoryTotalBytes >= bytes;
+
+  // **显卡读不到时不要断言"硬件不行"**：`si.graphics()` 在 Windows 上走 WMI，
+  // 超时兜底会给一个空 `controllers`。此时 `nvidia.length === 0` 与"真的没有 NVIDIA 卡"
+  // 无法区分——但 D 级文案会写成「当前硬件低于量化实验配置」，
+  // 而这台机器可能只是一次 WMI 超时。改为如实说明"未能读取显卡信息"。
+  const gpuKnown = input.gpus.length > 0;
+  if (!gpuKnown) recommendations.push("未能读取显卡信息（可能是显卡驱动或系统管理服务异常），请确认后重新检测。 ");
+
+  if (nvidia.length >= 2 && totalVram >= 48 * GiB && memoryAtLeast(256 * GiB)) {
+    if (!memoryKnown) recommendations.push("未能读取内存总量，请自行确认至少 256GB 再开始。 ");
     if (!input.comfyReachable) recommendations.push("安装或启动 ComfyUI 0.30.0+，然后重新检测。 ");
     if (input.comfyReachable && !input.comfyHasH3Nodes) recommendations.push("更新 ComfyUI，当前实例缺少 MiniMax H3 原生节点。 ");
     if (input.comfyHasH3Nodes && input.comfyMissingH3Models?.length) recommendations.push(`安装缺少的 ${input.comfyMissingH3Models.length} 个 H3 模型文件，然后完全重启 ComfyUI。`);
@@ -53,7 +101,12 @@ export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentRep
     };
   }
 
-  if (nvidia.length >= 1 && totalVram >= 12 * GiB && input.memoryTotalBytes >= 32 * GiB && input.diskFreeBytes >= 45 * GiB) {
+  // 磁盘门槛在"读不到"时放行（`!diskKnown || …`）：读不到不等于没空间。
+  // 放行后补一条提示，让用户自己确认，而不是悄悄按"够用"处理。
+  const diskEnough = !diskKnown || input.diskFreeBytes >= 45 * GiB;
+  if (nvidia.length >= 1 && totalVram >= 12 * GiB && memoryAtLeast(32 * GiB) && diskEnough) {
+    if (!diskKnown) recommendations.push("未能读取磁盘剩余空间，请自行确认至少留出 45GB 再开始。 ");
+    if (!memoryKnown) recommendations.push("未能读取内存总量，请自行确认至少 32GB 再开始。 ");
     if (!input.comfyReachable) recommendations.push("安装或启动 ComfyUI 0.30.0+，然后重新检测。 ");
     if (input.comfyReachable && !input.comfyHasH3Nodes) recommendations.push("更新 ComfyUI，当前实例缺少 MiniMax H3 原生节点。 ");
     if (input.comfyHasH3Nodes && input.comfyMissingH3Models?.length) recommendations.push(`安装缺少的 ${input.comfyMissingH3Models.length} 个 H3 模型文件，然后完全重启 ComfyUI。`);
@@ -69,9 +122,13 @@ export function classifyEnvironment(input: CapabilityInput): Pick<EnvironmentRep
   recommendations.push("如仍要强行本机运行，请先做单条 5 秒 720P 预检，并预留失败或内存溢出的可能。 ");
   return {
     grade: "D",
-    verdict: appleGpu
-      ? "本机不建议运行 MiniMax H3：Apple GPU 不属于当前验证的 NVIDIA CUDA 路径。"
-      : "本机不建议运行 MiniMax H3：当前硬件低于量化实验配置。",
+    // 显卡/内存读不到时**不能说"硬件低于配置"**——那是把"没读到"当成"不够"。
+    // 上面已经补了一条"未能读取显卡信息"的建议，结论若仍写硬件不行，两者互相矛盾。
+    verdict: !gpuKnown
+      ? "暂时无法判断本机是否适合运行 MiniMax H3：未能读取到显卡信息，请重新检测或改用云 API。"
+      : appleGpu
+        ? "本机不建议运行 MiniMax H3：Apple GPU 不属于当前验证的 NVIDIA CUDA 路径。"
+        : "本机不建议运行 MiniMax H3：当前硬件低于量化实验配置。",
     recommendations
   };
 }

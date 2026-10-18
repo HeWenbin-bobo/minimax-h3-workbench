@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { buildSections, diffWorldState, historyTextOf, type WorldStateSnapshot } from "./worldState";
+import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./worldState";
 
-const NOW = new Date("2026-03-14T10:30:00");
+// 固定用 UTC 字面量：北京时间 = UTC+8，写成 "2026-03-14T10:30:00"（无时区）
+// 会随宿主时区解析出不同时刻，CI（UTC）与开发机（+8）断言就会不一致。
+const NOW = new Date("2026-03-14T02:30:00Z"); // 北京时间 10:30
 const baseInput = { webSearch: true, browserSearch: true, searchApiReady: true, artifactKinds: ["html", "xlsx", "md"], now: NOW };
 
 describe("section 正文", () => {
@@ -40,80 +42,74 @@ describe("section 正文", () => {
   });
 });
 
-describe("diffWorldState 差异注入", () => {
-  it("首次注入（无快照、历史里也没有标记）发全部 section", () => {
-    const { text, snapshot } = diffWorldState(buildSections(baseInput), undefined, "");
+describe("diffWorldState 注入", () => {
+  it("首次注入（无快照）发全部 section", () => {
+    const { text, snapshot } = diffWorldState(buildSections(baseInput), undefined);
     expect(text).toContain("# 当前时间");
     expect(text).toContain("# 联网状态");
     expect(text).toContain("# 产物能力");
     expect(snapshot).toHaveLength(3);
   });
 
-  it("无变化时不注入任何内容（差异注入的全部意义）", () => {
-    const first = diffWorldState(buildSections(baseInput), undefined, "");
-    const second = diffWorldState(buildSections(baseInput), first.snapshot, first.text);
-    expect(second.text).toBe("");
+  it("无变化时**仍然每轮注入**（载体是每轮重建的 system prompt，不发就永久丢失）", () => {
+    const first = diffWorldState(buildSections(baseInput), undefined);
+    const second = diffWorldState(buildSections(baseInput), first.snapshot);
+    // 关键回归：绝不能因为"没变"就返回空串——那会让模型从第 2 轮起看不到任何环境事实。
+    expect(second.text).toContain("# 当前时间");
+    expect(second.text).toContain("# 联网状态");
+    expect(second.text).toContain("# 产物能力");
   });
 
-  it("联网状态变化发 REPLACEMENT 通知，并带上新内容", () => {
-    const first = diffWorldState(buildSections(baseInput), undefined, "");
+  it("联网状态变化后正文刷新为新值", () => {
+    const first = diffWorldState(buildSections(baseInput), undefined);
     const next = buildSections({ ...baseInput, webSearch: false, browserSearch: false });
-    const { text } = diffWorldState(next, first.snapshot, first.text);
-    expect(text).toContain("已变化");
-    expect(text).toContain("取代此前");
+    const { text } = diffWorldState(next, first.snapshot);
+    expect(text).toContain("# 联网状态");
     expect(text).toContain("不要调用 web_search");
-    // 未变化的 section 不得重发
-    expect(text).not.toContain("# 产物能力");
   });
 
-  it("时间变化被节流：保留旧快照，不注入（避免每轮都发）", () => {
-    const first = diffWorldState(buildSections(baseInput), undefined, "");
-    const later = new Date("2026-03-14T10:45:00");
-    const result = diffWorldState(buildSections({ ...baseInput, now: later }), first.snapshot, first.text);
-    expect(result.text).toBe("");
-    // 快照里保留旧时间——基线不被刷新，否则下一轮又判"变了"
+  // 节流语义（本轮修正）：**同一天内超过 15 分钟就要刷新**。
+  //
+  // 旧规则是"跨天才刷新"，结果是同一会话里过了六小时，模型仍被告知"现在是 09:00"
+  // （实测 probe-time-stale：09:00 首次注入 → 15:30 第二轮拿到的还是 09:00）。
+  // 用户问"现在几点""离八点还有多久"会得到确定性的错答案，且越聊越离谱。
+  it("同一天内 15 分钟以内的变化被节流：正文沿用旧值，但 section 仍在场", () => {
+    const first = diffWorldState(buildSections(baseInput), undefined);
+    const soon = new Date("2026-03-14T02:40:00Z"); // 北京时间 10:40（+10 分钟）
+    const result = diffWorldState(buildSections({ ...baseInput, now: soon }), first.snapshot);
+    expect(result.text).toContain("# 当前时间");
+    expect(result.text).toContain("10:30");
+    expect(result.text).not.toContain("10:40");
+    // 快照里保留旧时间——基线不被刷新，否则下一轮又判"变了"。
     expect(result.snapshot.find((entry) => entry.id === "current_time")?.content).toContain("10:30");
   });
 
-  it("跨天必须重注入（否则模型一直拿着昨天的日期，还被告知以此为准）", () => {
-    const first = diffWorldState(buildSections(baseInput), undefined, "");
-    const nextDay = new Date("2026-03-15T09:05:00");
-    const { text } = diffWorldState(buildSections({ ...baseInput, now: nextDay }), first.snapshot, first.text);
+  it("同一天内超过 15 分钟必须刷新正文（否则模型一直拿着过时的时间）", () => {
+    const first = diffWorldState(buildSections(baseInput), undefined);
+    const later = new Date("2026-03-14T07:30:00Z"); // 北京时间 15:30（+5 小时）
+    const result = diffWorldState(buildSections({ ...baseInput, now: later }), first.snapshot);
+    expect(result.text).toContain("15:30");
+    expect(result.text).not.toContain("10:30");
+  });
+
+  it("跨天必须刷新正文（否则模型一直拿着昨天的日期，还被告知以此为准）", () => {
+    const first = diffWorldState(buildSections(baseInput), undefined);
+    const nextDay = new Date("2026-03-15T01:05:00Z"); // 北京时间 3月15日 09:05
+    const { text } = diffWorldState(buildSections({ ...baseInput, now: nextDay }), first.snapshot);
     expect(text).toContain("# 当前时间");
-    expect(text).toContain("已变化");
     expect(text).toContain("3月15日");
   });
 
-  it("上一轮有、这一轮消失的 section 发 REMOVAL 通知", () => {
+  it("上一轮有、这一轮消失的 section 发作废说明", () => {
     const previous: WorldStateSnapshot = [
       { id: "current_time", content: "旧时间" },
       { id: "network_access", content: "旧联网" }
     ];
-    // 候选集里只留联网 → 联网发替换、时间发作废
+    // 候选集里只留联网 → 时间发"作废"，联网正常在场
     const only = buildSections(baseInput).filter((section) => section.id === "network_access");
-    const { text } = diffWorldState(only, previous, "");
-    expect(text).toContain("current_time 已不再适用");
-  });
-
-  it("无快照但历史里已有标记 → 按「已见过」处理，不重发（进程重启场景）", () => {
-    const sections = buildSections(baseInput);
-    // 历史里只有产物能力的标记：那一条不发，另两条照发
-    const { text } = diffWorldState(sections, undefined, "# 产物能力\n可用类型：html");
-    expect(text).not.toContain("# 产物能力");
+    const { text } = diffWorldState(only, previous);
+    expect(text).toContain("「当前时间」已不再适用");
     expect(text).toContain("# 联网状态");
-    expect(text).toContain("# 当前时间");
-  });
-
-  it("全部标记都在历史里 → 一条都不发", () => {
-    const sections = buildSections(baseInput);
-    const history = sections.map((section) => section.marker).join("\n");
-    expect(diffWorldState(sections, undefined, history).text).toBe("");
-  });
-});
-
-describe("historyTextOf", () => {
-  it("拼接两侧内容，空内容不产生杂讯", () => {
-    expect(historyTextOf([{ role: "user", content: "A" }, { role: "assistant", content: "" }, { role: "user", content: "B" }])).toBe("A\n\nB");
   });
 });
 
@@ -166,5 +162,48 @@ describe("上下文余量 section", () => {
   it("剩余量被夹到 0（不会出现负数百分比）", () => {
     const text = budgetOf(withBudget(-500))!.render();
     expect(text).toContain("剩余约 0%");
+  });
+});
+
+// injectWorldState：环境事实必须作为一条 user 消息附在历史末尾（不能拼进 system prompt——
+// 真实 key 实测拼进 system 会被模型无视）。这条是回归护栏。
+describe("injectWorldState", () => {
+  const history = [
+    { role: "user" as const, content: "你好" },
+    { role: "assistant" as const, content: "你好" }
+  ];
+
+  it("把环境事实作为一条 user 消息追加到末尾", () => {
+    const out = injectWorldState(history, "# 当前时间\n2026年10月17日");
+    expect(out).toHaveLength(3);
+    expect(out[2]).toEqual({ role: "user", content: "# 当前时间\n2026年10月17日" });
+  });
+
+  it("不改原数组（纯函数）", () => {
+    injectWorldState(history, "x");
+    expect(history).toHaveLength(2);
+  });
+
+  it("空/空白文本原样返回，不产生多余空消息", () => {
+    expect(injectWorldState(history, "")).toBe(history);
+    expect(injectWorldState(history, "   \n ")).toBe(history);
+  });
+});
+
+// 时间必须按北京时间显示，且**与宿主时区无关**。
+// 旧实现用 `date.getHours()`（本机时区）却固定写「北京时间」：
+// 本机不在 UTC+8 时模型会拿到错的时间，而它被明确告知要以此为准。
+describe("当前时间固定按北京时间渲染", () => {
+  it("UTC 02:30 渲染成北京时间 10:30（不受宿主时区影响）", () => {
+    const text = buildSections({ ...baseInput, now: new Date("2026-03-14T02:30:00Z") })[0].render();
+    expect(text).toContain("2026年3月14日");
+    expect(text).toContain("10:30");
+    expect(text).toContain("北京时间");
+  });
+
+  it("UTC 前一天的 20:00 已跨到北京时间次日", () => {
+    const text = buildSections({ ...baseInput, now: new Date("2026-03-14T20:00:00Z") })[0].render();
+    expect(text).toContain("3月15日");
+    expect(text).toContain("04:00");
   });
 });

@@ -35,7 +35,12 @@ const server = createServer((req, res) => {
       return;
     }
     res.writeHead(200, { "Content-Type": "text/event-stream" });
-    for (const c of ["收到", "，", "正在", "处理", "你的", "需求。"]) res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`);
+    // 回复要**足够长**：主进程现在只在"压缩确实能变小"时才提交结果，
+    // 而 `buildCompactedHistory` 的收益来自丢弃助手回复。
+    // 若助手只回一句 6 字，历史以用户消息为主 → 压缩无净收益 → 不会触发，
+    // 后续"窗口号递增"等断言就会全落空。
+    const reply = "收到，正在处理你的需求。" + "示例输出内容用于撑长助手回复以便验证压缩收益。".repeat(200);
+    for (const c of [reply.slice(0, 12), reply.slice(12, 200), reply.slice(200)]) res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`);
     res.end("data: [DONE]\n\n");
   });
 });
@@ -103,6 +108,12 @@ await withApp({}, async (cdp) => {
   check("压缩次数初始为 0", status?.windowNumber === 0, `window=${status?.windowNumber}`);
 
   // ---------- C. 手动压缩（真实点 chip） ----------
+  // 先造出**足够长的历史**：主进程有 MIN_COMPACT_TOKENS = 2000 的门槛
+  // （短对话压缩后会变长，还白花一次摘要请求——实测 21 token → 375 token）。
+  // 上面 A/B 的历史只有约 45 token，直接点 chip 只会得到"历史较短，无需压缩"，
+  // 断言会全部落空。这里补一条约 4k 字的消息（≈2.6k token），跨过门槛但仍远低于
+  // 64k 窗口的 80%（51200），故"未超阈值不误触发自动压缩"的前提依然成立。
+  await send(cdp, "补充需求：".concat("我们需要一个完整的视频分镜脚本，包含镜头运动、光线和材质描述。".repeat(140)));
   await cdp.eval(`document.querySelector('.pg-chip.ctx').click()`);
   await new Promise((r) => setTimeout(r, 2500));
   check("真的向模型发了摘要请求（提示词走通链路）", sawSummaryRequest, sawSummaryRequest ? "" : "mock 未收到含 CONTEXT CHECKPOINT COMPACTION 的请求");

@@ -21,6 +21,9 @@ export interface PendingQuestion {
   resolve: (answer: string) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** abort 监听器与其所属 signal：`answer`/`skip` 路径也要能把它摘掉。 */
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 /** 默认等待时长。够用户看清题目并点选，又不至于把工具循环卡到"像是死了"。 */
@@ -34,15 +37,35 @@ export function formatAnswers(
   if (questions.length === 0) return "未获得用户回答。";
   const lines: string[] = [];
   for (const question of questions) {
-    const picked = answers[question.id];
-    if (!picked || picked.length === 0) {
+    // `answers` 来自 IPC（`llm:answer`），值类型没有保证：可能是字符串、数字或对象。
+    // 旧实现直接 `picked.map(...)`，非数组会抛 "picked.map is not a function"——
+    // 而这里跑在工具循环的 resolve 路径上，抛错会让整轮对话挂掉（实测确认）。
+    const raw = (answers as Record<string, unknown> | undefined)?.[question.id];
+    const picked = Array.isArray(raw)
+      ? raw.filter((id): id is string => typeof id === "string")
+      : typeof raw === "string"
+        ? [raw]
+        : [];
+    if (picked.length === 0) {
       // 单题未答：如实说，让模型对这道题按最佳判断继续，而不是替用户编一个答案。
       lines.push(`【${question.header}】用户未作答——请按你认为最合理的方式处理，并说明你采用的默认值。`);
       continue;
     }
     const labels = picked.map((id) => {
-      const option = question.options.find((entry) => entry.id === id);
-      return option ? `${option.label}（${option.description}）` : id;
+      // `question.options` 也必须兜底：题目对象来自主进程的 `request_user_input` 入参，
+      // 而它最终由**模型**生成（AI SDK 只校验 schema 里有的字段，历史/老版本数据可能缺）。
+      // 缺 `options` 时 `.find` 直接抛 TypeError——**这里跑在工具循环的 resolve 路径上**，
+      // 抛错会让整轮对话挂掉（与上面 `picked.map` 那条同一类后果，实测 probe-more 复现）。
+      const option = Array.isArray(question.options)
+        ? question.options.find((entry) => entry?.id === id)
+        : undefined;
+      if (!option) return id;
+      // label / description 也可能缺失：`${undefined}（${undefined}）` 会把
+      // "undefined（undefined）" 原样发给模型，看起来像用户选了这么个选项。
+      const label = typeof option.label === "string" && option.label ? option.label : id;
+      return typeof option.description === "string" && option.description
+        ? `${label}（${option.description}）`
+        : label;
     });
     lines.push(`【${question.header}】用户选择：${labels.join("、")}`);
   }
@@ -55,6 +78,19 @@ export class QuestionBridge {
   constructor(private readonly timeoutMs: number = DEFAULT_QUESTION_TIMEOUT_MS) {}
 
   /**
+   * 登记项的统一收尾：清定时器、摘 abort 监听器、从表里删除。
+   * `finish`（超时/中止）、`answer`、`skip`、`cancelSession` 四条路径共用。
+   */
+  private settle(requestId: string): PendingQuestion | undefined {
+    const entry = this.pending.get(requestId);
+    if (!entry) return undefined;
+    clearTimeout(entry.timer);
+    this.pending.delete(requestId);
+    if (entry.signal && entry.onAbort) entry.signal.removeEventListener("abort", entry.onAbort);
+    return entry;
+  }
+
+  /**
    * 挂起一组问题，等渲染端回答。
    * 由 `answer()` / `skip()` / `cancelSession()` 或超时定时器让其落定。**只落定一次**——
    * 超时后用户再点选是正常竞态，不得二次 resolve（Promise 虽然会忽略，但登记表会漏删）。
@@ -62,11 +98,7 @@ export class QuestionBridge {
   ask(sessionId: string, requestId: string, questions: AgentQuestion[], signal?: AbortSignal): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const finish = (run: () => void) => {
-        const entry = this.pending.get(requestId);
-        if (!entry) return; // 已被超时或取消清掉
-        clearTimeout(entry.timer);
-        this.pending.delete(requestId);
-        signal?.removeEventListener("abort", onAbort);
+        if (!this.settle(requestId)) return; // 已被超时/回答/取消清掉
         run();
       };
       const onAbort = () => finish(() => reject(new Error("用户停止了本轮对话。")));
@@ -80,26 +112,28 @@ export class QuestionBridge {
         this.timeoutMs
       );
       signal?.addEventListener("abort", onAbort, { once: true });
-      this.pending.set(requestId, { sessionId, questions, resolve, reject, timer });
+      // 把 signal + 监听器记进登记项：`answer()` / `skip()` 这两条**正常收尾**路径
+      // 也必须摘掉它。只靠 `finish()` 摘的话，用户正常答完（最常见路径）时监听器
+      // 会留在本轮 signal 上——同一轮里连续问几次就累积几个闭包，
+      // 且它们捕获着已落定的 resolver（阻止整轮上下文被回收）。
+      this.pending.set(requestId, { sessionId, questions, resolve, reject, timer, signal, onAbort });
     });
   }
 
   /** 渲染端回答。找不到该 requestId 时返回 false（超时后用户又点了，属正常竞态，不报错）。 */
   answer(requestId: string, answers: Record<string, string[]>): boolean {
-    const entry = this.pending.get(requestId);
+    // 走 settle()：正常作答这条**最常见**的收尾路径也必须摘掉 abort 监听器，
+    // 否则同一轮里连问几次就在本轮 signal 上累积几个闭包。
+    const entry = this.settle(requestId);
     if (!entry) return false;
-    clearTimeout(entry.timer);
-    this.pending.delete(requestId);
     entry.resolve(formatAnswers(entry.questions, answers));
     return true;
   }
 
   /** 用户跳过：与超时同一条收尾路径（reject），模型会按最佳判断继续。 */
   skip(requestId: string): boolean {
-    const entry = this.pending.get(requestId);
+    const entry = this.settle(requestId);
     if (!entry) return false;
-    clearTimeout(entry.timer);
-    this.pending.delete(requestId);
     entry.reject(new Error("用户跳过了这组问题。"));
     return true;
   }
@@ -109,11 +143,11 @@ export class QuestionBridge {
    * 不做这一步的话，用户点了「停止」而问题还挂着，工具循环不会退出。
    */
   cancelSession(sessionId: string): void {
-    for (const [requestId, entry] of this.pending) {
-      if (entry.sessionId !== sessionId) continue;
-      clearTimeout(entry.timer);
-      this.pending.delete(requestId);
-      entry.reject(new Error("本轮对话已结束。"));
+    for (const requestId of [...this.pending.keys()]) {
+      const entry = this.pending.get(requestId);
+      if (!entry || entry.sessionId !== sessionId) continue;
+      const settled = this.settle(requestId);
+      settled?.reject(new Error("本轮对话已结束。"));
     }
   }
 

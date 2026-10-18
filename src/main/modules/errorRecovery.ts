@@ -55,10 +55,37 @@ export function isContentFilterError(error: unknown): boolean {
   const text = [
     String(record.message ?? ""),
     String(record.responseBody ?? ""),
-    // AI SDK 会把响应体塞进 data；JSON.stringify 对 undefined 返回 undefined，兜一下。
-    String(JSON.stringify(record.data ?? "") ?? "")
+    // AI SDK 会把响应体塞进 data。**序列化必须能失败**：
+    // 这个函数跑在"上游已经出错"的路径上（主进程据此决定要不要注入改写指引重试），
+    // 而 `JSON.stringify` 对循环引用抛 `Converting circular structure to JSON`、
+    // 对 BigInt 抛 `Do not know how to serialize a BigInt`、对会抛错的 `toJSON` 直接透传异常。
+    // 实测（probe-filter-circular）：这三种都会让判定函数自己炸掉，
+    // 于是一次本该"改写措辞后重试"的内容拒绝变成未捕获异常，重试逻辑整段跳过。
+    safeStringify(record.data)
   ].join(" ");
   return /content.?filter|content.?policy|safety|moderation|flagged|violat|prohibited|敏感|违规|被拒绝/i.test(text);
+}
+
+/**
+ * 尽力把任意值转成字符串，**永不抛错**。
+ *
+ * 只用于"从错误对象里捞文本做关键词匹配"这种场景——捞不到就是空串，
+ * 让判定走"不是内容过滤"的保守分支，而不是把错误处理路径本身搞崩。
+ */
+function safeStringify(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    // 循环引用 / BigInt / 抛错的 toJSON：退回 `String()`（对普通对象是 "[object Object]"，
+    // 对 BigInt 是 "10"，都不含关键词，判定照常安全）。
+    try {
+      return String(value);
+    } catch {
+      return "";
+    }
+  }
 }
 
 /**

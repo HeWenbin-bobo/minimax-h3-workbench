@@ -7,24 +7,129 @@
  * 需要更低层的控制（拦截请求、改 UA、走原生 CDP 域）时，可在此基础上接
  * `webContents.debugger`（Electron 暴露的原始 CDP），无需新增依赖。
  */
+import { lookup } from "node:dns/promises";
 import { BrowserWindow, session } from "electron";
+import { assertPublicHttpUrl, assertPublicHttpUrlResolved } from "../backends/resultUrl";
 
 // 专用分区：渲染搜索页不与应用主窗口共享 Cookie/存储，避免互相污染。
 const PARTITION = "persist:h3-browser-fetch";
 const DEFAULT_TIMEOUT_MS = 25_000;
 
+/**
+ * 隐藏窗口加载的是**任意外部页面**（`open_page` 的 URL 由模型给出，`web_search` 抓的是公开搜索结果页），
+ * 必须按不可信内容处理。
+ *
+ * 实测默认行为（probe browserfetch-hardening）：不装 handler 时，
+ * 页面里的 `window.open()` 会**真的创建新窗口**（该窗口不受 renderOnce 的 finally 管，
+ * 抓取结束也不会关），`Notification.requestPermission()` 直接返回 granted。
+ * 前者可用来做弹窗骚扰/钓鱼，后者能拿到系统通知权限。
+ *
+ * 加固原则：这个窗口只用来**读 DOM**，任何主动能力（新窗口、权限）都不需要。
+ */
+function harden(win: BrowserWindow, ses: Electron.Session): void {
+  // 不允许页面开新窗口。
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  // 权限一律拒绝（通知、地理位置、媒体、剪贴板、USB/串口…）。
+  // Electron 要求 request 与 check 两个 handler 都实现：多数 Web API 先 check 再 request，
+  // 只实现其一会漏（electron.d.ts 对 setPermissionCheckHandler 有明确说明）。
+  ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  ses.setPermissionCheckHandler(() => false);
+  installNavigationDnsGuard(ses);
+}
+
+/**
+ * 主框架导航的 **DNS 解析校验**（SSRF 第三跳）。
+ *
+ * `will-redirect` / `will-navigate` 是同步事件，只能比字面 hostname；而
+ * `127.0.0.1.nip.io` / `localtest.me` 这类**通配 DNS** 把内网 IP 编进域名，
+ * 字面完全正常、解析后落到回环地址（实测 probe-ssrf-nipio 读回了本机服务内容）。
+ * 302 跳过去同样成立——同步守卫拦不住。
+ *
+ * `webRequest.onBeforeRequest` 的回调是**异步**的，可以在这里做 DNS 再决定是否取消。
+ * 只校验 `mainFrame`：子资源（图片/字体）跳到内网读不回内容，逐条解析会把每个页面
+ * 拖慢几百毫秒。按 host 缓存 60 秒，避免同一页面重复解析。
+ *
+ * 同一个 session 只保留一个 handler（Electron 的 `onBeforeRequest` 是单监听器语义，
+ * 重复注册即覆盖），所以这里不需要去重标志；handler 本身无窗口状态，覆盖是安全的。
+ */
+function installNavigationDnsGuard(
+  ses: Electron.Session,
+  /** 注入 DNS 解析（默认带 60 秒缓存）。单测用它锁定行为，不必联网。 */
+  resolver: (host: string) => Promise<Array<{ address: string }>> = cachedLookup
+): void {
+  ses.webRequest.onBeforeRequest(async (details, callback) => {
+    if (details.resourceType !== "mainFrame") { callback({}); return; }
+    let protocol = "";
+    try { protocol = new URL(details.url).protocol; } catch { callback({ cancel: true }); return; }
+    // 内部 scheme 与 data/blob（预览页）不过网络，放行。
+    if (!protocol.startsWith("http")) { callback({}); return; }
+    try {
+      await assertPublicHttpUrlResolved(details.url, resolver);
+      callback({});
+    } catch {
+      callback({ cancel: true });
+    }
+  });
+}
+
+/** DNS 结果缓存（60 秒）。只缓存成功结果——失败要重新解析，不能缓存成"永久不可达"。 */
+const dnsCache = new Map<string, { at: number; addresses: Array<{ address: string }> }>();
+const DNS_CACHE_MS = 60_000;
+async function cachedLookup(host: string): Promise<Array<{ address: string }>> {
+  const hit = dnsCache.get(host);
+  if (hit && Date.now() - hit.at < DNS_CACHE_MS) return hit.addresses;
+  const addresses = await lookup(host, { all: true });
+  dnsCache.set(host, { at: Date.now(), addresses });
+  return addresses;
+}
+
+/** 仅测试用：直接装守卫并注入解析器（产品路径由 renderOnce → harden 调用）。 */
+export const installNavigationDnsGuardForTest = installNavigationDnsGuard;
+
 // 隐藏窗口是重资源：串行执行，避免并发开一堆窗口把内存打满。
 let chain: Promise<void> = Promise.resolve();
 
-/** 用隐藏窗口加载 url 并返回渲染后的 HTML。串行执行；超时/加载失败会抛中文错误。 */
-export function renderHtml(url: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
-  const task = chain.then(() => renderOnce(url, timeoutMs));
+/** 用隐藏窗口加载 url 并返回渲染后的 HTML。串行执行；超时/加载失败/取消会抛中文错误。 */
+export function renderHtml(url: string, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
+  return enqueue(() => renderOnce(url, timeoutMs, "html", signal), signal);
+}
+
+/**
+ * 用隐藏窗口加载 url 并返回**可见文本**（`document.body.innerText`）。
+ *
+ * 为什么不复用 `renderHtml` 的整页 HTML：实测（probe openpage-text-vs-html）
+ * 一个 120081 字符的页面里，正文只有 35 字符——其余全是内联 script/style。
+ * `open_page` 把结果截到 8 万字符后，关键事实（示例里的价格）**已被脚本挤掉**，
+ * 模型拿到一堆代码噪声还信心十足地作答。真实站点（Bing 结果页、文档站）比例相近。
+ *
+ * 搜索解析（parseBing/parseSogou）必须看 HTML 结构，所以两条路分开、各取所需。
+ */
+export function renderPageText(url: string, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
+  return enqueue(() => renderOnce(url, timeoutMs, "text", signal), signal);
+}
+
+/**
+ * 串行队列。
+ *
+ * **排队期间就要能取消**：隐藏窗口一次只跑一个（前一个最长可达 45 秒），
+ * 用户在排队时点「停止」如果只在出队后才检查，就要干等前一个渲染跑完——
+ * 停止按钮看起来毫无反应（与本轮修的"open_page 漏传 signal"同一体验）。
+ * 所以入队时先看一眼、出队后再看一眼，两侧都抛 AbortError。
+ */
+function enqueue<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  const abortError = () => new DOMException("渲染已取消", "AbortError");
+  if (signal?.aborted) return Promise.reject(abortError());
+  const task = chain.then(() => {
+    if (signal?.aborted) throw abortError();
+    return operation();
+  });
   // 队列本身不能被单次失败污染，否则后续调用全部连坐失败。
   chain = task.then(() => undefined, () => undefined);
   return task;
 }
 
-async function renderOnce(url: string, timeoutMs: number): Promise<string> {
+async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text", signal?: AbortSignal): Promise<string> {
+  const ses = session.fromPartition(PARTITION);
   const win = new BrowserWindow({
     show: false,
     width: 1280,
@@ -39,6 +144,7 @@ async function renderOnce(url: string, timeoutMs: number): Promise<string> {
       backgroundThrottling: false
     }
   });
+  harden(win, ses);
   try {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`浏览器渲染超时（${timeoutMs / 1000} 秒）`)), timeoutMs);
@@ -46,16 +152,71 @@ async function renderOnce(url: string, timeoutMs: number): Promise<string> {
         clearTimeout(timer);
         win.webContents.removeListener("did-finish-load", onLoad);
         win.webContents.removeListener("did-fail-load", onFail);
+        win.webContents.removeListener("will-redirect", onRedirect);
+        win.webContents.removeListener("will-navigate", onNavigate);
+        signal?.removeEventListener("abort", onAbort);
         error ? reject(error) : resolve();
       };
       const onLoad = () => done();
-      const onFail = (_event: unknown, code: number, description: string) => done(new Error(`浏览器加载失败：${description}（${code}）`));
+      // 只认**主框架**失败。子框架（iframe）加载失败不该连坐整页——真实网页（搜索结果页、
+      // 开放平台文档）几乎都内嵌第三方 iframe（广告/统计/播放器），它们失败是常态。
+      // 旧实现不看 isMainFrame，任何一个子框架报错就 reject 整个 renderHtml：
+      // 主框架明明加载好了，却报"浏览器加载失败"（实测 probe-render-subframe 复现）。
+      // 注意用 on 而非 once：子框架失败不落定，若用 once 会被第一个子框架事件消耗掉，
+      // 之后真·主框架失败就漏判了。done() 里统一 removeListener。
+      const onFail = (_event: unknown, code: number, description: string, _url: string, isMainFrame: boolean) =>
+        isMainFrame ? done(new Error(`浏览器加载失败：${description}（${code}）`)) : undefined;
+      /**
+       * 重定向/后续导航守卫（SSRF 的第二跳）。
+       *
+       * `assertPublicHttpUrl` 只校验**首个** URL，而 Chromium 会自动跟随 3xx。
+       * 实测（probe openpage-redirect-ssrf）：公网入口 302 到 `http://127.0.0.1:<port>/object_info`
+       * 后，内网内容被完整读回。搜索抓取（Bing/搜狗）虽然目标是固定的公网域名，
+       * 但结果页本身也可能被劫持后跳内网，所以这道闸门对两条链路都必要。
+       *
+       * 两个关键细节：
+       * ① **主框架才 reject**。子框架（广告/统计/播放器）跳到内网只需阻止加载；
+       *    让它连坐整次渲染就重演了 `did-fail-load` 那个坑（正常页面误报失败）。
+       * ② **内部 scheme 放行**。`about:blank` 是 iframe 初始化与部分跳转的常态，
+       *    `chrome-error:` 是子资源失败页——都读不到内网资源，拦了只会误伤。
+       */
+      const guardNavigation = (event: { preventDefault: () => void }, target: string, isMainFrame: boolean): void => {
+        let protocol = "";
+        try { protocol = new URL(target).protocol; } catch { /* 非法 URL 走下面的拒绝分支 */ }
+        if (protocol === "about:" || protocol === "chrome-error:" || protocol === "devtools:") return;
+        try {
+          assertPublicHttpUrl(target);
+        } catch (error) {
+          event.preventDefault();
+          // 子框架跳内网：静默阻止即可，页面其余部分照常渲染。
+          if (!isMainFrame) return;
+          done(error instanceof Error ? error : new Error("该地址指向内网，已拒绝访问。"));
+        }
+      };
+      // 新版事件把 URL / isMainFrame 放在 details 里（位置参数已标记 deprecated）。
+      const onRedirect = (details: Electron.Event<Electron.WebContentsWillRedirectEventParams>) =>
+        guardNavigation(details, details.url, details.isMainFrame);
+      const onNavigate = (details: Electron.Event<Electron.WebContentsWillNavigateEventParams>) =>
+        guardNavigation(details, details.url, details.isMainFrame);
       win.webContents.once("did-finish-load", onLoad);
-      win.webContents.once("did-fail-load", onFail);
+      win.webContents.on("did-fail-load", onFail);
+      win.webContents.on("will-redirect", onRedirect);
+      win.webContents.on("will-navigate", onNavigate);
+      // 取消信号：用户点「停止」时立刻结束渲染并销毁隐藏窗口。
+      // 不接这个的话，浏览器渲染最长要跑满 timeoutMs（25–45 秒），
+      // 停止按钮看起来毫无反应（搜索链路尤其明显）。
+      const onAbort = () => done(new DOMException("渲染已取消", "AbortError"));
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener("abort", onAbort, { once: true });
       // 失败会走 did-fail-load，这里吞掉 loadURL 自身的 rejection，避免未处理拒绝告警。
       void win.loadURL(url).catch(() => undefined);
     });
-    return (await win.webContents.executeJavaScript("document.documentElement.outerHTML", true)) as string;
+    // 按调用方需要取两种视图：搜索解析要 HTML 结构，open_page 要可读正文。
+    // `open_page` 用 HTML 的实测后果见 renderPageText 的注释（正文被脚本挤掉）。
+    const expression = mode === "text"
+      ? "document.body ? document.body.innerText : ''"
+      : "document.documentElement.outerHTML";
+    return (await win.webContents.executeJavaScript(expression, true)) as string;
   } finally {
     if (!win.isDestroyed()) win.destroy();
   }

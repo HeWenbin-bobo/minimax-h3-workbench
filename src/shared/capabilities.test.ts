@@ -77,4 +77,113 @@ describe("pickVolumeForOutput", () => {
   it("returns undefined for an empty volume list", () => {
     expect(pickVolumeForOutput([], "F:\\x")).toBeUndefined();
   });
+
+  // `fsSize()` 在 WMI 字段缺失时会给出 `size: NaN` / `used: NaN`，而 `NaN > NaN`
+  // 恒为 false —— `reduce` 会**原样保留第一个 NaN 卷**，界面报出「磁盘剩余 NaN GB」。
+  // 实测（probe-volume）：`[{C: NaN}, {F: 100/50}]` 选中的是 C。
+  it("跳过剩余空间算不出来的卷（NaN 不被当成最大值）", () => {
+    const withNaN = [
+      { mount: "C:", size: Number.NaN, used: 10 },
+      { mount: "F:", size: 100, used: 50 }
+    ];
+    expect(pickVolumeForOutput(withNaN)?.mount).toBe("F:");
+
+    const nanUsed = [
+      { mount: "C:", size: 100, used: Number.NaN },
+      { mount: "F:", size: 200, used: 150 }
+    ];
+    expect(pickVolumeForOutput(nanUsed)?.mount).toBe("F:");
+  });
+
+  it("全部卷都算不出剩余空间时仍返回一个卷（不返回 undefined）", () => {
+    const allNaN = [{ mount: "C:", size: Number.NaN, used: Number.NaN }];
+    expect(pickVolumeForOutput(allNaN)?.mount).toBe("C:");
+  });
+});
+
+// 磁盘读数未知（fsSize 返回空/异常时 systemInspector 会置 0）不能当成"空间不足"。
+// 否则用户会看到「至少释放 70GB 磁盘空间」，而他的磁盘可能一块都没满——
+// 假告警比不提示更误导。
+describe("classifyEnvironment 磁盘读数未知", () => {
+  const base = { gpus: [], memoryTotalBytes: 64 * 1024 ** 3 };
+
+  it("diskFreeBytes = 0 时不报「释放 70GB」", () => {
+    const result = classifyEnvironment({ ...base, diskFreeBytes: 0, comfyReachable: false, comfyHasH3Nodes: false });
+    expect(result.recommendations.some((r) => r.includes("70GB"))).toBe(false);
+  });
+
+  it("真实空间不足（有读数但 < 70GB）时仍然告警", () => {
+    const result = classifyEnvironment({ ...base, diskFreeBytes: 20 * 1024 ** 3, comfyReachable: false, comfyHasH3Nodes: false });
+    expect(result.recommendations.some((r) => r.includes("70GB"))).toBe(true);
+  });
+
+  // 磁盘读不到时不能把一台够用的机器判成 D 级：C 级门槛原来直接比
+  // `diskFreeBytes >= 45 GiB`，0 会把它挡在门外，结论变成"当前硬件低于量化实验配置"——
+  // 硬件明明够（24GB 显存 + 64GB 内存），结论却正好相反。
+  it("磁盘读数未知时仍按硬件判 C 级，并提示自行确认空间", () => {
+    const result = classifyEnvironment({
+      gpus: [{ vendor: "NVIDIA", model: "RTX 4090", vramBytes: 24 * 1024 ** 3 }],
+      memoryTotalBytes: 64 * 1024 ** 3,
+      diskFreeBytes: 0,
+      comfyReachable: true,
+      comfyHasH3Nodes: true
+    });
+    expect(result.grade).toBe("C");
+    expect(result.recommendations.some((r) => r.includes("45GB"))).toBe(true);
+  });
+});
+
+// 内存读数未知是同一类问题：`si.mem()` 在 Windows 上走 WMI，超时后
+// `systemInspector` 的兜底会把它置 0。照常比较的话，够用的机器会被判成 D 级。
+describe("classifyEnvironment 内存读数未知", () => {
+  it("内存读不到时按显存仍判 C 级，并提示自行确认内存", () => {
+    const result = classifyEnvironment({
+      gpus: [{ vendor: "NVIDIA", model: "RTX 4090", vramBytes: 24 * 1024 ** 3 }],
+      memoryTotalBytes: 0,
+      diskFreeBytes: 100 * 1024 ** 3,
+      comfyReachable: true,
+      comfyHasH3Nodes: true
+    });
+    expect(result.grade).toBe("C");
+    expect(result.recommendations.some((r) => r.includes("内存"))).toBe(true);
+  });
+
+  it("内存读数正常但确实不足时仍判 D 级（不误放行）", () => {
+    const result = classifyEnvironment({
+      gpus: [{ vendor: "NVIDIA", model: "RTX 4090", vramBytes: 24 * 1024 ** 3 }],
+      memoryTotalBytes: 8 * 1024 ** 3,
+      diskFreeBytes: 100 * 1024 ** 3,
+      comfyReachable: true,
+      comfyHasH3Nodes: true
+    });
+    expect(result.grade).toBe("D");
+  });
+});
+
+// 显卡读不到（`si.graphics()` 走 WMI、超时兜底返回空列表）时，
+// 结论不能写成「当前硬件低于量化实验配置」——那是把"没读到"当成"不够"。
+describe("classifyEnvironment 显卡读数未知", () => {
+  it("读不到显卡时不给出「硬件低于配置」的结论，并提示重新检测", () => {
+    const result = classifyEnvironment({
+      gpus: [],
+      memoryTotalBytes: 64 * 1024 ** 3,
+      diskFreeBytes: 100 * 1024 ** 3,
+      comfyReachable: false,
+      comfyHasH3Nodes: false
+    });
+    expect(result.verdict).not.toContain("低于量化实验配置");
+    expect(result.verdict).toContain("未能读取到显卡信息");
+    expect(result.recommendations.some((r) => r.includes("未能读取显卡信息"))).toBe(true);
+  });
+
+  it("有显卡读数但确实不达标时仍给「硬件低于配置」", () => {
+    const result = classifyEnvironment({
+      gpus: [{ vendor: "Intel", model: "UHD 630", vramBytes: 1024 ** 3 }],
+      memoryTotalBytes: 16 * 1024 ** 3,
+      diskFreeBytes: 100 * 1024 ** 3,
+      comfyReachable: false,
+      comfyHasH3Nodes: false
+    });
+    expect(result.verdict).toContain("当前硬件低于量化实验配置");
+  });
 });

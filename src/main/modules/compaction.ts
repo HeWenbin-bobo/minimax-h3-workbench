@@ -9,7 +9,8 @@
  */
 
 import type { ChatMessage } from "../../shared/types";
-import { estimateTokens } from "./contextBudget";
+import { sliceSafe } from "../../shared/text";
+import { estimateTokens, TOKENS_PER_IMAGE } from "./contextBudget";
 import type { LlmServiceOptions } from "./llmService";
 import { resolveChatPath } from "./llmService";
 
@@ -36,9 +37,15 @@ const NO_SUMMARY_PLACEHOLDER = "（无可用摘要：压缩时未能生成摘要
 /** 用户消息保留预算，对齐 Codex 的 COMPACT_USER_MESSAGE_MAX_TOKENS。 */
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
 
-/** 摘要内容是否为空（含只有前缀没正文的情况）。 */
+/**
+ * 这条消息是不是"压缩产物"（摘要或摘要不可用时的占位）。
+ *
+ * **占位文案也必须认**：它不以 `SUMMARY_PREFIX` 开头，只判前缀的话，
+ * 下一次压缩会把它当成**用户原话**保留下来——层层累积、白占预算，
+ * 而且模型会以为那句"(无可用摘要…)"是用户说的话。
+ */
 export function isSummaryMessage(content: string): boolean {
-  return content.startsWith(SUMMARY_PREFIX);
+  return content.startsWith(SUMMARY_PREFIX) || content.startsWith(NO_SUMMARY_PLACEHOLDER);
 }
 
 /**
@@ -51,7 +58,8 @@ function truncateToTokens(text: string, maxTokens: number): string {
   if (total <= maxTokens) return text;
   const ratio = maxTokens / total;
   const cut = Math.max(1, Math.floor(text.length * ratio));
-  return `${text.slice(0, cut)}…（已截断）`;
+  // 用 sliceSafe：这段摘要会被发回模型，切在 emoji/生僻字的代理对中间会留下 `�`。
+  return `${sliceSafe(text, cut)}…（已截断）`;
 }
 
 /**
@@ -75,7 +83,11 @@ export function buildCompactedHistory(
   let remaining = maxUserTokens;
   for (const message of [...userMessages].reverse()) {
     if (remaining <= 0) break;
-    const tokens = estimateTokens(message.content);
+    // 预算必须把**图片**算进去。只按 content 估会把一张大图当"几乎免费"整体保留，
+    // 压完仍然超预算——压缩就白做了。
+    // 注意：只加图片成本，不加 estimateMessagesTokens 的每条 +4 开销——
+    // 这里的预算语义是"用户文本内容的 token 量"，改变它会破坏既有阈值（单测已覆盖）。
+    const tokens = estimateTokens(message.content) + (message.images?.length ?? 0) * TOKENS_PER_IMAGE;
     if (tokens <= remaining) {
       // 图片附件一并保留（Codex 在超预算时才丢非文本 part，预算内整体保留）。
       selected.push(message);
@@ -94,6 +106,12 @@ export function buildCompactedHistory(
 /** 摘要请求超时。压缩本身可能很慢（要把整段历史读进去），给足 90 秒。 */
 const SUMMARIZE_TIMEOUT_MS = 90_000;
 
+/** 超时与调用方取消信号合并（同 comfyAdapter.requestSignal 的理由，见下面的调用处注释）。 */
+function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 /**
  * 调模型生成交接摘要。非流式——压缩是后台动作，不需要逐字展示。
  *
@@ -111,6 +129,10 @@ export async function summarizeHistory(
   if (messages.length === 0) return "";
   try {
     const base = options.baseUrl.replace(/\/+$/, "");
+    // **摘要请求只带文字**：图片以 data URL 存在 images 里（一张 1MB 的图 ≈ 100 万字符），
+    // 摘要只是写交接说明，完全用不到图片。原样发送实测请求体达 0.95MB（probe-summarize-images），
+    // 既浪费带宽，也可能撞上上游请求体上限导致压缩失败。
+    const textOnly = messages.map((message) => ({ role: message.role, content: message.content }));
     const response = await fetch(`${base}${resolveChatPath(base)}`, {
       method: "POST",
       headers: {
@@ -119,18 +141,32 @@ export async function summarizeHistory(
       },
       body: JSON.stringify({
         model: options.model,
-        messages: [...messages, { role: "user", content: SUMMARIZATION_PROMPT }],
-        stream: false
+        messages: [...textOnly, { role: "user", content: SUMMARIZATION_PROMPT }],
+        stream: false,
+        // 输出上限必须自己设（CLAUDE.md 纪律）：不设就用上游默认（实测该中转约 4096 token），
+        // 大上下文的交接摘要可能被静默截断——而截断的摘要 = 丢信息，且用户毫不知情。
+        // 摘要本身不该很长，8000 足够容纳一份完整交接，又给足余量。
+        max_tokens: 8_000
       }),
-      signal: signal ?? AbortSignal.timeout(SUMMARIZE_TIMEOUT_MS)
+      // 超时必须与调用方信号**合并**，不能写 `signal ?? AbortSignal.timeout(...)`：
+      // 调用方传的是用户取消信号（只有点「停止」才 abort，本身永不到期），
+      // 有它就没有超时 → 摘要请求挂住时整轮对话永久卡死（CLAUDE.md 明令外部调用必须自带超时）。
+      signal: requestSignal(signal, SUMMARIZE_TIMEOUT_MS)
     });
     if (!response.ok) return "";
     const payload = (await response.json().catch(() => ({}))) as {
       choices?: Array<{ message?: { content?: string } }>;
       content?: string;
     };
-    const text = payload.choices?.[0]?.message?.content ?? payload.content ?? "";
-    return typeof text === "string" ? text.trim() : "";
+    // **不能用 `??` 链**：`??` 只跳过 null/undefined，空串是"有值"。
+    // 上游常见形态是 `choices[0].message.content === ""`、真正内容在顶层 `content` 里。
+    // 若选中空串，`summary` 会被当成"摘要不可用"，于是：
+    // ① 压缩后写入「（无可用摘要…此前对话细节已丢失）」占位；
+    // ② `maybeCompact` 把 reason 标成「压缩失败（摘要不可用）」，界面提示失败——
+    // 而实际上游明明返回了可用的摘要，用户白丢一段历史。
+    const candidates = [payload.choices?.[0]?.message?.content, payload.content];
+    const text = candidates.find((value): value is string => typeof value === "string" && value.trim().length > 0) ?? "";
+    return text.trim();
   } catch {
     return "";
   }

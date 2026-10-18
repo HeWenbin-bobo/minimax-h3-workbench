@@ -19,6 +19,27 @@ const NETWORK_CODES: Record<string, string> = {
   UND_ERR_SOCKET: "连接被提前关闭"
 };
 
+/**
+ * 文件系统 errno → 中文。
+ *
+ * 保存产物、写设置、删回收站文件都会碰到这些；不翻译的话用户看到的是
+ * "ENOSPC: no space left on device, write" 这种裸英文（实测），
+ * 违反「错误提示一律中文」，而且不知道该怎么办。
+ */
+const FS_CODES: Record<string, string> = {
+  ENOSPC: "磁盘空间不足",
+  EACCES: "没有访问权限（可能被杀毒软件或其他程序占用）",
+  EPERM: "操作不被允许（权限不足）",
+  EBUSY: "文件正被其他程序占用",
+  EISDIR: "目标是一个目录，不是文件",
+  ENOTDIR: "路径中有一段不是目录",
+  ENOENT: "文件或目录不存在",
+  EROFS: "所在磁盘为只读",
+  ENAMETOOLONG: "文件路径过长",
+  EMFILE: "同时打开的文件过多，请重启应用",
+  EXDEV: "跨磁盘操作不被支持"
+};
+
 const HINT = "请检查地址、端口与服务是否已启动。";
 
 // 流式中途被对端断开时，undici 抛的 cause 是"英文短句"而不是 errno（实测中途 reset 的 cause.message = "terminated"，
@@ -27,7 +48,11 @@ const STREAM_BROKEN_MESSAGES: Record<string, string> = {
   terminated: "连接在传输过程中被对端关闭",
   "premature close": "连接被提前关闭",
   "other side closed": "连接被对端关闭",
-  aborted: "连接被中止"
+  aborted: "连接被中止",
+  // fetch 对被禁端口（1/7/9/11/13/…/6667 等，WHATWG fetch 的 bad port 清单）直接拒绝，
+  // 抛的是无 code、cause.message 为 "bad port" 的 TypeError。实测（probe-badport）
+  // 未收录时界面显示「网络错误 bad port」——中英混排，且用户不知道是自己填的端口有问题。
+  "bad port": "该端口被安全策略禁止访问，请换一个端口（如 8188、8080、3000）"
 };
 
 /** 网络层异常的关键词（同时用于 cause 与 AI SDK 包裹层文本）。 */
@@ -54,7 +79,16 @@ export function describeError(error: unknown, fallback: string): string {
   // AbortSignal.timeout() 抛的 DOMException：超时和"用户主动取消"要分开说。
   if (error.name === "TimeoutError") return `连接超时：目标服务未在规定时间内响应。${HINT}`;
   if (error.name === "AbortError") return "操作已取消。";
+  // **地址本身写错**（漏 `http://`、多了空格、填成 `abc` 这类）：
+  // undici 抛 `TypeError: Failed to parse URL from abc/v1/models`，cause 是 "Invalid URL"。
+  // 不专门拦的话会走下面 causeCode 分支，拼成
+  // 「网络错误 Invalid URL。请检查地址、端口与服务是否已启动。」——中英混排，
+  // 而且把用户引向"检查服务有没有起来"，真实原因是他自己的地址格式不对。
   const cause = causeSignal(error);
+  const invalidUrl = cause.message === "Invalid URL" || /failed to parse url/i.test(error.message);
+  if (invalidUrl) {
+    return "接口地址格式不正确：需要以 http:// 或 https:// 开头（例如 https://api.example.com/v1）。";
+  }
   const causeCode = cause.code ?? cause.message;
   if (causeCode) return `网络连接失败：${NETWORK_CODES[causeCode] ?? STREAM_BROKEN_MESSAGES[causeCode.toLowerCase()] ?? `网络错误 ${causeCode}`}。${HINT}`;
   // AI SDK 的 APICallError 会把 errno 塞在 message 里（"Cannot connect to API: read ECONNRESET"），
@@ -65,6 +99,11 @@ export function describeError(error: unknown, fallback: string): string {
   if (candidate && (NETWORK_CODES[candidate] || /connect|socket|network|reset|refused|reach|timeout|timed out/i.test(error.message))) {
     return `网络连接失败：${NETWORK_CODES[candidate] ?? `网络错误 ${candidate}`}。${HINT}`;
   }
+  // 文件系统 errno：保存产物 / 写设置 / 删回收站文件都会碰到。
+  // 先查顶层 error.code（Node 的 fs 错误通常是 code 而非 cause），再查 message 里的 errno 令牌。
+  const fsCode = [ (error as { code?: unknown }).code, candidate ]
+    .find((value): value is string => typeof value === "string" && Boolean(FS_CODES[value]));
+  if (fsCode) return `${FS_CODES[fsCode]}：${error.message.replace(/^E[A-Z]+:\s*/, "").trim() || FS_CODES[fsCode]}`;
   // 中途断开时 AI SDK 只给 "Failed to process successful response"，真正的信号在 cause.message（terminated）里，
   // 上面 causeCode 分支没命中时兜底按网络语境翻译，避免透出英文占位。
   if (NETWORK_HINT_RE.test(error.message) || NETWORK_HINT_RE.test(cause.message ?? "")) {

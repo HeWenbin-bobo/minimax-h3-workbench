@@ -31,6 +31,33 @@ function makeOrchestrator(tasks: GenerationTask[]) {
 }
 
 describe("GenerationOrchestrator 回收站", () => {
+  // `save()` 会把写盘失败抛给调用方（磁盘满/只读）。这些操作都是"先就地改内存再写盘"，
+  // 不回滚的话用户看到"操作失败"的提示、刷新后列表却已经变了，完全自相矛盾。
+  it("deleteTasks 写盘失败时回滚 deletedAt", async () => {
+    const group = [makeTask({ id: "t1" }), makeTask({ id: "t2", index: 1 })];
+    const { orchestrator, store } = makeOrchestrator(group);
+    (store.save as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("磁盘已满"));
+    await expect(orchestrator.deleteTasks(["t1"])).rejects.toThrow("磁盘已满");
+    expect(orchestrator.list()).toHaveLength(2); // 仍在常规列表里
+    expect(orchestrator.listDeleted()).toHaveLength(0);
+  });
+
+  it("restoreTasks 写盘失败时回滚 deletedAt", async () => {
+    const group = [makeTask({ id: "t1", deletedAt: "2026-10-08T00:00:00.000Z" })];
+    const { orchestrator, store } = makeOrchestrator(group);
+    (store.save as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("磁盘已满"));
+    await expect(orchestrator.restoreTasks(["t1"])).rejects.toThrow("磁盘已满");
+    expect(orchestrator.listDeleted()).toHaveLength(1);
+  });
+
+  it("setCategory 写盘失败时回滚分类", async () => {
+    const group = [makeTask({ id: "t1" }), makeTask({ id: "t2", index: 1 })];
+    const { orchestrator, store } = makeOrchestrator(group);
+    (store.save as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("磁盘已满"));
+    await expect(orchestrator.setCategory("t1", "新分类")).rejects.toThrow("磁盘已满");
+    expect(orchestrator.list().every((t) => t.category === undefined)).toBe(true);
+  });
+
   it("deleteTasks 按组软删除并从常规列表隐藏", async () => {
     const group = [makeTask({ id: "t1", index: 0 }), makeTask({ id: "t2", index: 1 })];
     const { orchestrator } = makeOrchestrator(group);
@@ -68,6 +95,29 @@ describe("GenerationOrchestrator 回收站", () => {
     const files = await orchestrator.purgeExpired(deleteFile);
     expect(files).toEqual(["C:\\out\\old.mp4"]);
     expect(orchestrator.listDeleted().map((t) => t.id)).toEqual(["t-fresh"]);
+  });
+
+  // 回归：到期清理**不能**按 parentId 扩展成整组。
+  // 上一版的 `purgeTasks` 一律按组删：同一项目里 a1（8 天前删）过期时，
+  // 会把 a2（1 天前才删、还剩 6 天可恢复）一起抹掉——不可逆，且违背
+  // 「删除后 7 天内可恢复」的承诺。实测 probe-purge-expired 复现。
+  it("purgeExpired 不连带删除同组的未过期任务", async () => {
+    const expired = makeTask({ id: "a1", parentId: "groupA", deletedAt: new Date(Date.now() - 8 * 86_400_000).toISOString() });
+    const freshSibling = makeTask({ id: "a2", parentId: "groupA", index: 1, deletedAt: new Date(Date.now() - 1 * 86_400_000).toISOString() });
+    const { orchestrator } = makeOrchestrator([expired, freshSibling]);
+    await orchestrator.purgeExpired(vi.fn(async () => undefined));
+    expect(orchestrator.listDeleted().map((t) => t.id)).toEqual(["a2"]);
+  });
+
+  // 但 UI 的「彻底删除」仍是**整组**语义：界面上按项目成组展示，用户点的是那一组。
+  it("purgeTasks（UI 彻底删除）仍按组整组清除", async () => {
+    const a = makeTask({ id: "a1", parentId: "groupA", deletedAt: "2026-10-08T00:00:00.000Z" });
+    const b = makeTask({ id: "a2", parentId: "groupA", index: 1, deletedAt: "2026-10-08T00:00:00.000Z" });
+    const other = makeTask({ id: "b1", parentId: "groupB", deletedAt: "2026-10-08T00:00:00.000Z" });
+    const { orchestrator } = makeOrchestrator([a, b, other]);
+    const purged = await orchestrator.purgeTasks(["a1"]);
+    expect(purged.map((t) => t.id).sort()).toEqual(["a1", "a2"]);
+    expect(orchestrator.listDeleted().map((t) => t.id)).toEqual(["b1"]);
   });
 });
 
@@ -149,5 +199,141 @@ describe("GenerationOrchestrator 提示词长度校验", () => {
     const { orchestrator } = makeOrchestrator([]);
     await expect(orchestrator.submit({ ...request, backend: "rb", prompt: "长".repeat(MAX_PROMPT_LENGTH + 1) }))
       .rejects.toThrow("视频描述不能超过");
+  });
+});
+
+// IPC 可达入口的参数类型兜底：渲染端/智能体给出的参数不保证类型。
+// 不做兜底时 `prompt: 123` 会抛英文 "p.trim is not a function"，
+// 而 `duration: NaN` 能同时绕过 `< 4` 与 `> 15` 两个比较被送进工作流。
+describe("validateRequest 类型兜底", () => {
+  function submitWith(patch: Record<string, unknown>) {
+    const { orchestrator } = makeOrchestrator([]);
+    return orchestrator.submit({
+      mode: "text", backend: "local", prompt: "测试", duration: 4,
+      ratio: "16:9", resolution: "768P", width: 1280, height: 720,
+      count: 1, baseSeed: 1, ...patch
+    } as never);
+  }
+
+  it("prompt 非字符串报中文错误（不透出 trim is not a function）", async () => {
+    const error = await submitWith({ prompt: 123 }).catch((e: Error) => e);
+    expect((error as Error).message).toBe("视频描述必须是文本。");
+  });
+
+  it("duration 为 NaN/Infinity 被拒绝（否则会绕过区间比较）", async () => {
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      await expect(submitWith({ duration: bad })).rejects.toThrow("视频时长必须是数字。");
+    }
+  });
+
+  it("count / baseSeed / width / height 非数字被拒绝", async () => {
+    await expect(submitWith({ count: "abc" })).rejects.toThrow("生成数量必须是数字。");
+    await expect(submitWith({ baseSeed: "abc" })).rejects.toThrow("随机种子必须是数字。");
+    await expect(submitWith({ width: "abc" })).rejects.toThrow("画面宽度必须是数字。");
+    await expect(submitWith({ height: "abc" })).rejects.toThrow("画面高度必须是数字。");
+  });
+
+  it("参数对象本身为 null 时报中文错误", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    await expect(orchestrator.submit(null as never)).rejects.toThrow("生成参数无效。");
+  });
+
+  it("合法参数照常通过（不误伤）", async () => {
+    await expect(submitWith({})).resolves.toHaveLength(1);
+  });
+});
+
+// `count: 0` 曾因 `request.count || 4` 被当成"没给"，于是生成 4 路——
+// 云端按次计费时等于替用户多扣 4 次。显式给 0 应夹到 1（"最少"），没给才用默认 4。
+describe("submit 的数量夹取", () => {
+  function makeRequest(count?: number) {
+    return {
+      mode: "text" as const, backend: "local" as const, prompt: "测试", duration: 4,
+      ratio: "16:9" as const, resolution: "768P" as const, width: 1280, height: 720,
+      baseSeed: 1, ...(count === undefined ? {} : { count })
+    };
+  }
+
+  it("count = 0 夹到 1（不是默认 4）", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    await expect(orchestrator.submit(makeRequest(0))).resolves.toHaveLength(1);
+  });
+
+  it("未给 count 时按默认 4", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    await expect(orchestrator.submit(makeRequest())).resolves.toHaveLength(4);
+  });
+
+  it("超过 4 夹到 4，负数夹到 1", async () => {
+    const a = makeOrchestrator([]);
+    await expect(a.orchestrator.submit(makeRequest(9))).resolves.toHaveLength(4);
+    const b = makeOrchestrator([]);
+    await expect(b.orchestrator.submit(makeRequest(-3))).resolves.toHaveLength(1);
+  });
+});
+
+// `validateRequest` 对 baseSeed / width / height / ratio / resolution 是"给了才校验类型"，
+// 但 submit 把它们当必有：`undefined + 0` 是 NaN（写进任务记录与 ComfyUI 的 noise_seed），
+// 缺 width/height 会让工作流的必填输入在序列化时直接消失。
+// 这里锁定"校验器允许的调用方式，下游也能正常执行"。
+describe("submit 对可缺省字段补默认值", () => {
+  it("缺 baseSeed 时 seed 是有限数（不是 NaN）", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    const [task] = await orchestrator.submit({
+      mode: "text", backend: "local", prompt: "测试", duration: 4,
+      ratio: "16:9", resolution: "768P", width: 1280, height: 720, count: 2
+    } as never);
+    expect(Number.isFinite(task.seed)).toBe(true);
+    // 组内按 index 递增，且与存进任务的 request.baseSeed 一致（重试不会漂移）。
+    const all = orchestrator.list();
+    expect(all[0].seed + 1).toBe(all[1].seed);
+    expect(task.request?.baseSeed).toBe(task.seed);
+  });
+
+  it("缺 width/height 时按 720P 16:9 补齐", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    const [task] = await orchestrator.submit({
+      mode: "text", backend: "local", prompt: "测试", duration: 4,
+      ratio: "16:9", resolution: "768P", count: 1, baseSeed: 1
+    } as never);
+    expect(task.request?.width).toBe(1280);
+    expect(task.request?.height).toBe(720);
+  });
+
+  it("非法 ratio/resolution 回落到 16:9 / 768P", async () => {
+    const { orchestrator } = makeOrchestrator([]);
+    const [task] = await orchestrator.submit({
+      mode: "text", backend: "local", prompt: "测试", duration: 4,
+      ratio: "99:1", resolution: "4K", width: 1280, height: 720, count: 1, baseSeed: 1
+    } as never);
+    expect(task.request?.ratio).toBe("16:9");
+    expect(task.request?.resolution).toBe("768P");
+  });
+});
+
+// 重试直接展开 `task.request` 建任务，而那份数据来自 tasks.json（外部数据）。
+// 不过校验的话：未知 backend 会被 registry 的分支链静默落到 SSH；
+// 非法的 RB seconds+preset 会真的发到云端（失败照样扣卡密次数）。
+describe("retry 复用存档参数时同样过校验", () => {
+  it("存档里 backend 被手改成未知值时拒绝重试，不建任务", async () => {
+    const broken = makeTask({
+      id: "t-bad",
+      status: "failed",
+      request: { mode: "text", backend: "evil", prompt: "测试", duration: 4, ratio: "16:9", resolution: "768P", width: 1280, height: 720, count: 1, baseSeed: 1 } as never
+    });
+    const { orchestrator } = makeOrchestrator([broken]);
+    await expect(orchestrator.retry("t-bad")).rejects.toThrow("生成后端无效。");
+    expect(orchestrator.list()).toHaveLength(1); // 只有原来那条失败记录
+  });
+
+  it("存档里 RB 时长非法时拒绝重试（不会白扣卡密）", async () => {
+    const broken = makeTask({
+      id: "t-rb",
+      status: "failed",
+      backend: "rb",
+      request: { mode: "text", backend: "rb", prompt: "测试", duration: 10, ratio: "16:9", resolution: "768P", width: 1280, height: 720, count: 1, baseSeed: 1 } as never
+    });
+    const { orchestrator } = makeOrchestrator([broken]);
+    await expect(orchestrator.retry("t-rb")).rejects.toThrow("只支持 4、6、8 秒");
   });
 });

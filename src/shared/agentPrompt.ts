@@ -69,23 +69,21 @@ export interface SystemPromptInput {
   custom?: string;
   /** 历史使用习惯提示（main/modules/agentMemory.ts）。追加在通用提示词之后。 */
   memoryHint?: string;
-  /**
-   * world state 差异块（main/modules/worldState.ts）。只含**本轮的增量**——
-   * 未变化的 section 不会出现在这里。空串则不加尾巴。
-   */
-  worldState?: string;
 }
 
 /**
  * 组装本轮的通用 system prompt（不含计划模式段落——那由 `withPlanMode` 在最后追加）。
  *
- * 顺序：通用提示词 → 历史习惯 → world state 增量。
- * world state 靠后：它是"环境事实"，越靠近采样点越不容易被长提示词稀释。
+ * 顺序：通用提示词 → 历史习惯。
+ *
+ * **world state 不在这里**（重要）：环境事实（时间/联网/产物/余量）若拼进 system prompt，
+ * 实测会被模型忽略——真实 key A/B 测过 6 种 system 通道（末尾追加 / 开头 / 第二条 system /
+ * developer 角色）全部失败，而作为 **user 消息片段**注入则 100% 生效。Codex 正是把 world state
+ * 作为**对话片段**注入的。故世界状态改由调用方拼成一条 user 消息（见 main.ts 的 injectWorldState）。
  */
 export function buildSystemPrompt(input: SystemPromptInput): string {
   const base = input.custom?.trim() ? input.custom : defaultAgentPrompt();
   const parts = [base];
   if (input.memoryHint) parts.push(input.memoryHint);
-  if (input.worldState?.trim()) parts.push(input.worldState.trim());
   return parts.join("\n\n");
 }

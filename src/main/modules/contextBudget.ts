@@ -32,17 +32,41 @@ export function createContextWindowState(): ContextWindowState {
  * 估算文本 token 数。中文约 1.6 字符/token，英文约 4 字符/token——
  * 按字符类型分别计，比一律除以 4 准（中文会被严重低估）。
  * 只用于"拿不到服务端 usage"时的回落，不追求精确。
+ *
+ * **字符类必须覆盖日文假名与韩文**：原先只写了 `[㐀-鿿　-〿＀-￯]`（汉字 +
+ * 全角标点），日文（ひらがな/カタカナ）与韩文（한글）会落到 `rest/4` 那一支，
+ * 也就是按**英文**的密度估算——而它们实际约 1–2 字符/token，
+ * 占用被低估 2~2.5 倍。后果是压缩触发得太晚：日韩会话要么一直不压缩，
+ * 要么等上游直接报上下文超窗（用户看到的是"怎么发都不行"）。
  */
+const CJK_RE = /[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯가-힯ᄀ-ᇿ㄰-㆏]/g;
+
 export function estimateTokens(text: string): number {
   if (!text) return 0;
-  const cjk = (text.match(/[㐀-鿿　-〿＀-￯]/g) || []).length;
+  const cjk = (text.match(CJK_RE) || []).length;
   const rest = text.length - cjk;
   return Math.ceil(cjk / 1.6 + rest / 4);
 }
 
-/** 消息列表的估算总量（含角色开销的粗算，每条消息 +4 token）。 */
-export function estimateMessagesTokens(messages: Array<{ content: string }>): number {
-  return messages.reduce((sum, message) => sum + estimateTokens(message.content) + 4, 0);
+/**
+ * 单张图片的 token 估算。**不能按 base64 字符数算**——base64 只是传输编码，
+ * 真实计费取决于模型把图切成的 patch 数，通常几十到一两千 token。取保守中值 1000。
+ *
+ * 为什么必须算进去：图片以 data URL 存在 `images` 里（一张 1MB 的图 ≈ 100 万字符），
+ * 而 `content` 里没有它。旧实现只按文本估 → 带图会话的占用被严重低估
+ * （实测：1MB 图片只算 7 token），压缩永远触发不了，直到上游报"上下文超窗"。
+ */
+export const TOKENS_PER_IMAGE = 1_000;
+
+/** 消息列表的估算总量（含角色开销的粗算，每条消息 +4 token；图片按张计）。 */
+export function estimateMessagesTokens(
+  messages: Array<{ content: string; images?: string[] }>
+): number {
+  return messages.reduce(
+    (sum, message) =>
+      sum + estimateTokens(message.content) + 4 + (message.images?.length ?? 0) * TOKENS_PER_IMAGE,
+    0
+  );
 }
 
 /**

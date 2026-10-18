@@ -39,6 +39,14 @@ describe("normalizeHistory", () => {
     expect(result.messages[0].content).toContain("不支持图片输入");
   });
 
+  it("视觉模型下纯图片消息的占位文案不能说「不支持图片输入」（图还在，会误导模型拒答）", () => {
+    const result = normalizeHistory([msg("user", "", ["data:image/png;base64,AAA"])], { model: "gpt-4o" });
+    expect(result.messages[0].images).toHaveLength(1);
+    expect(result.messages[0].content).not.toContain("不支持图片输入");
+    // 仍须是非空 content（部分上游拒绝空 content）
+    expect(result.messages[0].content.trim().length).toBeGreaterThan(0);
+  });
+
   it("allowImages=false 时即便模型支持也剥图", () => {
     const result = normalizeHistory([msg("user", "看", ["img"])], { model: "gpt-4o", allowImages: false });
     expect(result.messages[0].images).toBeUndefined();
@@ -69,5 +77,21 @@ describe("normalizeHistory", () => {
 
   it("全空历史返回空数组，不抛错", () => {
     expect(normalizeHistory([], { model: "deepseek-chat" }).messages).toEqual([]);
+  });
+});
+
+// 漏判的代价：用户上传的图会被**静默剥掉**，只留一句"当前模型不支持图片输入"，
+// 而用户明明选了视觉模型。这里锁定几类专用视觉家族。
+describe("supportsImages 视觉家族覆盖", () => {
+  it("专用视觉家族被识别", () => {
+    for (const model of ["llava-v1.6-34b", "llava-llama3", "pixtral-12b", "idefics2", "fuyu-8b", "molmo-7b", "step-1v-8k", "cogvlm2"]) {
+      expect(supportsImages(model), model).toBe(true);
+    }
+  });
+
+  it("同家族的纯文本变体不被误判", () => {
+    for (const model of ["llama-3.1-70b", "mistral-large", "yi-34b", "step-2-16k", "command-r-plus", "ernie-4.0", "deepseek-chat"]) {
+      expect(supportsImages(model), model).toBe(false);
+    }
   });
 });

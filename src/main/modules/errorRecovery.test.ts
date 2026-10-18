@@ -62,6 +62,20 @@ describe("isContentFilterError", () => {
     expect(isContentFilterError({ message: "Internal Server Error" })).toBe(false);
     expect(isContentFilterError(null)).toBe(false);
   });
+
+  // 这个函数跑在"上游已经出错"的路径上。`JSON.stringify(error.data)` 对循环引用 /
+  // BigInt / 抛错的 toJSON 都会抛出——判定函数自己炸掉，一次本该"改写措辞后重试"的
+  // 内容拒绝就变成未捕获异常，重试逻辑整段跳过。实测（probe-filter-circular）三种都复现。
+  it("错误体不可序列化时不抛错（循环引用 / BigInt / 抛错的 toJSON）", () => {
+    const circular: Record<string, unknown> = { message: "x" };
+    circular.self = circular;
+    const hostile = (data: unknown) => Object.assign(new Error("upstream failed"), { data });
+
+    for (const data of [circular, { n: 10n }, { toJSON() { throw new Error("nope"); } }]) {
+      expect(() => isContentFilterError(hostile(data))).not.toThrow();
+      expect(isContentFilterError(hostile(data))).toBe(false);
+    }
+  });
 });
 
 describe("用户可见的提示文案", () => {

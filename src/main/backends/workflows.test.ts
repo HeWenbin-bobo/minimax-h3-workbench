@@ -13,6 +13,16 @@ describe("MiniMax H3 ComfyUI workflow", () => {
     expect(frameLength(15) % 17).toBe(5);
   });
 
+  // 回归：JS 负数取模会让"向上补齐"变成"向下补齐"——frameLength(4) 曾返回 90 帧（3.75 秒），
+  // 比用户请求的 4 秒还短。合法帧数只是必要条件，**不得短于请求时长**才是完整断言。
+  it("帧数换算结果不短于请求时长（4–15 秒全覆盖）", () => {
+    for (let duration = 4; duration <= 15; duration += 1) {
+      const frames = frameLength(duration);
+      expect(frames % 17, `duration=${duration}`).toBe(5);
+      expect(frames, `duration=${duration}`).toBeGreaterThanOrEqual(Math.round(duration * 24));
+    }
+  });
+
   it("wires first and last frames into FL2VA", () => {
     const workflow = buildFl2vaWorkflow(request, 43, {
       first: { name: "first.png" }, last: { name: "last.png", subfolder: "frames" }

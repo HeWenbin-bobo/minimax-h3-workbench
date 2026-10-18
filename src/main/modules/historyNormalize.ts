@@ -30,7 +30,11 @@ import type { ChatMessage } from "../../shared/types";
 /** 模型是否支持图片输入。按模型名前缀判定——上游 /models 只给 id，拿不到能力位。 */
 export function supportsImages(model: string): boolean {
   const lower = String(model || "").toLowerCase();
-  return /vl|vision|gpt-4o|gpt-4\.1|gpt-5|claude|gemini|glm-4v|qwen-vl|internvl|minicpm-v/.test(lower);
+  // 视觉模型家族。除了主流的 vl / vision 命名，这里还收录了几类**专用视觉家族**
+  // （实测漏判会让用户上传的图片被静默剥掉，只留一句"当前模型不支持图片输入"）：
+  //   llava / pixtral / idefics / fuyu / molmo / cogvlm / step-1v
+  // 注意 "vl" 是子串匹配：`cogvlm` 命中 "vl"，`qwen2.5-vl` 也是。
+  return /vl|vision|llava|pixtral|idefics|fuyu|molmo|step-1v|gpt-4o|gpt-4\.1|gpt-5|claude|gemini|glm-4v|internvl|minicpm-v/.test(lower);
 }
 
 export interface NormalizeResult {
@@ -63,8 +67,14 @@ export function normalizeHistory(
     if (!hasText && !hadImages) continue;
 
     if (hadImages && !canImage) strippedImages += message.images!.length;
-    // 剥图后内容为空的话给个占位，否则这条消息变成空 content——等于没解决上面那个问题。
-    const content = hasText ? message.content : "（用户发送了图片，但当前模型不支持图片输入）";
+    // 纯图片消息（无文字）需要一个非空 content，否则部分上游 400（"content must not be empty"）。
+    // 占位文案必须**按模型是否真能收图**分支——视觉模型下图片会留在 images 里，
+    // 再贴一句"当前模型不支持图片输入"等于当面告诉模型它看不到图（实测会让它拒答图片内容）。
+    const content = hasText
+      ? message.content
+      : canImage
+        ? "（用户只发送了图片，请直接查看并回应图片内容）"
+        : "（用户发送了图片，但当前模型不支持图片输入）";
     cleaned.push({ ...message, content, images: canImage ? message.images : undefined });
   }
 

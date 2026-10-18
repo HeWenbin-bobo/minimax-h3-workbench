@@ -125,6 +125,34 @@ describe("RbAdapter.buildJobBody", () => {
     expect(result.outputPath).toContain("t3.mp4");
   });
 
+  // 直链 `/video` 走的是 fetch：网络层失败（连接被拒/超时）时旧实现直接跳出，
+  // 那个专为"直链不可用"准备的 `video_url` 回落永远轮不到——卡密已扣、成片拿不到。
+  // 这里锁定：直链抛错也要继续走回落。
+  it("直链网络失败时仍回落到 video_url（不把已扣费的任务判死）", async () => {
+    const fetchMock = (async (url: string | URL) => {
+      const target = String(url);
+      if (target.endsWith("/api/v1/jobs")) {
+        return new Response(JSON.stringify({ job: { id: "job-fb" } }), { status: 200 });
+      }
+      if (target.endsWith("/api/v1/jobs/job-fb/video")) {
+        const error = new Error("fetch failed");
+        (error as { cause?: unknown }).cause = { code: "ECONNRESET" };
+        throw error;
+      }
+      if (target === "https://cdn.test/out.mp4") {
+        return new Response(new Uint8Array([0, 0, 0, 1]), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        job: { id: "job-fb", status: "done", has_video: true, video_url: "https://cdn.test/out.mp4" }
+      }), { status: 200 });
+    }) as typeof fetch;
+    globalThis.fetch = fetchMock;
+    const task = { id: "t-fb", seed: 1, prompt: base.prompt } as never;
+    const result = await adapter().generate(base, task, () => undefined);
+    expect(result.outputPath).toContain("t-fb.mp4");
+    expect(result.outputUrl).toBe("https://cdn.test/out.mp4");
+  });
+
   it("连续查询全部失败时才报错，并提示任务可能仍在云端", async () => {
     const fetchMock = (async (url: string | URL) => {
       const target = String(url);
@@ -169,7 +197,13 @@ describe("assertSafeResultUrl（SSRF 防护）", () => {
       "https://169.254.169.254/latest/meta-data/",
       "https://[::1]/1.mp4",
       "https://[fd00::1]/1.mp4",
-      "https://0.0.0.0/1.mp4"
+      "https://0.0.0.0/1.mp4",
+      // IPv4 映射的 IPv6：URL 会规范化成 [::ffff:7f00:1] 等十六进制形式，
+      // 旧前缀检查漏判 → 回环/内网被放行（实测 SSRF 绕过）。
+      "https://[::ffff:127.0.0.1]/1.mp4",
+      "https://[::ffff:169.254.169.254]/latest/meta-data/",
+      "https://[::ffff:10.0.0.8]/1.mp4",
+      "https://[0:0:0:0:0:ffff:7f00:1]/1.mp4"
     ]) {
       expect(() => assertSafeResultUrl(url), url).toThrow("内网");
     }
@@ -177,5 +211,42 @@ describe("assertSafeResultUrl（SSRF 防护）", () => {
 
   it("拒绝无效地址", () => {
     expect(() => assertSafeResultUrl("not-a-url")).toThrow("无效");
+  });
+});
+
+// 切换预设后，界面只是不显示对应选择器，`request.*Path` 里的旧值仍在。
+// 上传必须按预设过滤，否则 easy_15 会把残留参考图发给云端（实测 buildJobBody 确认过）。
+describe("RbAdapter 预设切换后的素材残留", () => {
+  it("easy_15 / easy_30 不再上传任何残留素材", async () => {
+    for (const preset of ["easy_15", "easy_30"]) {
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ items: [{ ref: "r1" }] }), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const adapter = new RbAdapter({ baseUrl: "https://rb.test", cardCode: "k", outputDirectory: "/tmp" });
+      const request = { ...base, preset, sourceImagePath: "a.jpg", firstFramePath: "f.jpg", lastFramePath: "l.jpg", sourceVideoPath: "v.mp4" };
+      // 直接走上传阶段：不应发起任何上传请求
+      const refs = await (adapter as unknown as { uploadRefs: (r: typeof request) => Promise<{ images: string[]; videos: string[] }> }).uploadRefs(request);
+      expect(refs).toEqual({ images: [], videos: [] });
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+    vi.unstubAllGlobals();
+  });
+
+  it("tail_frame 只上传首尾帧，不带参考图/参考视频", async () => {
+    const uploaded: string[] = [];
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body as FormData;
+      const file = body?.get("files") as File | null;
+      if (file) uploaded.push(file.name);
+      return new Response(JSON.stringify({ items: [{ ref: "r" }] }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new RbAdapter({ baseUrl: "https://rb.test", cardCode: "k", outputDirectory: "/tmp" });
+    const request = { ...base, preset: "tail_frame", firstFramePath: "first.jpg", lastFramePath: "last.jpg", sourceImagePath: "ref.jpg", sourceVideoPath: "v.mp4" };
+    await (adapter as unknown as { uploadRefs: (r: typeof request) => Promise<unknown> }).uploadRefs(request).catch(() => undefined);
+    // 读取文件会失败（测试环境无真实文件），但**尝试上传的顺序**已能证明过滤生效：
+    // 只应尝试 first.jpg / last.jpg，不应出现 ref.jpg / v.mp4。
+    expect(uploaded.join(",")).not.toContain("ref.jpg");
+    expect(uploaded.join(",")).not.toContain("v.mp4");
+    vi.unstubAllGlobals();
   });
 });

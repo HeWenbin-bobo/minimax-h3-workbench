@@ -1,5 +1,7 @@
 export type BackendKind = "local" | "ssh" | "minimax" | "rb";
 export type SecretName = "minimaxApiKey" | "sshPassword" | "rbCardCode" | "llmApiKey" | "searchApiKey";
+/** 运行时可用的 SecretName 白名单。IPC 入口用它校验，避免把密钥写到下游读不到的键上。 */
+export const SECRET_NAMES: readonly SecretName[] = ["minimaxApiKey", "sshPassword", "rbCardCode", "llmApiKey", "searchApiKey"];
 export type GenerationMode = "text" | "image" | "video";
 
 /** 视频描述长度上限。工作台计数器、文本域 maxlength 与主进程校验共用同一来源，避免标称值与实际约束不一致。 */
@@ -20,6 +22,14 @@ export type TaskStatus =
 export interface AppSettings {
   localComfyUrl: string;
   outputDirectory: string;
+  /**
+   * 用户**自己配置过**的历史输出目录（由 settingsStore 自动维护，不由界面直接编辑）。
+   *
+   * 用途只有一个：删除历史结果文件时的白名单。改过输出目录后，旧目录里的成片
+   * 仍属于本应用写出，彻底删除时应当能清掉；但**不能**因此信任"任务记录里的任意路径"——
+   * 记录可被篡改，而删除不可逆。信任来源必须是用户显式配置过的目录。
+   */
+  outputDirectoryHistory?: string[];
   /** 本机 ComfyUI 根目录（可选）。设置后模型下载页按此目录检查 5 个 H3 模型文件是否就位。 */
   comfyuiRoot: string;
   /** 瞬映 RB（rb.coolhs.com 或兼容中转）的 API 根地址。 */
@@ -191,6 +201,13 @@ export interface UpdateInfo {
   publishedAt?: string;
 }
 
+/** 安装包下载进度（electron-updater 的 download-progress 事件）。 */
+export interface UpdateProgress {
+  percent: number;
+  transferredBytes: number;
+  totalBytes: number;
+}
+
 export interface LocalModelStatus {
   id: string;
   name: string;
@@ -207,7 +224,7 @@ export interface WorkbenchApi {
   setSecret(name: SecretName, value: string): Promise<ApiResponse<boolean>>;
   hasSecret(name: SecretName): Promise<ApiResponse<boolean>>;
   selectDirectory(): Promise<ApiResponse<string | undefined>>;
-  selectFile(kind: "image" | "video" | "key"): Promise<ApiResponse<string | undefined>>;
+  selectFile(kind: "image" | "video" | "key" | "attachment"): Promise<ApiResponse<string | undefined>>;
   inspectEnvironment(): Promise<ApiResponse<EnvironmentReport>>;
   checkForUpdates(): Promise<ApiResponse<UpdateInfo>>;
   downloadAndInstallUpdate(): Promise<ApiResponse<boolean>>;
@@ -234,9 +251,23 @@ export interface WorkbenchApi {
   /**
    * 读取已落盘产物的文本内容（表格/文档预览用）。
    * 只允许 userData/artifacts/ 内的文件——与 h3preview 协议同一套路径白名单。
+   *
+   * 返回结构化对象而不是裸字符串：`text` 是**纯内容**，任何"被截断了多少"的说明
+   * 放在 `note` 里。早前把提示拼在 `text` 末尾，表格预览会把它当成**一行数据**
+   * 渲染出来（实测：3 行表格变成 4 行，多出一行只有一列的说明文字）。
    */
-  readArtifactText(filePath: string): Promise<ApiResponse<string>>;
+  readArtifactText(filePath: string): Promise<ApiResponse<{ text: string; note?: string }>>;
+  /** 会话被彻底删除时清掉它的产物目录（userData/artifacts/<sessionId>/），避免永久占盘。 */
+  purgeSessionArtifacts(sessionId: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
+  /**
+   * 把主窗口带到前台（最小化时先还原）。
+   *
+   * 为什么需要 IPC：渲染端的 `window.focus()` 只能在**已显示**的窗口里抢焦点，
+   * 窗口最小化或不在前台时它什么也做不了——系统通知点击后"点了没反应"就是这个原因。
+   * 主进程的 `second-instance` 早就用了 restore/show/focus 三步，这里复用同一套。
+   */
+  focusWindow(): Promise<ApiResponse<boolean>>;
   /**
    * 游乐场：发起一次流式对话；分块经 onLlmChunk 推送，结束/出错经 onLlmDone 推送。agent=true 走 AI SDK 工具循环。
    * sessionId 由渲染端生成：不同会话可并发对话，事件按该 id 路由回各自的会话，互不串流。
@@ -280,6 +311,14 @@ export interface WorkbenchApi {
   answerLlmQuestion(requestId: string, answers: Record<string, string[]>): Promise<ApiResponse<boolean>>;
   /** 跳过整组问题：主进程立即放行工具循环（模型按最佳判断继续），不必等超时。 */
   skipLlmQuestion(requestId: string): Promise<ApiResponse<boolean>>;
+  /**
+   * 安装包下载进度（`downloadAndInstallUpdate` 期间推送）。
+   *
+   * 主进程早就把 electron-updater 的 `download-progress` 接出来了，界面也备好了
+   * `.download-progress` 样式，但一直**没有订阅方**——用户下载 100MB+ 安装包时
+   * 只能看到"正在下载更新…"，不知道是在走还是一动不动。
+   */
+  onUpdateProgress(listener: (progress: UpdateProgress) => void): () => void;
   onTaskUpdate(listener: (task: GenerationTask) => void): () => void;
 }
 
@@ -302,6 +341,8 @@ export interface AttachmentPayload {
   name: string;
   dataUrl?: string;
   text?: string;
+  /** 文本附件是否被截断（原文件超过上限）。界面据此明确提示，而不是静默少给内容。 */
+  truncated?: boolean;
 }
 
 /** LLM 流式分块事件。 */

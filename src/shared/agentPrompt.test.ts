@@ -79,12 +79,10 @@ describe("buildSystemPrompt 组装", () => {
     expect(out.indexOf("# 工作方式")).toBeLessThan(out.indexOf("常用时长"));
   });
 
-  it("world state 增量排在历史习惯之后（越靠近采样点越不被稀释）", () => {
-    const out = buildSystemPrompt({ memoryHint: "习惯A", worldState: "环境B" });
-    expect(out.indexOf("习惯A")).toBeLessThan(out.indexOf("环境B"));
-  });
-
-  it("空 world state 不加尾巴（不产生多余空行）", () => {
-    expect(buildSystemPrompt({ worldState: "  \n " })).toBe(defaultAgentPrompt());
+  it("world state 不再进 system prompt（实测拼进 system 会被模型忽略）", () => {
+    // SystemPromptInput 已无 worldState 字段；这里断言 system 里不含环境事实标记。
+    const out = buildSystemPrompt({ memoryHint: "习惯A" });
+    expect(out).not.toContain("# 当前时间");
+    expect(out).not.toContain("# 联网状态");
   });
 });

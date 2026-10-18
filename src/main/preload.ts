@@ -28,7 +28,9 @@ const api: WorkbenchApi = {
   showItem: (filePath) => invoke("shell:showItem", filePath),
   saveArtifact: (sessionId, name, content, kind) => invoke("artifact:save", { sessionId, name, content, kind }),
   readArtifactText: (filePath) => invoke("artifact:read", filePath),
+  purgeSessionArtifacts: (sessionId) => invoke("artifact:purgeSession", sessionId),
   openExternal: (url) => invoke("shell:openExternal", url),
+  focusWindow: () => invoke("window:focus"),
   chatLlm: (messages, webSearch, agent, sessionId, browserSearch, planMode) => invoke("llm:chat", messages, webSearch, Boolean(agent), String(sessionId || ""), Boolean(browserSearch), planMode),
   checkAgentFrameworkUpdate: () => invoke("update:checkFramework"),
   abortLlm: (sessionId) => invoke("llm:abort", sessionId),
@@ -47,6 +49,7 @@ const api: WorkbenchApi = {
   onLlmQuestion: (listener) => subscribe<LlmQuestionEvent>("llm:question", listener),
   answerLlmQuestion: (requestId, answers) => invoke("llm:answer", requestId, answers),
   skipLlmQuestion: (requestId) => invoke("llm:skip-question", requestId),
+  onUpdateProgress: (listener) => subscribe("update:progress", listener),
   onTaskUpdate: (listener) => subscribe("task:update", listener)
 };
 

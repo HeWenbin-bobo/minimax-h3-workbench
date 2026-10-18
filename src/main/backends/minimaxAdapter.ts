@@ -1,8 +1,9 @@
-import { readFile, mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { describeError } from "../../shared/errors";
 import { estimateCloudCost } from "../../shared/capabilities";
 import { assertSafeResultUrl } from "./resultUrl";
+import { readUploadFile, saveResponseToFile } from "./mediaFile";
 import type {
   BackendTestResult,
   GenerationAdapter,
@@ -37,15 +38,40 @@ export class MiniMaxAdapter implements GenerationAdapter {
     try {
       const response = await fetch(`${this.baseUrl}/v2/query/video_generation/nonexistent`, {
         headers: { Authorization: `Bearer ${this.options.apiKey}` },
-        signal: signal ?? AbortSignal.timeout(8_000)
+        signal: requestSignal(signal, 8_000)
       });
-      const authenticated = response.status !== 401;
+      // 401 与 403 都算鉴权失败：403 常见于 Key 被禁用/无该模型权限/地区限制，
+      // 只认 401 会把这类"实际不可用"误报成"已通过鉴权"（与 RbAdapter 的判定保持一致）。
+      //
+      // 另一半同样重要：**5xx / 429 不能算通过**。这里查的是一个不存在的任务，
+      // 正常响应应是 404（Key 有效、任务不存在）。若网关返回 500/502/503 或限流 429，
+      // 说明服务此刻不可用——旧逻辑会显示"API Key 已通过鉴权检查"，用户据此以为配置没问题，
+      // 实际生成时才失败。这类终态必须如实报告为"服务不可用"。
+      const status = response.status;
+      if (status === 401 || status === 403) {
+        return {
+          ok: false,
+          label: "MiniMax 云 API",
+          latencyMs: Date.now() - start,
+          details: { httpStatus: status },
+          message: `API Key 无效、已失效或无访问权限（HTTP ${status}）。`
+        };
+      }
+      if (status === 429 || status >= 500) {
+        return {
+          ok: false,
+          label: "MiniMax 云 API",
+          latencyMs: Date.now() - start,
+          details: { httpStatus: status },
+          message: `服务商暂时不可用（HTTP ${status}），无法确认鉴权状态，请稍后重试。`
+        };
+      }
       return {
-        ok: authenticated,
+        ok: true,
         label: "MiniMax 云 API",
         latencyMs: Date.now() - start,
-        details: { httpStatus: response.status },
-        message: authenticated ? "API Key 已通过鉴权检查。" : "API Key 无效或已失效。"
+        details: { httpStatus: status },
+        message: "API Key 已通过鉴权检查。"
       };
     } catch (error) {
       return {
@@ -82,9 +108,12 @@ export class MiniMaxAdapter implements GenerationAdapter {
         duration: request.duration,
         ratio: request.mode === "image" || request.firstFramePath || request.lastFramePath ? "adaptive" : request.ratio
       }),
-      signal
+      signal: requestSignal(signal, 30_000)
     });
-    const created = (await response.json()) as { task_id?: string; error?: { type?: string; message?: string } };
+    // 网关/反代在 5xx 时可能返回 HTML 错误页：裸 `response.json()` 会抛英文
+    // `Unexpected token '<'`，用户看到的是与"提交失败"无关的技术噪声。
+    // 统一走 readJson（失败返回 {}），由下面的 ok/task_id 判定给出中文结论。
+    const created = (await readJson(response)) as { task_id?: string; error?: { type?: string; message?: string } };
     if (!response.ok || !created.task_id) throw new Error(created.error?.message || `MiniMax 提交失败：${response.status}`);
     onProviderId?.(created.task_id); // 提交成功立即回传：中途取消时云端任务也能被终止（按次计费）。
     const result = await this.wait(created.task_id, onProgress, signal);
@@ -110,9 +139,22 @@ export class MiniMaxAdapter implements GenerationAdapter {
       content.push({ type: "video_url", video_url: { url: await dataUri(request.sourceVideoPath) }, role: "reference_video" });
       return content;
     }
-    if (request.mode === "image" && request.sourceImagePath) {
-      content.push({ type: "image_url", image_url: { url: await dataUri(request.sourceImagePath) }, role: "first_frame" });
+    // **按模式取素材，不能把四个路径都发上去**：切换模式时界面只是不显示对应选择器，
+    // `request.*Path` 里的旧值仍在。都发的话会出现**两个 first_frame**
+    // （image 模式的 sourceImage 与 text 模式残留的 firstFrame），
+    // 云端对重复角色的处理未定义——实测本地构造确认会同时发出两个 first_frame。
+    if (request.mode === "image") {
+      // 图生视频的素材来源：`sourceImagePath`（界面上的「参考图片」）优先，
+      // 没有则回落到 `firstFramePath`——`validateRequest` 明确允许后者
+      // （"图生视频模式必须选择一张图片"是 `!sourceImagePath && !firstFramePath`）。
+      // 只读 sourceImagePath 会让这类合法请求变成一个纯文本请求。
+      const imagePath = request.sourceImagePath || request.firstFramePath;
+      if (imagePath) {
+        content.push({ type: "image_url", image_url: { url: await dataUri(imagePath) }, role: "first_frame" });
+      }
+      return content;
     }
+    // 文生视频：可选用首帧/尾帧控制。
     if (request.firstFramePath) {
       content.push({ type: "image_url", image_url: { url: await dataUri(request.firstFramePath) }, role: "first_frame" });
     }
@@ -130,14 +172,33 @@ export class MiniMaxAdapter implements GenerationAdapter {
     let progress = 15;
     const startedAt = Date.now();
     const timeoutMs = 60 * 60 * 1_000; // 云端排队+生成上限 1 小时：防止任务永远转圈
+    // 与 RbAdapter 同一套容忍策略：云端任务一旦提交就**已计费**，轮询期的一次网络抖动
+    // 或网关 502/503/504 不该把任务判死——任务仍在云端跑，用户却看到"失败"，
+    // 钱花了、成片拿不到。只有连续失败到上限才认定服务不可用。
+    const MAX_CONSECUTIVE_ERRORS = 5;
+    let consecutiveErrors = 0;
     for (;;) {
       if (signal?.aborted) throw new DOMException("任务已取消", "AbortError");
       if (Date.now() - startedAt > timeoutMs) throw new Error("云端任务超过 1 小时未完成，已停止轮询。请到 MiniMax 控制台确认任务状态。");
-      const response = await fetch(`${this.baseUrl}/v2/query/video_generation/${encodeURIComponent(taskId)}`, {
-        headers: { Authorization: `Bearer ${this.options.apiKey}` },
-        signal
-      });
-      const payload = (await response.json()) as {
+      let response: Response;
+      try {
+        response = await fetch(`${this.baseUrl}/v2/query/video_generation/${encodeURIComponent(taskId)}`, {
+          headers: { Authorization: `Bearer ${this.options.apiKey}` },
+          signal: requestSignal(signal, 20_000)
+        });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          throw new Error(`连续 ${consecutiveErrors} 次查询云端任务失败：${describeError(error, "网络异常")}任务可能仍在云端生成，请到 MiniMax 控制台确认。`);
+        }
+        onProgress("running", progress, `网络抖动，正在重试（第 ${consecutiveErrors} 次）`);
+        await delay(10_000, signal);
+        continue;
+      }
+      // 响应体可能不是 JSON（网关错误页）：`await response.json()` 会抛，
+      // 那会把"临时网关故障"升级成一条英文解析错误。
+      const payload = (await response.json().catch(() => ({}))) as {
         task?: {
           status?: string;
           content?: { url?: string };
@@ -146,11 +207,29 @@ export class MiniMaxAdapter implements GenerationAdapter {
         };
         error?: { message?: string };
       };
-      if (!response.ok) throw new Error(payload.error?.message || `查询失败：${response.status}`);
+      if (!response.ok) {
+        // 5xx / 429 属临时性（网关过载、限流），与原任务无关：继续轮询。
+        const transient = response.status >= 500 || response.status === 429;
+        if (transient) {
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            throw new Error(`连续 ${consecutiveErrors} 次查询云端任务失败（HTTP ${response.status}）${payload.error?.message ? `：${payload.error.message}` : ""}。任务可能仍在云端生成，请到 MiniMax 控制台确认。`);
+          }
+          onProgress("running", progress, `云端暂时不可用（HTTP ${response.status}），正在重试（第 ${consecutiveErrors} 次）`);
+          await delay(10_000, signal);
+          continue;
+        }
+        // 4xx（除 429）是真错误：鉴权失效、任务不存在等，重试没有意义。
+        throw new Error(payload.error?.message || `查询失败：${response.status}`);
+      }
+      consecutiveErrors = 0;
       // MiniMax 官方文档的成功态是 "Success"（首字母大写），不是 succeeded；比对前统一小写并收下常见写法。
       // 只认 succeeded 的话，生成已完成的任务永远匹配不上，界面会一直"正在生成"直到 1 小时超时。
       // （本机无 MiniMax API Key，未能真机验证；该改动只放宽匹配、不放宽下载条件，故不会误判未完成任务。）
       const taskStatus = String(payload.task?.status ?? "").toLowerCase();
+      // 注意：这里是 `succeeded && url` 的联合条件，**不能**拆成"成功就报错"。
+      // 实测契约：云端可能先回报 Success、下一轮才给 content.url（转码未完成），
+      // 所以"成功但暂无 url"必须继续轮询（minimaxAdapter.test 有专门用例锁定）。
       if (["success", "succeeded", "done", "completed"].includes(taskStatus) && payload.task?.content?.url) {
         return {
           url: payload.task.content.url,
@@ -172,13 +251,25 @@ export class MiniMaxAdapter implements GenerationAdapter {
     // 否则被劫持的响应可让本应用替它访问内网、并把内网内容当作"生成结果"落盘。
     const safeUrl = assertSafeResultUrl(url);
     // redirect:"manual"：禁止自动跟随重定向，否则可用 302 绕过上面的校验指向内网。
-    const response = await fetch(safeUrl, { signal, redirect: "manual" });
+    const response = await fetch(safeUrl, { signal: requestSignal(signal, 300_000), redirect: "manual" });
     if (!response.ok) throw new Error(`生成结果下载失败：${response.status}`);
     await mkdir(this.options.outputDirectory, { recursive: true });
     const target = path.join(this.options.outputDirectory, `${taskId}.mp4`);
-    await writeFile(target, Buffer.from(await response.arrayBuffer()));
+    // 流式落盘：整段读进内存（`arrayBuffer()`）在长片上会让主进程直接 OOM。
+    await saveResponseToFile(response, target);
     return target;
   }
+}
+
+/**
+ * 读 JSON，失败返回 {}。
+ *
+ * 网关/反代在 5xx 时可能返回 HTML 错误页，裸 `response.json()` 会抛英文
+ * `Unexpected token '<'`——用户看到的是与"提交失败"无关的技术噪声。
+ * 返回空对象后由调用方按 `response.ok` / 字段缺失给出中文结论。
+ */
+async function readJson(response: Response): Promise<unknown> {
+  return response.json().catch(() => ({}));
 }
 
 async function dataUri(filePath: string): Promise<string> {
@@ -191,19 +282,51 @@ async function dataUri(filePath: string): Promise<string> {
     ".heic": "image/heic",
     ".heif": "image/heif",
     ".mp4": "video/mp4",
-    ".mov": "video/quicktime"
+    ".mov": "video/quicktime",
+    // 选择器也允许 webm / mkv；MIME 表漏了它们会回落成 application/octet-stream，
+    // 云端拿到无类型数据多半直接拒收（与 heic/heif 那处同类）。
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska"
   };
-  const bytes = await readFile(filePath);
-  if (bytes.byteLength > 50 * 1024 * 1024) throw new Error("参考素材超过云 API 允许的 50MB，请改用公网 URL 或压缩文件。 ");
+  // 先验大小再读（与 RB / ComfyUI 同一套）：整份读进内存后才发现超限时，
+  // 大文件已经把内存压力扛完了。
+  const bytes = await readUploadFile(filePath);
   return `data:${mime[extension] || "application/octet-stream"};base64,${bytes.toString("base64")}`;
 }
 
+/**
+ * 可取消的 sleep。
+ *
+ * **正常结束必须摘掉 abort 监听器**：`{ once: true }` 只在**取消时**生效。
+ * 云端轮询每 10 秒一轮、最长 1 小时 ≈ 360 次，每次都往同一个 signal 上挂一个
+ * 从不移除的闭包——长任务里持续增长，取消时要遍历几百个失效监听器。
+ * 与 comfyAdapter / rbAdapter 同一套写法。
+ */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
+    const abort = () => reject(new DOMException("任务已取消", "AbortError"));
+    // **已经中止的 signal 必须立刻返回**：`addEventListener("abort")` 只对
+    // 后续发生的 abort 生效，已经派发过的事件不会再触发监听器（实测确认）。
+    // 撤销可能在上一段 `await fetch()` 返回之后的任意时刻发生——此时轮到本函数，
+    // 事件早已派发完毕，监听器永远不会被调用，于是「停止」后仍要白等满 3–10 秒。
+    if (signal?.aborted) { abort(); return; }
+    const onAbort = () => {
       clearTimeout(timer);
-      reject(new DOMException("任务已取消", "AbortError"));
-    }, { once: true });
+      abort();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+/**
+ * 单次请求超时（与调用方取消信号合并）。CLAUDE.md 纪律：外部调用必须自己加超时，
+ * 不让 fetch 裸等——否则上游挂住会把整条降级链拖死。没有调用方信号时只带超时。
+ */
+function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }

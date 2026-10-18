@@ -31,6 +31,33 @@ function makeOrchestrator(tasks: GenerationTask[]) {
 }
 
 describe("GenerationOrchestrator 回收站", () => {
+  // `save()` 会把写盘失败抛给调用方（磁盘满/只读）。这些操作都是"先就地改内存再写盘"，
+  // 不回滚的话用户看到"操作失败"的提示、刷新后列表却已经变了，完全自相矛盾。
+  it("deleteTasks 写盘失败时回滚 deletedAt", async () => {
+    const group = [makeTask({ id: "t1" }), makeTask({ id: "t2", index: 1 })];
+    const { orchestrator, store } = makeOrchestrator(group);
+    (store.save as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("磁盘已满"));
+    await expect(orchestrator.deleteTasks(["t1"])).rejects.toThrow("磁盘已满");
+    expect(orchestrator.list()).toHaveLength(2); // 仍在常规列表里
+    expect(orchestrator.listDeleted()).toHaveLength(0);
+  });
+
+  it("restoreTasks 写盘失败时回滚 deletedAt", async () => {
+    const group = [makeTask({ id: "t1", deletedAt: "2026-10-08T00:00:00.000Z" })];
+    const { orchestrator, store } = makeOrchestrator(group);
+    (store.save as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("磁盘已满"));
+    await expect(orchestrator.restoreTasks(["t1"])).rejects.toThrow("磁盘已满");
+    expect(orchestrator.listDeleted()).toHaveLength(1);
+  });
+
+  it("setCategory 写盘失败时回滚分类", async () => {
+    const group = [makeTask({ id: "t1" }), makeTask({ id: "t2", index: 1 })];
+    const { orchestrator, store } = makeOrchestrator(group);
+    (store.save as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("磁盘已满"));
+    await expect(orchestrator.setCategory("t1", "新分类")).rejects.toThrow("磁盘已满");
+    expect(orchestrator.list().every((t) => t.category === undefined)).toBe(true);
+  });
+
   it("deleteTasks 按组软删除并从常规列表隐藏", async () => {
     const group = [makeTask({ id: "t1", index: 0 }), makeTask({ id: "t2", index: 1 })];
     const { orchestrator } = makeOrchestrator(group);

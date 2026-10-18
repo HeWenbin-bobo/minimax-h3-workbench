@@ -60,12 +60,21 @@ export class GenerationOrchestrator {
   async deleteTasks(taskIds: string[]): Promise<GenerationTask[]> {
     const ids = new Set(taskIds);
     const affected: GenerationTask[] = [];
+    // 写盘失败要把改动回滚（同 submit/retry）：`save()` 会把磁盘满/只读抛出来，
+    // 而这里是就地把 deletedAt 打上——不回滚的话，用户看到"删除失败"的提示，
+    // 下一次刷新列表却已经少了这一组，完全自相矛盾；后续任何一次进度写盘
+    // 还会把这次"失败的删除"真的落盘。
+    const before = new Map<string, { deletedAt?: string; message?: string }>();
+    const remember = (task: GenerationTask) => {
+      if (!before.has(task.id)) before.set(task.id, { deletedAt: task.deletedAt, message: task.message });
+    };
     for (const task of this.tasks) {
       if (!ids.has(task.id) || task.deletedAt) continue;
       // 整组语义：删任一路即删整组（UI 以项目为单位）。
       const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
       for (const sibling of siblings) {
         if (sibling.deletedAt) continue;
+        remember(sibling);
         sibling.deletedAt = new Date().toISOString();
         if (!["succeeded", "failed", "cancelled", "interrupted"].includes(sibling.status)) {
           sibling.message = "已删除（生成中止）";
@@ -74,7 +83,19 @@ export class GenerationOrchestrator {
         affected.push(sibling);
       }
     }
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      // 注意：`cancel()` 造成的状态变化不回滚——那次中止是真的发生了，
+      // 假装没发生反而更误导（任务确实已停止）。
+      for (const [id, prev] of before) {
+        const task = this.tasks.find((entry) => entry.id === id);
+        if (!task) continue;
+        task.deletedAt = prev.deletedAt;
+        task.message = prev.message;
+      }
+      throw error;
+    }
     affected.forEach(this.listener);
     return affected;
   }
@@ -82,16 +103,27 @@ export class GenerationOrchestrator {
   async restoreTasks(taskIds: string[]): Promise<GenerationTask[]> {
     const ids = new Set(taskIds);
     const affected: GenerationTask[] = [];
+    // 同 deleteTasks：写盘失败要还原 deletedAt，否则"恢复失败"的提示与刷新后的列表相矛盾。
+    const before = new Map<string, string | undefined>();
     for (const task of this.tasks) {
       if (!ids.has(task.id) || !task.deletedAt) continue;
       const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
       for (const sibling of siblings) {
         if (!sibling.deletedAt) continue;
+        if (!before.has(sibling.id)) before.set(sibling.id, sibling.deletedAt);
         delete sibling.deletedAt;
         affected.push(sibling);
       }
     }
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      for (const [id, deletedAt] of before) {
+        const task = this.tasks.find((entry) => entry.id === id);
+        if (task && deletedAt) task.deletedAt = deletedAt;
+      }
+      throw error;
+    }
     affected.forEach(this.listener);
     return affected;
   }
@@ -119,8 +151,15 @@ export class GenerationOrchestrator {
     if (!task) throw new Error("任务不存在。");
     const normalized = category.trim().slice(0, 20);
     const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
+    // 同 submit/delete：写盘失败要还原，否则"分类保存失败"的提示与界面/磁盘三方不一致。
+    const before = siblings.map((sibling) => ({ sibling, category: sibling.category }));
     for (const sibling of siblings) sibling.category = normalized || undefined;
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      for (const entry of before) entry.sibling.category = entry.category;
+      throw error;
+    }
     siblings.forEach(this.listener);
     return siblings;
   }

@@ -77,6 +77,28 @@ describe("pickVolumeForOutput", () => {
   it("returns undefined for an empty volume list", () => {
     expect(pickVolumeForOutput([], "F:\\x")).toBeUndefined();
   });
+
+  // `fsSize()` 在 WMI 字段缺失时会给出 `size: NaN` / `used: NaN`，而 `NaN > NaN`
+  // 恒为 false —— `reduce` 会**原样保留第一个 NaN 卷**，界面报出「磁盘剩余 NaN GB」。
+  // 实测（probe-volume）：`[{C: NaN}, {F: 100/50}]` 选中的是 C。
+  it("跳过剩余空间算不出来的卷（NaN 不被当成最大值）", () => {
+    const withNaN = [
+      { mount: "C:", size: Number.NaN, used: 10 },
+      { mount: "F:", size: 100, used: 50 }
+    ];
+    expect(pickVolumeForOutput(withNaN)?.mount).toBe("F:");
+
+    const nanUsed = [
+      { mount: "C:", size: 100, used: Number.NaN },
+      { mount: "F:", size: 200, used: 150 }
+    ];
+    expect(pickVolumeForOutput(nanUsed)?.mount).toBe("F:");
+  });
+
+  it("全部卷都算不出剩余空间时仍返回一个卷（不返回 undefined）", () => {
+    const allNaN = [{ mount: "C:", size: Number.NaN, used: Number.NaN }];
+    expect(pickVolumeForOutput(allNaN)?.mount).toBe("C:");
+  });
 });
 
 // 磁盘读数未知（fsSize 返回空/异常时 systemInspector 会置 0）不能当成"空间不足"。

@@ -45,7 +45,13 @@ export function pickVolumeForOutput(volumes: VolumeInfo[], outputDirectory?: str
     return next === "/" || next === "\\";
   };
   const matched = dir ? volumes.find((item) => matchesMount(dir, String(item.mount).toLowerCase())) : undefined;
-  const freeOf = (item: VolumeInfo) => Number(item.size) - Number(item.used);
+  // **剩余空间必须是有限数**。`fsSize()` 偶尔会给出 `size: NaN` 或 `used: NaN`
+  // （WMI 字段缺失时），而 `NaN > NaN` 恒为 false——`reduce` 会**原样保留第一个 NaN 卷**，
+  // 于是界面报出「磁盘剩余 NaN GB」。数值不可用的卷退到队尾，优先选能算出剩余空间的。
+  const freeOf = (item: VolumeInfo) => {
+    const free = Number(item.size) - Number(item.used);
+    return Number.isFinite(free) ? free : Number.NEGATIVE_INFINITY;
+  };
   return matched ?? volumes.reduce((best, item) => (freeOf(item) > freeOf(best) ? item : best), volumes[0]);
 }
 

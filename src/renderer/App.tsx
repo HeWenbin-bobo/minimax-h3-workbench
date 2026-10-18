@@ -1135,6 +1135,17 @@ interface PlaygroundDraft {
   attachments: Array<{ name: string; dataUrl?: string; text?: string }>;
   videoRequest?: GenerationRequest;
   planNext: boolean;
+  /**
+   * 工具条上的四个开关。**同样必须随切页保留**：
+   * 它们是"本轮怎么干"的意图，不是一次性动作——
+   * 用户特意关掉「联网」（不想让模型烧搜索额度）后去连接页看一眼再回来，
+   * 开关又静默变回打开，下一次提问就带着联网发出去了。
+   * 与草稿同一套语义：只存内存，关掉应用即丢。
+   */
+  webSearch?: boolean;
+  browserSearch?: boolean;
+  agentMode?: boolean;
+  showVideoForm?: boolean;
 }
 let playgroundDraft: PlaygroundDraft | undefined;
 
@@ -1158,10 +1169,6 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [videoRequest, setVideoRequest] = useState<GenerationRequest>(
     () => playgroundDraft?.videoRequest ?? { ...initialRequest, prompt: "", backend: settings.defaultBackend }
   );
-  // 任何一处草稿变化都写回缓存；卸载时不必额外处理（引用一直是最新的）。
-  useEffect(() => {
-    playgroundDraft = { input, attachments, videoRequest, planNext };
-  }, [input, attachments, videoRequest, planNext]);
   // HTML 产物侧栏预览（WorkBuddy 形态）：文件卡片「预览」触发，产物落盘 userData/artifacts/。
   // 面板压缩聊天区（flex 布局挤压而非悬浮），宽度可拖拽调整并记住。
   const [preview, setPreview] = useState<ArtifactInfo>();
@@ -1199,14 +1206,20 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 拖拽过程中只更新内存宽度；**落盘留到松手**。拖拽时 mousemove 每秒可达上百次，
   // 每次都同步写 localStorage 会造成明显卡顿（本修复初版就是这么写的，属自引入的性能回归）。
   const resizePreview = (width: number) => setPreviewWidth(width);
-  const [webSearch, setWebSearch] = useState(true);
+  const [webSearch, setWebSearch] = useState(() => playgroundDraft?.webSearch ?? true);
   // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
-  const [browserSearch, setBrowserSearch] = useState(true);
+  const [browserSearch, setBrowserSearch] = useState(() => playgroundDraft?.browserSearch ?? true);
   // 智能体默认开启（用户指令）；模型不支持工具时主进程自动回落普通对话，前端无感。
-  const [agentMode, setAgentMode] = useState(true);
+  const [agentMode, setAgentMode] = useState(() => playgroundDraft?.agentMode ?? true);
   // generating 从"全局"改为"按会话"：多会话可并发生成，每个会话各有自己的发送守卫与流缓冲。
   const [generatingIds, setGeneratingIds] = useState<string[]>([]);
-  const [showVideoForm, setShowVideoForm] = useState(false);
+  const [showVideoForm, setShowVideoForm] = useState(() => playgroundDraft?.showVideoForm ?? false);
+  // 任何一处草稿变化都写回缓存；卸载时不必额外处理（引用一直是最新的）。
+  // 必须放在上面所有 `useState(() => playgroundDraft?.x)` 之后——否则初始化表达式
+  // 引用的变量还没声明（TS 会在编译期直接报 "used before its declaration"）。
+  useEffect(() => {
+    playgroundDraft = { input, attachments, videoRequest, planNext, webSearch, browserSearch, agentMode, showVideoForm };
+  }, [input, attachments, videoRequest, planNext, webSearch, browserSearch, agentMode, showVideoForm]);
   // 与工作台共用同一份合法时长定义：RB 的 reference/tail_frame 只收 4/6/8 秒，
   // 若这里仍放开 10/12/15，非法 seconds+preset 组合会真的发到云端——失败也照样扣卡密次数。
   const videoDurationOptions = durationOptionsFor(videoRequest.backend, videoRequest.preset);

@@ -1336,7 +1336,13 @@ function sessionDirName(sessionId: string): string {
  * 存 userData/artifacts/<sessionId>/，kind 白名单 html/csv/tsv/md/xlsx；xlsx 走 SheetJS 转 Excel 二进制。 */
 async function saveArtifactFile(sessionId: string, name: string, content: string, kind: string): Promise<{ name: string; path: string; size: number }> {
   const extByKind: Record<string, string> = { html: ".html", csv: ".csv", tsv: ".tsv", md: ".md", xlsx: ".xlsx" };
-  const ext = extByKind[kind] || ".html";
+  // **未知 kind 必须明确拒绝，不能静默落成 .html**。
+  // 两个入口（`artifact:save` IPC 与 `create_file` 工具）都可能给出白名单外的值：
+  // 旧写法 `extByKind[kind] || ".html"` 会把 "pdf" / "txt" / 空串都存成网页文件，
+  // 而卡片按 kind 推断渲染方式——于是文件后缀与内容/渲染三者对不上，
+  // 用户看到一张"HTML 文件"卡片点开却是一段纯文本。
+  const ext = extByKind[kind];
+  if (!ext) throw new Error(`不支持的产物类型：${kind || "（空）"}。支持 html / csv / tsv / md / xlsx。`);
   // 扩展名**必须与 kind 一致**：先剥掉名字里任何已知产物扩展名，再按 kind 补上正确的那个。
   //
   // 为什么不能"以任一扩展名结尾就保留"（实测踩到，probe-artifact-ext 复现）：

@@ -278,6 +278,13 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
   // - 已有任务：点某个项目 tab 进入，只显示该项目自己的结果（格子数 = 该项目任务数）。
   const [activeProjectId, setActiveProjectId] = useState<string>();
   const activeProject = activeProjectId ? projects.find((group) => (group[0].parentId || group[0].id) === activeProjectId) : undefined;
+  // 选中值可能失效：项目被容量淘汰（MAX_TASKS）、被回收站彻底删除、
+  // 或分类筛选把它隐藏后，`activeProjectId` 仍指向一个不存在的项目。
+  // 此时结果区按"新建任务"渲染（`activeProject` 为空 → 占位格），
+  // 但两个 tab 的选中态都靠 `activeProjectId` 判断 —— 于是**没有任何标签是高亮的**，
+  // 用户不知道自己在哪个视图（与分类筛选失效那次同一类）。
+  // 用派生值兜住（不做 setState 同步，避免渲染循环）：失效时视同"新建任务"。
+  const activeProjectKey = activeProject ? activeProjectId : undefined;
   const isRb = request.backend === "rb";
   // 云后端（MiniMax / 瞬映）的请求体里都没有 seed 字段，由服务商自己决定随机性。
   const isCloud = request.backend === "minimax" || isRb;
@@ -399,14 +406,14 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
         : <button className="text-button" title="给当前项目设置分类" disabled={!activeProject} onClick={() => { if (activeProject) setCatEdit({ project: true, value: activeProject[0].category || "" }); }}>＋ 分类</button>}
     </div>}
     <div className="project-tabs">
-      <button className={`project-tab new-task${activeProjectId ? "" : " active"}`} onClick={() => setActiveProjectId(undefined)}>
+      <button className={`project-tab new-task${activeProjectKey ? "" : " active"}`} onClick={() => setActiveProjectId(undefined)}>
         <strong>＋ 新建任务</strong><small>按下方参数生成 {clampedCount} 路</small>
       </button>
       {filteredProjects.map((group) => {
         const key = group[0].parentId || group[0].id;
         const running = group.some((t) => !["succeeded", "failed", "cancelled", "interrupted"].includes(t.status));
         const done = group.filter((t) => t.status === "succeeded").length;
-        const active = activeProjectId === key;
+        const active = activeProjectKey === key;
         return <button key={key} className={`project-tab${active ? " active" : ""}`} onClick={() => setActiveProjectId(key)}>
           <strong>{group[0].prompt.slice(0, 18) || "未命名项目"}</strong>
           <small>{running ? "生成中…" : `${done}/${group.length} 完成`}{group[0].category ? ` · ${group[0].category}` : ""}</small>

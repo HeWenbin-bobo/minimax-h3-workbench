@@ -118,26 +118,38 @@ export class SshTunnel {
     if (!this.client) throw new Error("SSH 尚未连接。 ");
     return new Promise((resolve, reject) => {
       let settled = false;
+      // 超时后必须**主动销毁远端流**。只 reject 不销毁的话，命令仍在远端跑，
+      // 而 stream 上的 data 监听器会继续往两个局部字符串里追加——
+      // 对 `tail -f` / `journalctl -f` 这类命令是无上限的内存增长，直到进程退出。
+      // （本机的 exec 只用于 `nvidia-smi` / `free` / `df`，但命令内容由调用方决定。）
+      let stream: (NodeJS.ReadableStream & { destroy?: (error?: Error) => void; stderr?: NodeJS.ReadableStream }) | undefined;
+      const teardown = () => {
+        try { (stream as { destroy?: (e?: Error) => void } | undefined)?.destroy?.(); } catch { /* 已断开 */ }
+        stream = undefined;
+      };
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
+        teardown();
         reject(new Error(`SSH 远端命令超过 ${Math.round(timeoutMs / 1000)} 秒未返回。`));
       }, timeoutMs);
       const finish = (error?: Error, result?: { stdout: string; stderr: string }) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        teardown();
         if (error) reject(error);
         else resolve(result!);
       };
-      this.client!.exec(command, (error, stream) => {
+      this.client!.exec(command, (error, opened) => {
         if (error) return finish(error);
+        stream = opened;
         let stdout = "";
         let stderr = "";
-        stream.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-        stream.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-        stream.on("close", () => finish(undefined, { stdout, stderr }));
-        stream.on("error", (streamError: Error) => finish(streamError));
+        opened.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+        opened.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+        opened.on("close", () => finish(undefined, { stdout, stderr }));
+        opened.on("error", (streamError: Error) => finish(streamError));
       });
     });
   }

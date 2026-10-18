@@ -11,6 +11,8 @@ class FakeClient extends EventEmitter {
   ended = false;
   /** 置为 Error 时 `connect()` 立刻 emit 该错误（模拟握手失败）。 */
   static failWith?: Error;
+  /** 最近一次 exec 打开的远端流，供超时用例断言"真的被销毁了"。 */
+  static lastExecStream?: EventEmitter & { destroyed: boolean; destroy: () => void };
   constructor() {
     super();
     FakeClient.instances.push(this);
@@ -29,7 +31,13 @@ class FakeClient extends EventEmitter {
     this.ended = true;
   }
   exec(_command: string, callback: (error: Error | undefined, stream: unknown) => void) {
-    callback(undefined, Object.assign(new EventEmitter(), { stderr: new EventEmitter() }));
+    const stream = Object.assign(new EventEmitter(), {
+      stderr: new EventEmitter(),
+      destroyed: false,
+      destroy() { this.destroyed = true; }
+    });
+    FakeClient.lastExecStream = stream;
+    callback(undefined, stream);
   }
   forwardOut(
     _srcHost: string,
@@ -124,6 +132,16 @@ describe("SshTunnel 断线处理", () => {
     await expect(tunnel.exec("echo hi")).rejects.toThrow(/SSH 尚未连接/);
   });
 
+  // 超时只 reject 不销毁远端流的话，命令仍在远端跑，data 监听器继续往两个局部字符串里追加——
+  // 对 `tail -f` 这类命令就是无上限的内存增长，直到进程退出。
+  it("exec 超时后销毁远端流（不再继续吞数据）", async () => {
+    const tunnel = new SshTunnel(config, "pw");
+    await tunnel.start();
+    FakeClient.lastExecStream = undefined;
+    await expect(tunnel.exec("tail -f /var/log/syslog", 30)).rejects.toThrow(/未返回/);
+    expect(FakeClient.lastExecStream?.destroyed).toBe(true);
+    tunnel.close();
+  });
   it("未配置主机时给出中文提示", async () => {
     const tunnel = new SshTunnel({ ...config, host: "" }, "pw");
     await expect(tunnel.start()).rejects.toThrow(/请填写 SSH 主机和用户名/);

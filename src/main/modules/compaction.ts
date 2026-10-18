@@ -158,8 +158,15 @@ export async function summarizeHistory(
       choices?: Array<{ message?: { content?: string } }>;
       content?: string;
     };
-    const text = payload.choices?.[0]?.message?.content ?? payload.content ?? "";
-    return typeof text === "string" ? text.trim() : "";
+    // **不能用 `??` 链**：`??` 只跳过 null/undefined，空串是"有值"。
+    // 上游常见形态是 `choices[0].message.content === ""`、真正内容在顶层 `content` 里。
+    // 若选中空串，`summary` 会被当成"摘要不可用"，于是：
+    // ① 压缩后写入「（无可用摘要…此前对话细节已丢失）」占位；
+    // ② `maybeCompact` 把 reason 标成「压缩失败（摘要不可用）」，界面提示失败——
+    // 而实际上游明明返回了可用的摘要，用户白丢一段历史。
+    const candidates = [payload.choices?.[0]?.message?.content, payload.content];
+    const text = candidates.find((value): value is string => typeof value === "string" && value.trim().length > 0) ?? "";
+    return text.trim();
   } catch {
     return "";
   }

@@ -38,14 +38,29 @@ export class Cdp {
     this.ws = ws;
     this.seq = 0;
     this.pending = new Map();
+    // 事件订阅（`Network.responseReceived` 这类）。此前只处理带 id 的响应，
+    // 事件被静默丢弃——想断言"响应头里到底有什么"只能靠页面内 fetch，
+    // 而页面自身的 CSP 会把跨 scheme 请求挡掉，得到的是假结果。
+    this.listeners = new Set();
     ws.addEventListener("message", (event) => {
       const msg = JSON.parse(event.data);
       if (msg.id && this.pending.has(msg.id)) {
         const { resolve, reject } = this.pending.get(msg.id);
         this.pending.delete(msg.id);
         msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result);
+        return;
+      }
+      if (msg.method) {
+        for (const listener of this.listeners) {
+          try { listener(msg.method, msg.params); } catch { /* 订阅方异常不影响其它订阅 */ }
+        }
       }
     });
+  }
+  /** 订阅 CDP 事件。返回取消订阅函数。 */
+  on(handler) {
+    this.listeners.add(handler);
+    return () => this.listeners.delete(handler);
   }
   send(method, params = {}) {
     const id = ++this.seq;

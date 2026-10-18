@@ -49,29 +49,57 @@ await withApp({}, async (cdp) => {
   check("(1) 网络出口被封", got.netBlocked === true, `netBlocked=${got.netBlocked}`);
 
   // ① 读响应头：证明 CSP 是「响应头」而非靠 <meta>（两者行为一样，头才算换对通道）
-  const headers = JSON.parse(await cdp.eval(`(async () => {
-    const f = document.querySelector('.pg-preview-frame');
-    try {
-      const r = await fetch(f.src);
-      return JSON.stringify({
-        status: r.status,
-        csp: r.headers.get("content-security-policy"),
-        nosniff: r.headers.get("x-content-type-options")
-      });
-    } catch (e) { return JSON.stringify({ err: String(e).slice(0, 100) }); }
-  })()`));
-  console.log(`      响应头：${JSON.stringify(headers)}`);
-  check("(1) 响应头带 Content-Security-Policy", Boolean(headers.csp && headers.csp.includes("connect-src 'none'")));
-  check("(1) 响应头带 X-Content-Type-Options: nosniff", headers.nosniff === "nosniff", String(headers.nosniff));
+  //
+  // **不能用页面里的 `fetch(f.src)`**：宿主页自己的 CSP 是
+  // `connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*`，不含 `h3preview:`，
+  // 这个 fetch 在发出前就被浏览器挡掉（TypeError: Failed to fetch）。
+  // 旧探针据此断言"拿不到头"（当成产品 bug），越界那条又把"被 CSP 拦"当成"被拒"（假 PASS）。
+  // 正确做法：用 CDP 的 `Network.responseReceived` 事件读浏览器真实收到的响应。
+  await cdp.send("Network.enable").catch(() => undefined);
 
-  // ② 越界路径被拒：直接请求产物目录外的路径
-  const outside = JSON.parse(await cdp.eval(`(async () => {
-    const evil = "h3preview://artifact/?path=" + encodeURIComponent("C:\\\\Windows\\\\win.ini");
-    try { const r = await fetch(evil); return JSON.stringify({ status: r.status }); }
-    catch (e) { return JSON.stringify({ err: String(e).slice(0, 60) }); }
-  })()`));
-  console.log(`      越界请求：${JSON.stringify(outside)}`);
-  check("(2) 产物目录外路径被拒（非 200）", outside.status !== 200, JSON.stringify(outside));
+  /** 在 action 执行期间收集符合条件的响应（最多等 timeoutMs）。 */
+  async function captureResponses(predicate, action, timeoutMs = 6000) {
+    const found = [];
+    const off = cdp.on((method, params) => {
+      if (method === "Network.responseReceived" && predicate(params.response)) found.push(params.response);
+    });
+    try {
+      await action();
+      const started = Date.now();
+      while (found.length === 0 && Date.now() - started < timeoutMs) await sleep(200);
+    } finally {
+      off();
+    }
+    return found;
+  }
+
+  const headerOf = (headers, name) => {
+    const key = Object.keys(headers ?? {}).find((k) => k.toLowerCase() === name);
+    return key ? headers[key] : undefined;
+  };
+
+  // 点「↻ 重新加载」：nonce 变化会重挂 iframe，从而真实再发一次 h3preview 请求。
+  const previewResponses = await captureResponses(
+    (r) => String(r?.url ?? "").startsWith("h3preview://"),
+    async () => { await cdp.eval(`document.querySelector('.pg-preview-actions button[title="重新加载"]')?.click()`); }
+  );
+  const first = previewResponses[0];
+  const csp = headerOf(first?.headers, "content-security-policy");
+  const nosniff = headerOf(first?.headers, "x-content-type-options");
+  console.log(`      预览响应：status=${first?.status} csp=${csp ? "有" : "无"} nosniff=${nosniff}`);
+  check("(1) 预览响应带 Content-Security-Policy（含 connect-src 'none'）", Boolean(csp && csp.includes("connect-src 'none'")), String(csp).slice(0, 160));
+  check("(1) 预览响应带 X-Content-Type-Options: nosniff", nosniff === "nosniff", String(nosniff));
+
+  // ② 越界路径被拒：让主框架**直接导航**到 h3preview 的越界 URL（页面内 fetch 会被宿主 CSP 先拦掉），
+  // 由 Network 事件读真实状态码。这一步放在最后——导航会离开应用页面。
+  const evilUrl = "h3preview://artifact/?path=" + encodeURIComponent("C:\\Windows\\win.ini");
+  const outsideResponses = await captureResponses(
+    (r) => String(r?.url ?? "").startsWith("h3preview://") && String(r.url).includes("win.ini"),
+    async () => { await cdp.send("Page.navigate", { url: evilUrl }).catch(() => undefined); }
+  );
+  const outsideStatus = outsideResponses[0]?.status;
+  console.log(`      越界请求：status=${outsideStatus}（收到 ${outsideResponses.length} 个响应）`);
+  check("(2) 产物目录外路径被拒（403，不是 200）", outsideStatus === 403, String(outsideStatus));
 
   console.log("-".repeat(60));
   console.log(failed === 0 ? "=== 全部通过 ===" : `=== ${failed} 项失败 ===`);

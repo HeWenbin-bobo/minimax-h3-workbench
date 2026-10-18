@@ -37,7 +37,7 @@ import { QuestionBridge } from "./modules/questionBridge";
 import { artifactSessionDirName } from "./modules/artifactDir";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
-import { assertPublicHttpUrl } from "./backends/resultUrl";
+import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
 import { normalizeHistory } from "./modules/historyNormalize";
 import { freezeTurn } from "./modules/stepSnapshot";
 import { CONTENT_FILTER_GUIDANCE, contentFilterNotice, isContentFilterError, retryDelayMs, retryNotice } from "./modules/errorRecovery";
@@ -971,7 +971,11 @@ function registerIpc(
         // 一个 120081 字符的页面里正文只有 35 字符，其余全是内联 script/style；
         // 截到 8 万字符后关键事实已被脚本挤掉，模型拿到的是一堆代码噪声。
         openPage: async (url: string) => {
-          const parsed = assertPublicHttpUrl(url);
+          // **必须做 DNS 解析校验**，不能只比字面 hostname：
+          // `127.0.0.1.nip.io` / `localtest.me` 这类公网通配 DNS 会把内网 IP 编进域名，
+          // 字面看起来完全正常，解析后却落到 127.0.0.1。实测（probe-ssrf-nipio）
+          // 旧的 `assertPublicHttpUrl` 放行了它，并真的读回了本机服务的内容。
+          const parsed = await assertPublicHttpUrlResolved(url);
           // **必须传本轮取消信号**：`renderPageText(url, timeoutMs, signal)` 不传 signal 时
           // 用户点「停止」后隐藏窗口仍会跑满 45 秒（搜索链路早已接上信号，这里漏了）。
           // 期间该会话的取消器一直被占着，界面停在"正在打开网页"。

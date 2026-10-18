@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertPublicHttpUrl, assertSafeResultUrl } from "./resultUrl";
+import { assertPublicHttpUrl, assertPublicHttpUrlResolved, assertSafeResultUrl } from "./resultUrl";
 
 describe("assertSafeResultUrl", () => {
   it("放行公网 HTTPS 结果地址", () => {
@@ -137,5 +137,45 @@ describe("assertPublicHttpUrl", () => {
 
   it("无效 URL 报中文错误", () => {
     expect(() => assertPublicHttpUrl("not a url")).toThrow(/无效/);
+  });
+});
+
+// **字面 hostname 合法 ≠ 目标公网**。有一类免费通配 DNS 服务专门把 IP 编进域名：
+// `127.0.0.1.nip.io`、`10.0.0.1.sslip.io`、`localtest.me` 都解析到对应内网地址。
+// 实测（probe-ssrf-nipio）：旧的字面校验放行了 `http://127.0.0.1.nip.io:<port>/object_info`，
+// 并且真的读回了本机服务的内容。`open_page` 因此改用带 DNS 校验的版本。
+describe("assertPublicHttpUrlResolved（DNS 解析后校验）", () => {
+  const resolvedTo = (address: string) => async () => [{ address }];
+
+  it("解析到回环/私网时拒绝（通配 DNS 编 IP 的写法）", async () => {
+    for (const address of ["127.0.0.1", "10.0.0.1", "192.168.1.5", "169.254.169.254", "::1"]) {
+      await expect(
+        assertPublicHttpUrlResolved("https://looks-public.example.com/x", resolvedTo(address)),
+        address
+      ).rejects.toThrow(/内网/);
+    }
+  });
+
+  it("多 A 记录里混一条内网地址同样拒绝", async () => {
+    await expect(assertPublicHttpUrlResolved("https://multi.example.com/x", async () => [
+      { address: "93.184.216.34" },
+      { address: "127.0.0.1" }
+    ])).rejects.toThrow(/内网/);
+  });
+
+  it("解析到公网时放行", async () => {
+    await expect(assertPublicHttpUrlResolved("https://example.com/x", resolvedTo("93.184.216.34")))
+      .resolves.toBeInstanceOf(URL);
+  });
+
+  it("解析失败给中文提示（不当成公网放行）", async () => {
+    await expect(assertPublicHttpUrlResolved("https://nowhere.invalid/x", async () => {
+      throw Object.assign(new Error("queryA ENOTFOUND"), { code: "ENOTFOUND" });
+    })).rejects.toThrow(/无法解析/);
+  });
+
+  it("解析结果为空数组同样拒绝", async () => {
+    await expect(assertPublicHttpUrlResolved("https://empty.example.com/x", async () => []))
+      .rejects.toThrow(/无法解析/);
   });
 });

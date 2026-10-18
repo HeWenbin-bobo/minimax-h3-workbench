@@ -1,6 +1,8 @@
 // 云后端结果下载的 SSRF 防护：远端返回的下载地址属不可信输入，落回下载前必须过这里。
 // 仅允许公网 HTTPS，拒绝回环/私网/链路本地/组播/云元数据地址；调用方还需用
 // redirect:"manual" 禁止自动跟随重定向（否则可用 302 绕过本校验指向内网）。
+import { lookup } from "node:dns/promises";
+
 export function assertSafeResultUrl(rawUrl: string): URL {
   let url: URL;
   try {
@@ -30,6 +32,42 @@ export function assertPublicHttpUrl(rawUrl: string): URL {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("只允许打开 http/https 网页。");
   assertPublicHost(url);
+  return url;
+}
+
+/**
+ * 同 `assertPublicHttpUrl`，但**额外做一次 DNS 解析**再确认落点是公网。
+ *
+ * 为什么必须有这一层：字面 hostname 合法不等于目标公网。有一类免费的**通配 DNS**
+ * 服务专门把 IP 编进域名——`127.0.0.1.nip.io`、`10.0.0.1.sslip.io`、`localtest.me`
+ * 都解析到对应的内网地址。实测（probe-ssrf-nipio）`http://127.0.0.1.nip.io:<port>/object_info`
+ * 通过了旧的纯字面校验，并**真的读回了本机服务的内容**。
+ *
+ * 只用于**能 await 的入口**（`open_page` 打开前）。导航事件回调是同步的、做不了 DNS 查询，
+ * 那里仍用同步版挡字面内网地址。
+ *
+ * 已知上限（写在这里，别以为已经万无一失）：这是"解析一次、随后再连接"，
+ * 对 **DNS 重绑定**（同一域名两次解析结果不同）无效。要彻底堵住得在连接层按实际 IP 校验，
+ * 代价与复杂度都高得多；本应用的使用场景（模型给出的 URL）下，解析校验已挡住绝大多数写法。
+ */
+export async function assertPublicHttpUrlResolved(
+  rawUrl: string,
+  /** 注入 DNS 解析（默认 node 的 lookup）。单测用它锁定"通配 DNS 指向内网"这条路径，不必联网。 */
+  resolver: (host: string) => Promise<Array<{ address: string }>> = (host) => lookup(host, { all: true })
+): Promise<URL> {
+  const url = assertPublicHttpUrl(rawUrl);
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  let addresses: Array<{ address: string }>;
+  try {
+    addresses = await resolver(host);
+  } catch {
+    throw new Error("无法解析该网页的域名，请检查地址是否正确。");
+  }
+  if (addresses.length === 0) throw new Error("无法解析该网页的域名，请检查地址是否正确。");
+  // 任一解析结果落在内网就拒绝：多 A 记录里混一条内网地址同样能被用来绕过。
+  if (addresses.some((entry) => isPrivateAddress(entry.address))) {
+    throw new Error("该地址指向内网，已拒绝访问。");
+  }
   return url;
 }
 

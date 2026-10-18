@@ -52,8 +52,20 @@ export function formatAnswers(
       continue;
     }
     const labels = picked.map((id) => {
-      const option = question.options.find((entry) => entry.id === id);
-      return option ? `${option.label}（${option.description}）` : id;
+      // `question.options` 也必须兜底：题目对象来自主进程的 `request_user_input` 入参，
+      // 而它最终由**模型**生成（AI SDK 只校验 schema 里有的字段，历史/老版本数据可能缺）。
+      // 缺 `options` 时 `.find` 直接抛 TypeError——**这里跑在工具循环的 resolve 路径上**，
+      // 抛错会让整轮对话挂掉（与上面 `picked.map` 那条同一类后果，实测 probe-more 复现）。
+      const option = Array.isArray(question.options)
+        ? question.options.find((entry) => entry?.id === id)
+        : undefined;
+      if (!option) return id;
+      // label / description 也可能缺失：`${undefined}（${undefined}）` 会把
+      // "undefined（undefined）" 原样发给模型，看起来像用户选了这么个选项。
+      const label = typeof option.label === "string" && option.label ? option.label : id;
+      return typeof option.description === "string" && option.description
+        ? `${label}（${option.description}）`
+        : label;
     });
     lines.push(`【${question.header}】用户选择：${labels.join("、")}`);
   }

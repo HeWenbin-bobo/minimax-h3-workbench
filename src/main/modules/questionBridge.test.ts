@@ -142,4 +142,19 @@ describe("formatAnswers 入参容错", () => {
     expect(formatAnswers(questions, undefined as never)).toContain("用户未作答");
     expect(formatAnswers(questions, null as never)).toContain("用户未作答");
   });
+
+  // 题目对象由**模型**生成，schema 不保证 `options` 一定在（历史数据/老版本也会缺）。
+  // 这个函数跑在工具循环的 resolve 路径上，抛错会让整轮对话挂掉——
+  // 实测（probe-more）：缺 `options` 时 `.find` 直接抛 TypeError。
+  it("题目缺 options / label / description 时不抛错", () => {
+    const noOptions = [{ id: "q1", header: "时长", question: "多久？" }];
+    expect(() => formatAnswers(noOptions as never, { q1: ["a"] })).not.toThrow();
+    // 选项找不到就退回原始 id，不要编一个不存在的中文名。
+    expect(formatAnswers(noOptions as never, { q1: ["a"] })).toContain("用户选择：a");
+
+    const noLabels = [{ id: "q1", header: "时长", question: "多久？", options: [{ id: "a" }] }];
+    const text = formatAnswers(noLabels as never, { q1: ["a"] });
+    expect(text).not.toContain("undefined");
+    expect(text).toContain("用户选择：a");
+  });
 });

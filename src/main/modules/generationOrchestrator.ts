@@ -132,12 +132,22 @@ export class GenerationOrchestrator {
     const ids = new Set(taskIds);
     const affected: GenerationTask[] = [];
     const groupIds = new Set(this.tasks.filter((t) => ids.has(t.id) && t.deletedAt).map((t) => t.parentId));
+    // 同 delete/restore：写盘失败要还原内存列表（`this.tasks` 是整体替换的，回滚即赋回原引用）。
+    // 注意**文件已经删掉了**，回滚记录只会留下"指向不存在文件的条目"——
+    // 这里选择回滚记录而不是假装成功：任务记录留在回收站、用户能看见并可再点一次，
+    // 比"记录消失但文件还在/或反过来"更容易解释（下次清理会重新尝试）。
+    const before = this.tasks;
     for (const task of this.tasks.filter((t) => groupIds.has(t.parentId) && t.deletedAt)) {
       if (task.outputPath && deleteFile) await deleteFile(task.outputPath).catch(() => undefined);
       this.tasks = this.tasks.filter((t) => t.id !== task.id);
       affected.push(task);
     }
-    await this.store.save(this.tasks);
+    try {
+      await this.store.save(this.tasks);
+    } catch (error) {
+      this.tasks = before;
+      throw error;
+    }
     return affected;
   }
 

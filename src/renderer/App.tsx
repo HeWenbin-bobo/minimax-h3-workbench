@@ -1106,6 +1106,22 @@ const PgMarkdown = memo(function PgMarkdown({ content }: { content: string }) {
   return <>{renderMarkdown(content)}</>;
 });
 
+/**
+ * 游乐场输入区草稿的模块级缓存。
+ *
+ * 与工作台 `studioDraft` 同一理由：`App` 用 `{page === "playground" && <PlaygroundPage …/>}`
+ * 切页，切走时组件**整个卸载**，`useState` 里的输入框、附件、视频表单随之蒸发。
+ * 用户写了一段很长的提问、切去「模型设置」看一眼再回来，内容就没了（实测复现）。
+ * 只存内存，关掉应用即丢——草稿与"会话记录"是两回事，不进 localStorage。
+ */
+interface PlaygroundDraft {
+  input: string;
+  attachments: Array<{ name: string; dataUrl?: string; text?: string }>;
+  videoRequest?: GenerationRequest;
+  planNext: boolean;
+}
+let playgroundDraft: PlaygroundDraft | undefined;
+
 function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
   // **只解析一次 localStorage**：此前 `useState(loadSessions)` 与
   // `useState(() => loadSessions().find(...))` 各读一遍，等于把整份会话
@@ -1117,7 +1133,19 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const [sessions, setSessions] = useState<PlaygroundSession[]>(initial.sessions);
   const [activeId, setActiveId] = useState<string>(initial.activeId);
   const active = sessions.find((s) => s.id === activeId);
-  const [input, setInput] = useState("");
+  // 输入框 / 附件 / 计划开关 / 视频表单都从模块级草稿恢复（切页会卸载本组件）。
+  const [input, setInput] = useState(() => playgroundDraft?.input ?? "");
+  const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>(
+    () => playgroundDraft?.attachments ?? []
+  );
+  const [planNext, setPlanNext] = useState(() => playgroundDraft?.planNext ?? false);
+  const [videoRequest, setVideoRequest] = useState<GenerationRequest>(
+    () => playgroundDraft?.videoRequest ?? { ...initialRequest, prompt: "", backend: settings.defaultBackend }
+  );
+  // 任何一处草稿变化都写回缓存；卸载时不必额外处理（引用一直是最新的）。
+  useEffect(() => {
+    playgroundDraft = { input, attachments, videoRequest, planNext };
+  }, [input, attachments, videoRequest, planNext]);
   // HTML 产物侧栏预览（WorkBuddy 形态）：文件卡片「预览」触发，产物落盘 userData/artifacts/。
   // 面板压缩聊天区（flex 布局挤压而非悬浮），宽度可拖拽调整并记住。
   const [preview, setPreview] = useState<ArtifactInfo>();
@@ -1155,7 +1183,6 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 拖拽过程中只更新内存宽度；**落盘留到松手**。拖拽时 mousemove 每秒可达上百次，
   // 每次都同步写 localStorage 会造成明显卡顿（本修复初版就是这么写的，属自引入的性能回归）。
   const resizePreview = (width: number) => setPreviewWidth(width);
-  const [attachments, setAttachments] = useState<Array<{ name: string; dataUrl?: string; text?: string }>>([]);
   const [webSearch, setWebSearch] = useState(true);
   // 「浏览器搜索」可选联网项：只用应用自带 Chromium 渲染抓取（与「联网」互斥，后端也按互斥处理）。
   const [browserSearch, setBrowserSearch] = useState(true);
@@ -1164,10 +1191,6 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // generating 从"全局"改为"按会话"：多会话可并发生成，每个会话各有自己的发送守卫与流缓冲。
   const [generatingIds, setGeneratingIds] = useState<string[]>([]);
   const [showVideoForm, setShowVideoForm] = useState(false);
-  // **不能复用工作台的 initialRequest**：它带着一整段英文 demo 提示词（工作台用它当示例）。
-  // 游乐场表单里那条「留空则使用下方聊天输入内容」的承诺因此永远不成立——
-  // 用户不填描述、直接在输入框里写需求，点提交后发出去的其实是 demo 文案。
-  const [videoRequest, setVideoRequest] = useState<GenerationRequest>({ ...initialRequest, prompt: "", backend: settings.defaultBackend });
   // 与工作台共用同一份合法时长定义：RB 的 reference/tail_frame 只收 4/6/8 秒，
   // 若这里仍放开 10/12/15，非法 seconds+preset 组合会真的发到云端——失败也照样扣卡密次数。
   const videoDurationOptions = durationOptionsFor(videoRequest.backend, videoRequest.preset);
@@ -1189,8 +1212,6 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const storageWarnedRef = useRef(false);
   const searchReady = Boolean(settings.searchApi.baseUrl);
   const generating = generatingIds.includes(activeId);
-  // 计划模式：下一次发送只出方案。
-  const [planNext, setPlanNext] = useState(false);
   // 以 plan 语义发出的会话集合（按会话隔离，多会话并发时不串味）。
   // offDone 是订阅回调、读不到最新 state，故用 ref；由 onLlmDone 消费后自行删除。
   const planTurnRef = useRef(new Set<string>());

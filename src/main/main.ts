@@ -1036,7 +1036,12 @@ function registerIpc(
           if (noteContextOverflow(error)) { done({ ok: true }); return; }
           // 内容被安全策略拒绝：原样重试同一个 prompt 必然同样被拒，得先注入改写指引。
           // 注入在历史末尾（作为一条普通 user 消息），下一轮重试就会带上它。
-          if (isContentFilterError(error) && attempts < 3 && agentSent === 0) {
+          //
+          // **必须同样检查 `agentTaskCount === 0`**（与下面的网络重试一致）：
+          // 本轮若已经通过 generate_video 建过任务，重试会**把任务再建一遍**——
+          // 云端按次计费时等于替用户重复扣费（RB 还会重复扣卡密次数）。
+          // 已建任务时不再重试，直接走下面的失败收尾，让用户看到真实原因。
+          if (isContentFilterError(error) && attempts < 3 && agentSent === 0 && agentTaskCount === 0) {
             chunk({ seq: 0, delta: contentFilterNotice(attempts, 3) });
             effective = [...effective, { role: "user", content: CONTENT_FILTER_GUIDANCE }];
             continue;

@@ -356,6 +356,13 @@ export interface AgentToolCallbacks {
   openPage: (url: string) => Promise<string>;
   /** 文件产物工具（create_file）：把内容保存为文件并返回给模型的确认文本。 */
   createFile: (params: { kind: "html" | "csv" | "tsv" | "md" | "xlsx"; name: string; content: string }) => Promise<string>;
+  /**
+   * 产物自检工具（inspect_artifact）：把**已落盘**的 HTML 产物在应用自带 Chromium 里真跑一遍，
+   * 返回控制台报错与画布状态。这是"写 → 跑 → 看错误 → 修"闭环里缺的那一环——
+   * 没有它，模型只能对用户说"我没法运行，你自己看"（实测真机复现，见 browserFetch 的 probeHtmlArtifact）。
+   * 只接受文件名（会话内解析），不接受任意路径。
+   */
+  inspectArtifact: (params: { name: string }) => Promise<string>;
   /** 步骤清单工具（update_plan）：把进度推给渲染端，返回给模型的确认文本。 */
   updatePlan: (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => Promise<string>;
   /**
@@ -411,6 +418,7 @@ function humanizeToolInput(toolName: string, input: unknown): string {
   if (typeof input === "object") {
     const record = input as Record<string, unknown>;
     if (toolName === "web_search" && typeof record.query === "string") return sliceSafe(record.query, 120);
+    if (toolName === "inspect_artifact" && typeof record.name === "string") return sliceSafe(record.name, 120);
     if (toolName === "generate_video") {
       const prompt = typeof record.prompt === "string" ? sliceSafe(record.prompt, 80) : "";
       const duration = typeof record.duration === "number" ? `${record.duration} 秒` : "";
@@ -619,6 +627,31 @@ export async function chatAgent(
             return `保存文件失败：${describeError(error, "未知错误")}。请把内容改写成围栏代码块直接输出，并在回复里说明文件未能保存。`;
           }
         }
+      }),
+      // inspect_artifact：把刚写好的网页**真的跑一遍**，拿回控制台报错。
+      //
+      // 没有这个工具时（实测真机 probe-video-intent，鹈鹕骑自行车案例）：模型写出 53KB 的手写
+      // WebGL 页面，然后如实告诉用户"我没有在浏览器里运行过这个文件，如果报着色器错误请告诉我"。
+      // 它没说谎——应用确实没有任何让它验证产物的手段。Codex 的循环是"写 → 跑 → 看错误 → 修"，
+      // 缺了"跑"，第一版永远是没验证过的黑盒，返工全压在用户身上。
+      inspect_artifact: tool({
+        description: `在应用自带的浏览器里**真实运行**刚生成的网页产物，返回控制台报错、画布尺寸与 WebGL 上下文状态。
+
+何时使用：**每次用 create_file 生成 html 产物之后**（尤其是游戏、3D 场景、Canvas 动画、任何带 <script> 的页面）。写完后先自检一次，有报错就改，改完再生成、再自检，直到没有报错为止。
+
+何时不用：csv/tsv/md 产物（没有可运行的脚本）；或者你在本轮压根没生成过文件。
+
+注意：它给你的是**运行状态**（有没有报错、画布多大、WebGL 通没通），**不是截图**——你仍然看不到画面长什么样、构图好不好看。自检通过 ≠ 视觉效果符合预期，如实说明这个区别，不要宣称"我看过效果"。`,
+        inputSchema: z.object({
+          name: z.string().min(1).describe("要自检的产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。必须是用 create_file 在本会话里生成过的文件。")
+        }),
+        execute: async ({ name }) => {
+          try {
+            return await callbacks.inspectArtifact({ name });
+          } catch (error) {
+            return `自检失败：${describeError(error, "未知错误")}。这通常说明文件没能加载起来（路径不对或文件已删除）。可以继续用 create_file 重新生成一份完整体，再试一次自检。`;
+          }
+        }
       })
       }),
       // update_plan（对齐 Codex `plan_spec.rs` 的 update_plan）：把任务拆解**写出来**。
@@ -769,6 +802,8 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
       generateVideo: async () => "（探测）",
       openPage: async () => "（探测）",
       createFile: async () => "（探测）",
+      // 探测不需要真的跑浏览器：给个无害的返回值即可。
+      inspectArtifact: async () => "（探测）",
       // 探测不需要真的弹选择题/改清单：给个无害的返回值即可。
       updatePlan: async () => "（探测）",
       requestUserInput: async () => "（探测）"

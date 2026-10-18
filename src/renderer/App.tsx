@@ -1375,6 +1375,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       generate_video: "生成视频",
       open_page: "打开网页",
       create_file: "生成文件",
+      inspect_artifact: "自检页面",
       update_plan: "更新步骤清单",
       request_user_input: "向你提问"
     };
@@ -1394,7 +1395,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           : event.tool === "generate_video" ? "→ 正在创建视频生成任务…"
             : event.tool === "open_page" ? `→ 正在打开网页：${event.input}`
               : event.tool === "create_file" ? "→ 正在生成文件…"
-                : event.tool === "update_plan" ? "→ 正在更新步骤清单…"
+                : event.tool === "inspect_artifact" ? `→ 正在运行页面自检：${event.input}`
+                  : event.tool === "update_plan" ? "→ 正在更新步骤清单…"
                   : event.tool === "request_user_input" ? "→ 正在向你提问…"
                     : `→ ${name}中…`;
         return { ...msg, toolSteps: [...steps, label] };
@@ -2054,7 +2056,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
               保留 .pg-input-row / .primary 类名——E2E 与既有样式都按它们定位，改类名等于无谓的回归面。 */}
           <div className="pg-input-row">
             <textarea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder={generating ? "AI 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
-            <button className="primary" aria-label={generating ? "正在回复" : "发送"} title={generating ? "正在回复" : "发送（Enter）"} disabled={generating || (!input.trim() && attachments.length === 0)} onClick={send}>{generating ? "■" : "▲"}</button>
+            {/* 这个方形键在生成中就是停止键：图标已经是 ■，却还 disabled（灰掉、点了没反应），
+                用户只能去下面 chips 里找「■ 停止」。图标语义已经说明它是停止，就让它真能停。 */}
+            <button className="primary" aria-label={generating ? "停止生成" : "发送"} title={generating ? "停止生成" : "发送（Enter）"} disabled={!generating && !input.trim() && attachments.length === 0} onClick={generating ? stop : send}>{generating ? "■" : "▲"}</button>
           </div>
           <div className="pg-chips">
             <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => setWebSearch(!webSearch)}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>

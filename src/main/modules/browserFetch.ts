@@ -10,6 +10,7 @@
 import { lookup } from "node:dns/promises";
 import { BrowserWindow, session } from "electron";
 import { assertPublicHttpUrl, assertPublicHttpUrlResolved } from "../backends/resultUrl";
+import { sliceSafe } from "../../shared/text";
 
 // 专用分区：渲染搜索页不与应用主窗口共享 Cookie/存储，避免互相污染。
 const PARTITION = "persist:h3-browser-fetch";
@@ -27,8 +28,18 @@ const DEFAULT_TIMEOUT_MS = 25_000;
  * 加固原则：这个窗口只用来**读 DOM**，任何主动能力（新窗口、权限）都不需要。
  */
 function harden(win: BrowserWindow, ses: Electron.Session): void {
+  hardenWindow(win);
+  hardenSession(ses);
+}
+
+/** 窗口自身的限制（不动 session）。产物自检复用默认 session，不能改它的全局权限策略。 */
+function hardenWindow(win: BrowserWindow): void {
   // 不允许页面开新窗口。
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+}
+
+/** session 级限制：权限一律拒绝。只装在专用分区上，别作用到应用默认 session。 */
+function hardenSession(ses: Electron.Session): void {
   // 权限一律拒绝（通知、地理位置、媒体、剪贴板、USB/串口…）。
   // Electron 要求 request 与 check 两个 handler 都实现：多数 Web API 先 check 再 request，
   // 只实现其一会漏（electron.d.ts 对 setPermissionCheckHandler 有明确说明）。
@@ -225,4 +236,155 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text",
 /** 应用退出时清理专用分区缓存。 */
 export async function clearBrowserFetchCache(): Promise<void> {
   await session.fromPartition(PARTITION).clearCache().catch(() => undefined);
+}
+
+/** 产物自检结果。字段刻意保持"事实"，不含判断——判断留给模型。 */
+export interface HtmlProbeResult {
+  /** 主框架是否加载完成（false 时 consoleErrors 里会有加载失败原因）。 */
+  loaded: boolean;
+  title: string;
+  /** 控制台 error/warning（含未捕获异常、CSP 拦截、WebGL 报错）。已去重并截断。 */
+  consoleErrors: string[];
+  /** 画布实际状态：尺寸 + 是否真的拿到了 WebGL 上下文。 */
+  canvases: Array<{ width: number; height: number; webgl: boolean }>;
+  /** 渲染后的可见文本长度（0 通常意味着脚本没跑起来或页面是纯 canvas）。 */
+  textLength: number;
+  /** 元素总数。与 textLength 一起用于判断"页面是不是空的"。 */
+  elementCount: number;
+}
+
+/** 单条日志的截断长度：着色器编译错误可能一次吐几千字符，全量回灌只会把上下文烧掉。 */
+const MAX_LOG_CHARS = 400;
+const MAX_LOGS = 12;
+
+/** 加载后额外等待的时长：让 requestAnimationFrame / 首帧初始化跑完，否则 canvas 采样必然为空。 */
+const PROBE_SETTLE_MS = 1_200;
+
+/**
+ * **产物自检**：用应用自带的 Chromium 真的把刚生成的 HTML 跑一遍，把控制台报错交回给模型。
+ *
+ * 为什么需要（实测，probe-video-intent 真机跑「鹈鹕骑自行车 3D 页面」）：模型写出了 53KB 的
+ * 手写 WebGL 页面，然后如实说"我没有在浏览器里运行过这个文件，如果控制台报着色器编译错误请告诉我"。
+ * 这不是它在推卸责任——**应用里确实没有任何让它验证自己产物的手段**：`open_page` 只接受公网
+ * http(s)，且取的是 innerText，根本不会暴露脚本错误。Codex 的循环是"写 → 跑 → 看错误 → 修"，
+ * 缺了"跑"这一环，模型只能瞎猜，用户拿到的第一版就是个没验证过的黑盒。
+ *
+ * 加载的是 **`h3preview:` 协议 URL**，与右侧预览面板同源同 CSP——自检看到的限制就是用户看到的限制。
+ *
+ * 已知差异（有意接受）：预览面板的 iframe 带 `sandbox="allow-scripts"`（不透明源），
+ * 而这里是没有 sandbox 属性的顶层文档，`localStorage` 在自检里可用、在预览里会抛。
+ * 生成型页面极少用存储；真踩到时模型会在预览面板里被用户反馈。
+ */
+export function probeHtmlArtifact(url: string, timeoutMs = 20_000, signal?: AbortSignal): Promise<HtmlProbeResult> {
+  return enqueue(() => probeOnce(url, timeoutMs, signal), signal);
+}
+
+async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): Promise<HtmlProbeResult> {
+  const win = new BrowserWindow({
+    show: false,
+    width: 1280,
+    height: 800,
+    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false }
+  });
+  // 只拦"页面自己开新窗口"。**不能**装 session 级权限拦截：自检加载预览协议走的是
+  // 应用默认 session，把全局权限改成一律拒绝会波及主窗口。
+  hardenWindow(win);
+  const logs: string[] = [];
+  // 新版 Electron 把参数合进了第一个 Event 对象（位置参数已 deprecated），两种都读。
+  win.webContents.on("console-message", (event: Electron.Event<Electron.WebContentsConsoleMessageEventParams>) => {
+    const level = (event as unknown as { level?: string }).level;
+    const message = (event as unknown as { message?: string }).message;
+    if (!message || (level !== "error" && level !== "warning")) return;
+    if (logs.length >= MAX_LOGS) return;
+    const line = `${level === "warning" ? "警告" : "错误"}：${sliceSafe(message, MAX_LOG_CHARS)}`;
+    // 同一个错误常被逐帧重复打印（rAF 里报错一次就是 60 条），去重后才看得见别的问题。
+    if (!logs.includes(line)) logs.push(line);
+  });
+  try {
+    const loaded = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      const onAbort = () => finish(false);
+      const finish = (ok: boolean) => {
+        clearTimeout(timer);
+        win.webContents.removeListener("did-finish-load", onLoad);
+        win.webContents.removeListener("did-fail-load", onFail);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(ok);
+      };
+      const onLoad = () => finish(true);
+      // 只认主框架失败：子框架（iframe）失败是常态，不该把整页判成"没跑起来"。
+      const onFail = (_e: unknown, code: number, description: string, _u: string, isMainFrame: boolean) => {
+        if (isMainFrame) { logs.unshift(`页面加载失败：${description}（${code}）`); finish(false); }
+      };
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      win.webContents.once("did-finish-load", onLoad);
+      win.webContents.on("did-fail-load", onFail);
+      void win.loadURL(url).catch(() => undefined);
+    });
+    if (signal?.aborted) throw new DOMException("自检已取消", "AbortError");
+    if (!loaded) {
+      return { loaded: false, title: "", consoleErrors: logs, canvases: [], textLength: 0, elementCount: 0 };
+    }
+    // 等首帧：WebGL 页面在 load 时往往还没建好上下文，立刻采样会得到"没有画布"的假结论。
+    await new Promise((resolve) => setTimeout(resolve, PROBE_SETTLE_MS));
+    const snapshot = (await win.webContents.executeJavaScript(SNAPSHOT_SCRIPT, true)) as {
+      title: string; textLength: number; elementCount: number;
+      canvases: Array<{ width: number; height: number; webgl: boolean }>;
+    };
+    return { loaded: true, consoleErrors: logs, ...snapshot };
+  } finally {
+    if (!win.isDestroyed()) win.destroy();
+  }
+}
+
+/**
+ * 页面内采样脚本。**必须全部包在 try 里**：采样跑在页面自己的 JS 环境里，
+ * 产物有机会覆写 `document.querySelectorAll` 之类的内建方法，抛错会让整个自检变成"未知失败"。
+ */
+const SNAPSHOT_SCRIPT = `(() => {
+  const safe = (fn, fallback) => { try { return fn(); } catch { return fallback; } };
+  const canvases = safe(() => Array.from(document.querySelectorAll("canvas")).slice(0, 8).map((c) => ({
+    width: c.width,
+    height: c.height,
+    // 已经拿到 2d 上下文的画布再要 webgl 会返回 null —— 那不是错误，只是类型不同。
+    webgl: safe(() => {
+      if (c.getContext("2d")) return false;
+      return Boolean(c.getContext("webgl2") || c.getContext("webgl") || c.getContext("experimental-webgl"));
+    }, false)
+  })), []);
+  return {
+    title: safe(() => document.title || "", ""),
+    textLength: safe(() => (document.body ? (document.body.innerText || "").trim().length : 0), 0),
+    elementCount: safe(() => document.getElementsByTagName("*").length, 0),
+    canvases
+  };
+})()`;
+
+/**
+ * 把自检结果整理成给模型看的文本。
+ *
+ * 措辞刻意保持"事实陈述 + 下一步动作"，不含"已通过/优秀"这类判断——模型需要知道**具体哪里错**，
+ * 而不是一句笼统的结论。纯函数，单测可直接锁。
+ */
+export function formatProbeReport(result: HtmlProbeResult): string {
+  if (!result.loaded) {
+    const reason = result.consoleErrors[0] || "页面未能加载完成";
+    return `自检失败：页面没能加载起来（${reason}）。请检查 HTML 结构是否完整、是否有语法错误，改完重新生成后再自检一次。`;
+  }
+  const lines: string[] = [`自检结果：页面已在本机 Chromium 中真实运行（标题「${result.title || "无"}」，${result.elementCount} 个元素，可见文本 ${result.textLength} 字）。`];
+  if (result.canvases.length > 0) {
+    const described = result.canvases.map((c, i) => `#${i + 1} ${c.width}×${c.height}${c.webgl ? "（WebGL 上下文正常）" : "（未取到 WebGL/2D 上下文）"}`).join("，");
+    lines.push(`画布：${described}。`);
+  } else if (result.textLength === 0) {
+    lines.push("页面既没有画布、也没有可见文本——脚本很可能压根没跑起来。");
+  }
+  if (result.consoleErrors.length > 0) {
+    lines.push(`运行时报错（共 ${result.consoleErrors.length} 条，已去重）：`);
+    for (const entry of result.consoleErrors) lines.push(`- ${entry}`);
+    lines.push("请针对这些报错修改后重新生成，并在回复里说明修了什么。");
+  } else {
+    lines.push("控制台没有任何 error/warning。可以据此如实告诉用户页面已实际运行且未报错；但不要声称看过画面效果——你拿到的是运行状态，不是截图。");
+  }
+  return lines.join("\n");
 }

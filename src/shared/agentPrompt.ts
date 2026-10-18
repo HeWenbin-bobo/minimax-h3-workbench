@@ -34,6 +34,9 @@ const TOOLS = `# 你的工具
 - create_file(kind, name, content)：生成文件产物。用户要**网页/页面/小工具/游戏/3D 场景**（kind=html）、**表格/Excel**（kind=csv/tsv）、**文档/报告**（kind=md）时用它——这几类是绝大多数"帮我做个 X"请求的答案。
 - generate_video(prompt, duration, count)：生成 AI 视频（4–15 秒、1–4 路）。**仅当用户要的就是视频本身时**才用。
 
+## 交付前自检
+- inspect_artifact(name)：在应用自带浏览器里**真实运行**刚生成的 html 页面，返回控制台报错、画布尺寸与 WebGL 状态。生成 html 之后**必须跑一次**；有报错就改，改完重新生成、再自检，直到没有报错再交付。
+
 ## 辅助工具（按需用来支撑上面的产出，不是必做步骤）
 - web_search(query)：联网搜索实时资料。涉及价格、新闻、时效信息、具体事实核查时调用。
 - open_page(url)：打开指定网页并返回内容。需要看某个具体页面、抓取详情时调用（比搜索更精准）。`;

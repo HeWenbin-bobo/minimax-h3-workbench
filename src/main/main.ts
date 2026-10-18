@@ -29,7 +29,7 @@ import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
 import { checkForUpdates, checkFrameworkUpdate } from "./modules/updateChecker";
-import { renderHtml, renderPageText, clearBrowserFetchCache } from "./modules/browserFetch";
+import { renderHtml, renderPageText, clearBrowserFetchCache, probeHtmlArtifact, formatProbeReport } from "./modules/browserFetch";
 import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
@@ -1021,6 +1021,26 @@ function registerIpc(
             /\.html?$/i.test(saved.name) ? "html" : /\.xlsx$/i.test(saved.name) ? "sheet" : "doc";
           sendLlmArtifact({ name: saved.name, path: saved.path, size: saved.size, kind: renderKind, sessionId: session });
           return `文件已生成并保存：${saved.name}（${saved.size >= 1024 * 1024 ? `${(saved.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(saved.size / 1024))}KB`}）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。**不要**把文件内容重复贴进回复——卡片已经承载了它。请用一两句话说明文件内容概要即可。`;
+        },
+        // inspect_artifact：把刚生成的网页**真的跑一遍**。
+        //
+        // 实测动机（probe-video-intent 真机，鹈鹕骑自行车）：模型写出 53KB 手写 WebGL 页面后，
+        // 只能对用户说"我没有在浏览器里运行过这个文件，如果报着色器错误请告诉我"。它没说谎——
+        // 之前确实没有任何让它验证自己产物的手段。Codex 的循环是"写 → 跑 → 看错误 → 修"，
+        // 缺了"跑"这一环，第一版永远是没验证过的黑盒。这里补上：加载走**与预览面板同一个**
+        // h3preview: 协议，所以自检受的限制就是用户预览时受的限制。
+        //
+        // 只接受**文件名**（不接受路径）：让模型自己解析任意路径等于给它开一个读文件的口子。
+        // 会话目录由 `artifactSessionDirName` 决定，仍走 resolveWithinRoot 再做一次白名单。
+        inspectArtifact: async (params: { name: string }) => {
+          const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+          const safeName = path.basename(String(params.name || "").trim());
+          if (!/\.html?$/i.test(safeName)) throw new Error("只能自检 html 产物（csv/md 没有可运行的脚本）。");
+          const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
+          if (!resolved) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          // 与渲染端预览面板拼的是同一个 URL 形状：同一协议、同一 CSP。
+          const url = `h3preview://artifact/?path=${encodeURIComponent(resolved)}`;
+          return formatProbeReport(await probeHtmlArtifact(url, 20_000, controller.signal));
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。
         updatePlan: async (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => {

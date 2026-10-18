@@ -66,3 +66,44 @@ describe("browserFetch 导航 DNS 守卫", () => {
       .resolves.toEqual({});
   });
 });
+
+// 产物自检报告是模型唯一能看到的东西：措辞错了它会得出错误结论
+// （把"没报错"读成"画面好看"，或者把"没画布"当成正常）。
+const { formatProbeReport } = await import("./browserFetch");
+
+describe("产物自检报告（formatProbeReport）", () => {
+  it("加载失败时给出失败原因与下一步，不说页面正常", () => {
+    const text = formatProbeReport({
+      loaded: false, title: "", consoleErrors: ["页面加载失败：ERR_FILE_NOT_FOUND（-6）"],
+      canvases: [], textLength: 0, elementCount: 0
+    });
+    expect(text).toContain("自检失败");
+    expect(text).toContain("ERR_FILE_NOT_FOUND");
+    expect(text).not.toContain("没有任何 error/warning");
+  });
+
+  it("有报错时逐条列出，并要求改完重新生成", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "鹈鹕", consoleErrors: ["错误：Uncaught ReferenceError: _near is not defined"],
+      canvases: [], textLength: 0, elementCount: 12
+    });
+    expect(text).toContain("_near is not defined");
+    expect(text).toContain("修改后重新生成");
+  });
+
+  it("无报错时明确区分「运行状态」与「画面效果」——不能让它宣称看过截图", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "鹈鹕骑自行车", consoleErrors: [],
+      canvases: [{ width: 1280, height: 800, webgl: true }], textLength: 40, elementCount: 300
+    });
+    expect(text).toContain("WebGL 上下文正常");
+    expect(text).toContain("不要声称看过画面效果");
+  });
+
+  it("既无画布也无文本时提示脚本可能没跑起来", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "", consoleErrors: [], canvases: [], textLength: 0, elementCount: 3
+    });
+    expect(text).toContain("脚本很可能压根没跑起来");
+  });
+});

@@ -3,6 +3,7 @@ import { describeError } from "../../shared/errors";
 import type { GenerationRequest, GenerationTask, TaskStatus } from "../../shared/types";
 import { MAX_PROMPT_LENGTH } from "../../shared/types";
 import { AdapterRegistry } from "../backends/adapterRegistry";
+import { sliceSafe } from "../../shared/text";
 import { TaskStore } from "./taskStore";
 
 type TaskListener = (task: GenerationTask) => void;
@@ -159,7 +160,9 @@ export class GenerationOrchestrator {
   async setCategory(taskId: string, category: string): Promise<GenerationTask[]> {
     const task = this.tasks.find((entry) => entry.id === taskId);
     if (!task) throw new Error("任务不存在。");
-    const normalized = category.trim().slice(0, 20);
+    // 用 sliceSafe：分类会**落盘**并显示在筛选条上，裸 slice 切在 emoji 代理对中间
+    // 会留下 `�`，且每次启动读回都是坏的（与渲染端标题/重命名那批同一处理）。
+    const normalized = sliceSafe(category.trim(), 20);
     const siblings = this.tasks.filter((t) => t.parentId === task.parentId);
     // 同 submit/delete：写盘失败要还原，否则"分类保存失败"的提示与界面/磁盘三方不一致。
     const before = siblings.map((sibling) => ({ sibling, category: sibling.category }));

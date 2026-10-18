@@ -1,18 +1,18 @@
 ---
 name: playground-branch-status
-description: v0.2.1 已发布；2026-10-18 探索模式连续修复，332 笔未推送（HEAD 36eb56c）
+description: v0.2.1 已发布；2026-10-18 探索模式连续修复，346 笔未推送（HEAD ae04922）
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-18T11:33:00.000Z
+  modified: 2026-10-18T13:30:00.000Z
 ---
 
-**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 332 笔（未推送）。**
+**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 346 笔（未推送）。**
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
-- HEAD = `36eb56c`。
-- 验证基线：`npm test` **496 项 / 38 文件**全绿；typecheck、build 通过；
+- HEAD = `ae04922`。
+- 验证基线：`npm test` **510 项 / 39 文件**全绿；typecheck、build 通过；
   E2E test-01/02/03/04/05/06/07/08/09/10 逐个复跑通过。
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
@@ -242,6 +242,32 @@ SSH 握手失败 1 条、RB 直链回落 1 条、磁盘未知判级 1 条。
 - `probe-h-readiness-models.mjs` 只用 IPC 改 `comfyuiRoot` 却不 reload，
   渲染端 state 仍是旧值（`probe-j` 有 `location.reload()`）；且它假定本机必判 D 级，
   而 RTX 5090 + 189GB 内存判 C 级才是对的。
+
+## 第六批（332 → 346 笔）
+
+主线是**「判定所依赖的前提被写死，换个输入就失效」**——前五批修的是"明显会坏"，
+这一批修的是"看起来对、条件一变就错"：
+
+| 类型 | 具体问题 |
+|---|---|
+| **SSRF 绕过（安全）** | `assertPublicHttpUrl` 只比 `localhost` / `.local` / `.internal` 的**字面量**，而 `localhost.` 是 FQDN 根锚定写法、DNS 解析完全等价。实测（本机起真实 HTTP 服务）`http://localhost.:<port>/object_info` 通过校验并读回内网响应体。修法：`hostname` 先 `replace(/\.+$/, "")` 再判定 |
+| **监听器不认领自己** | `SshTunnel` 断线后重建，旧 client 的 `close`/`error` 监听器写成 `() => this.drop()`（作用于对象字段），旧连接的事件晚到时会把**新隧道**一起拆掉 → "刚重连上又断了"。改为闭包捕获本次 client，`this.client === client` 才收尾 |
+| **超时只 reject 不清理** | `SshTunnel.exec()` 超时后远端流仍在跑，`data` 监听器持续往局部字符串追加（`tail -f` 类是无限增长）→ 统一 `teardown()` 销毁流 |
+| **markdown 无上限** | 聊天里模型偶尔吐出上万行表格 → 主线程被 DOM 铺满。加 `MAX_TABLE_ROWS = 200` 并如实告知"共 N 行，仅显示前 200" |
+
+**结论**：`npm test` **510 项 / 39 文件**；typecheck、build 通过；
+E2E test-01…test-10 逐个复跑全过（21/21、12/12、5/5、5/5、23/23、12/12、20/20、16/16、10/10、11/11）。
+346 笔仍未推送（等用户明确指示）。
+
+**新增测试（本批）**：SSH 迟到 close / exec 超时销毁流 2 条、SSRF 尾点 2 条。
+
+**探针自身的坑（再续）**：
+- 用 `AbortSignal.any([caller, timeout])` 验证超时行为时，曾用**端口 9** 当"连不上"的目标——
+  Windows 上端口 9 属 bad port，fetch 抛的是 `fetch failed` / cause `bad port`，
+  与超时无关。要验超时必须起一个**真实的挂起 HTTP server**（`createServer` 不响应）。
+- `_scratch/` 下的 `.ts` 探针被 `npx tsx` 按 CJS 转译，**顶层 await 会直接报
+  "Top-level await is currently not supported with the cjs output format"**——
+  包进 `async function main()` 再 `void main()`。
 
 
 

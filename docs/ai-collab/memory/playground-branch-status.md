@@ -1,18 +1,18 @@
 ---
 name: playground-branch-status
-description: v0.2.1 已发布；2026-10-18 探索模式连续修复，346 笔未推送（HEAD ae04922）
+description: v0.2.1 已发布；2026-10-18 探索模式连续修复，365 笔未推送（HEAD 66585dd）
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-18T13:30:00.000Z
+  modified: 2026-10-18T15:22:00.000Z
 ---
 
-**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 346 笔（未推送）。**
+**状态（2026-10-18 探索模式进行中）：工作区干净，`feature/agent-iteration` 领先 `main` 365 笔（未推送）。**
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
-- HEAD = `ae04922`。
-- 验证基线：`npm test` **510 项 / 39 文件**全绿；typecheck、build 通过；
+- HEAD = `66585dd`。
+- 验证基线：`npm test` **528 项 / 39 文件**全绿；typecheck、build 通过；
   E2E test-01/02/03/04/05/06/07/08/09/10 逐个复跑通过。
 
 - `v0.2.1` 已发布（Release 含 latest.yml + setup exe + blockmap 三件套）。
@@ -268,6 +268,43 @@ E2E test-01…test-10 逐个复跑全过（21/21、12/12、5/5、5/5、23/23、1
 - `_scratch/` 下的 `.ts` 探针被 `npx tsx` 按 CJS 转译，**顶层 await 会直接报
   "Top-level await is currently not supported with the cjs output format"**——
   包进 `async function main()` 再 `void main()`。
+- 从 `_scratch/` 里 `import "../repo/node_modules/xlsx"` 会 **MODULE_NOT_FOUND**：
+  ESM 包得用 `createRequire("F:/…/repo/package.json")` 再 `require("xlsx")`。
+
+## 第七批（346 → 365 笔）
+
+主线是**「一次失败/一次异常输入会永久或长时间卡住整条链路」**——
+前六批修的是"结论错"，这一批修的是"卡住/泄漏/崩溃"：
+
+| 类型 | 具体问题 |
+|---|---|
+| **SSRF（通配 DNS）** | 字面 hostname 合法 ≠ 公网。`127.0.0.1.nip.io` / `localtest.me` 把 IP 编进域名，实测能真的读回本机服务。新增 `assertPublicHttpUrlResolved()`（`dns.lookup(all)` 后任一结果落内网即拒），`open_page` 与浏览器渲染都用它；导航守卫走 `webRequest.onBeforeRequest`（该回调可异步）。已知上限：不防 DNS 重绑定（已写进注释） |
+| **连接泄漏** | `consumeSse` 收到 `[DONE]` 只 `releaseLock()`（不断连接）。实测连跑 3 轮留下 3 条 socket。改为 `reader.cancel()` |
+| **永久挂住** | `LlmService.chat()` 只传用户取消信号（永不到期），`consumeSse` 的空闲超时在拿到响应头**之后**才生效 → 上游不回响应头时永久卡住（实测 8s 仍未落定）。加独立的「等响应头」计时（120s） |
+| **停不下来的解析** | `parseBing`/`parseSogou` 的大正则遇到"大量完整前缀但永不闭合"是 O(n²)：实测 2 万前缀 **15.5 秒**（加跨距上限也无效）。改为线性 `collectBlocks`（先收集闭合位置再配对），2–3ms |
+| **栈溢出白屏** | `renderMarkdown` 对 `<proposed_plan>` 正文递归渲染，1000 层就爆栈（模型可被注入诱导写出来），刷新后立刻复发。加 `MAX_PLAN_DEPTH = 8` |
+| **主进程崩溃** | `SshTunnel` 的 accept 回调用 `this.client!`：`close()` 后迟到的连接会让它在 net 回调里抛 TypeError，无人可接（进程直接退出）。改为先取局部变量并 destroy |
+| **负尺寸** | `resolveDimensions("-1:2")` 只判 `!w || !h` 漏掉负数 → `height: -1440` 进 ComfyUI 工作流 |
+| **十几 MB over IPC** | xlsx 预览 `sheet_to_csv(整表)` 无上限（10 万行实测转出十几 MB）。按 `!ref` 收窄到 2000 行 |
+| **自引入回归** | 上面那条的提示文案被拼进 CSV 正文，渲染端当成**一行数据**（3 行表格变 4 行）。`artifact:read` 改成 `{ text, note? }` 结构化返回 |
+| **测试通过≠没坏** | 三条「先保存再测」路径只 `setSettings` 不回写 `draft`（表单显示与磁盘不一致）；启动链没有 `.catch()`（失败时双击毫无反应）；`checkFrameworkUpdate` 用裸 `response.json()`（HTML → 英文 `Unexpected token`）；`bad port` 未收录（中英混排） |
+
+**结论**：`npm test` **528 项 / 39 文件**；typecheck、build 通过；
+E2E test-01…test-10 逐个复跑全过；探针 `probe-preview`/`probe-plan-mode`/`probe-compaction`/
+`probe-preview-headers`/`probe-user-input`/`probe-codex-ui` 全过。
+365 笔仍未推送（等用户明确指示）。
+
+**新增测试（本批）**：SSRF 尾点 2 条 + 通配 DNS 5 条、browserFetch 守卫 4 条、
+SSE `[DONE]` 取消 1 条、等响应头超时 1 条、搜索正则退化 1 条 + 块长度上限 1 条、
+方案块递归 1 条、SSH accept 竞态 1 条、画幅负数 1 条、`bad port` 1 条、框架更新 HTML 1 条。
+
+**探针自身的坑（三续）**：
+- 测「xlsx 预览输出多大」时，必须**同时**验证提示文案有没有被当成数据行——
+  只看体积会漏掉这个语义回归（体积降了，但表格多出一行怪文字）。
+- 验证正则是否退化，要用**前缀完整但不闭合**的输入（`<li class="b_algo"><h2><a href="x">`
+  重复 2 万次）。只重复开头的 `<li class="b_algo">` 只会命中第一段惰性匹配，得不到 O(n²)。
+- `webRequest.onBeforeRequest` 是**单监听器**语义（重复注册即覆盖），
+  所以给测试注入 resolver 时可以放心重新安装。
 
 
 

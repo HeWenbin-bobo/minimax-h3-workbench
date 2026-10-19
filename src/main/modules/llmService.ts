@@ -422,7 +422,10 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       return count ? `已创建 ${count} 个视频任务` : "已创建视频任务";
     }
     case "create_file": {
-      const name = /文件已生成并保存：([^（(]+)/.exec(output)?.[1]?.trim();
+      // 右边界必须锚到**尺寸标记**，不能锚到括号：重名文件是 `名字 (2).html`，
+      // ASCII `(` 会被当成"名字结束"提前截断 → 用户看到 `已保存 鹈鹕骑自行车_3D`
+      // （后缀和扩展名全丢，两张卡片显示成同一个文件）。实测真机踩到。
+      const name = /文件已生成并保存：(.+?)（\d+(?:\.\d+)?(?:KB|MB|字节)）/.exec(output)?.[1]?.trim();
       return name ? `已保存 ${sliceSafe(name, 40)}` : "已生成文件";
     }
     case "inspect_artifact": {

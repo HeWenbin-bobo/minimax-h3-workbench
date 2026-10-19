@@ -119,6 +119,19 @@ describe("工具摘要（humanizeToolOutput）", () => {
     expect(text).toBe("已保存 鹈鹕骑自行车_3D.html");
   });
 
+  // 回归：重名文件带 ` (2)` 后缀，文件名里含 ASCII 括号。
+  // 初版用 `[^（(]+` 做右边界，被 `(` 提前截断成 `已保存 鹈鹕骑自行车_3D`
+  // ——后缀和扩展名全丢，两张卡片显示成同一个文件（真机踩到）。
+  it("create_file 保留重名后缀 (2) 与扩展名", () => {
+    const text = humanizeToolOutput("create_file", "文件已生成并保存：鹈鹕骑自行车_3D (2).html（46KB）。文件卡片已显示在对话中。");
+    expect(text).toBe("已保存 鹈鹕骑自行车_3D (2).html");
+  });
+
+  it("create_file 的 MB 尺寸也能正确切出文件名", () => {
+    const text = humanizeToolOutput("create_file", "文件已生成并保存：大文件.html（2.5MB）。文件卡片已显示在对话中。");
+    expect(text).toBe("已保存 大文件.html");
+  });
+
   it("inspect_artifact 把报错条数变成一眼可读的结论", () => {
     expect(humanizeToolOutput("inspect_artifact", "自检结果：页面已在本机 Chromium 中真实运行（标题「鹈鹕」，300 个元素，可见文本 40 字）。\n运行时报错（共 2 条，已去重）：\n- 错误：…"))
       .toBe("自检发现 2 条报错");

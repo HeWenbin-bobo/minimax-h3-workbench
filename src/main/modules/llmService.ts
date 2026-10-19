@@ -1131,14 +1131,25 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
             // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
             // 整个调用被**静默跳过** → 模型收不到回执 → 反复重试 → 20 步预算烧光。
             // 数量约束改在 execute 里夹取（见下），越界只会少一两个选项，不会让整轮失效。
+            // **空数组也收**（同类坑的收尾）：`questions: []` / `options: []` 在 schema 层
+            // 被拒会让整个调用静默跳过；这些交到 execute 里给一句可纠正的说明更合适。
             options: z.array(z.object({
               id: z.string().describe("选项标识（英文短名）。"),
               label: z.string().describe("选项显示文字，简短（如'8 秒'）。"),
               description: z.string().describe("这个选项意味着什么，一句话。")
-            })).min(1).describe("互斥选项，建议 2–4 个。")
-          })).min(1).describe("问题清单，建议 1–3 个。")
+            })).describe("互斥选项，建议 2–4 个。")
+          })).describe("问题清单，建议 1–3 个。")
         }),
         execute: async (params) => {
+          // 空清单 / 某题没有选项：**回一句可纠正的说明**，不要让整轮失效
+          // （与"参数不满足 schema 就静默跳过"是同一个坑，见前面几处）。
+          if (params.questions.length === 0) {
+            return "没有要问的问题（questions 是空数组）。如果确实需要用户拍板，请给出 1–3 个问题、每题 2–4 个选项；否则直接按最合理的方式继续。";
+          }
+          const emptyOptions = params.questions.findIndex((question) => question.options.length === 0);
+          if (emptyOptions >= 0) {
+            return `第 ${emptyOptions + 1} 个问题没有任何选项。请为它提供 2–4 个互斥选项（每个带 label 与 description），再调用一次；不需要问的话就直接继续。`;
+          }
           // **夹取而不是拒绝**（见 schema 处的说明）：渲染端能正常画 1 个选项的卡片，
           // 超过 3 个问题/4 个选项则截断——少问一个总比整轮报废好。
           const clipped = {

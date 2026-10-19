@@ -1876,6 +1876,21 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   // 目录名规则与清理共用同一函数（见 artifactDir.ts 的注释）。
   const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(sessionId));
   await mkdir(dir, { recursive: true });
+  /**
+   * **落盘后统一用 realpath 回报路径**（实测，跨平台真实缺陷）：
+   *
+   * `edit_artifact` 走 `resolveWithinRoot`，它内部 `realpath` 过——所以「更新」事件里的
+   * `path` 是真实路径；而 `create_file` 原本回报的是 `path.join(userData, …)`（**拼接路径**）。
+   * 渲染端按 `a.path === event.path` 精确比对，两者不相等时更新事件**静默匹配不上**：
+   * 卡片大小停在旧值、已打开的预览不重载。
+   *
+   * 什么时候会不相等：userData 落在符号链接/junction 下——
+   * macOS 的 `os.tmpdir()` 就是 `/var/folders/…` → `/private/var/…`，
+   * Windows 把 AppData 挪到别的盘、或在沙箱/容器里跑都很常见。
+   * 探针 `_scratch/probe-artifact-path-form.mjs` 用 junction 稳定复现：
+   * 改动后卡片仍是「1 KB」（应为 20 KB）。
+   */
+  const realDir = await realpath(dir).catch(() => dir);
   // 同名不覆盖：同一会话里连着生成两份"报告.md"时，后者会把前者顶掉，
   // 于是**两张卡片指向同一个文件**、都显示第二版内容（实测 probe-dup-artifact）。
   // 这里探测重名并加 " (2)" / " (3)" 后缀，保证每次落盘都是独立文件。
@@ -1890,6 +1905,9 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
     // 用 safeName 会让卡片显示"报告.md"、磁盘上却是"报告 (2).md"——用户按卡片名去找
     // 文件会找不到（实测 probe-dup-xlsx）。
     const finalName = path.basename(filePath);
+    // 回报路径统一成 realpath（见上面 realDir 的注释）：写盘仍用拼接路径（等价），
+    // 但事件里给渲染端的必须是**与 edit_artifact 同一种写法**，否则更新事件匹配不上。
+    const reportedPath = path.join(realDir, finalName);
     if (kind === "xlsx") {
       // SheetJS：CSV 文本 → 工作簿 → xlsx 二进制。用户点名要"能保存成 .xlsx"，纯 CSV 落盘达不到。
       const XLSX = await loadXlsx();
@@ -1903,10 +1921,10 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
       XLSX.writeFile(book, temporary, { bookType: "xlsx" });
       await rename(temporary, filePath);
       const info = await stat(filePath);
-      return { name: finalName, path: filePath, size: info.size };
+      return { name: finalName, path: reportedPath, size: info.size };
     }
     await atomicWriteText(filePath, content);
-    return { name: finalName, path: filePath, size: Buffer.byteLength(content, "utf8") };
+    return { name: finalName, path: reportedPath, size: Buffer.byteLength(content, "utf8") };
   });
 }
 

@@ -793,11 +793,27 @@ export async function chatAgent(
 
 何时不用：你只是想找信息、还不知道哪个页面有——那是 web_search 的活。另外不要打开搜索结果页本身（那是搜索引擎的界面，不是内容），要打开结果里的具体链接。`,
         inputSchema: z.object({
-          url: z.string().url().describe("要打开的完整 URL，必须带协议（https:// 开头）。")
+          // **不要用 `z.string().url()`**（实测，与 `edit_artifact_batch` 的 min(2)、
+          // video 的 min/max 同一个坑）：模型只给 `example.com/foo`（不带协议）时，
+          // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
+          // **整个调用被静默跳过**——模型收不到回执，只会反复重试，20 步预算全烧光，
+          // 而界面把原因归成"参数被上游截断"。
+          //
+          // 改成普通字符串，缺协议时在执行侧补 `https://` 再交给
+          // `assertPublicHttpUrlResolved`——那道校验（含 DNS 落点检查）一个字没动，
+          // 安全边界不变，只是把"格式瑕疵"从"整轮报废"降级成"自动补全或一条中文错误"。
+          url: z.string().min(1).describe("要打开的网页地址，建议带协议（https:// 开头）；不带协议时会自动按 https 补全。")
         }),
         execute: async ({ url }) => {
           try {
-            return await callbacks.openPage(url);
+            // 补协议：`example.com/a` → `https://example.com/a`。
+            // 只认"看起来是域名"的形态（含点、无空白、不以 / 开头），避免把
+            // `about:blank` 之类的意外输入硬编码成 https。
+            const trimmed = String(url || "").trim();
+            const normalized = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) || trimmed.startsWith("/") || !/^[^\s/]+\.[^\s/]+/.test(trimmed)
+              ? trimmed
+              : `https://${trimmed}`;
+            return await callbacks.openPage(normalized);
           } catch (error) {
             return `打开网页失败：${describeError(error, "渲染失败")}。可改用 web_search 搜索相关信息，或换一个更直接的链接。`;
           }

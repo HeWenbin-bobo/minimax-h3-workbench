@@ -1298,8 +1298,16 @@ function registerIpc(
             const after = await stat(resolved);
             const totalLines = outcome.text.split("\n").length;
             const at = outcome.lines.join("、");
-            notifyArtifactUpdated(resolved, safeName, after.size);
-            return `已应用 ${params.edits.length} 处修改（第 ${at} 行；文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）${fellBackNote}。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
+            // 事件与回执都用 **found.name**（实际改的那份）：用请求名会让卡片标签被打回旧名，
+            // 模型也会以为改的是自己点名的那份（`8dc8c3b` 在单处编辑里修过，批量这条漏了）。
+            notifyArtifactUpdated(resolved, found.name, after.size);
+            const sizeKb = `${Math.max(1, Math.round(after.size / 1024))}KB`;
+            // 同 `f4b9ca7`：只有 html 才建议自检——`inspect_artifact` 只收 .html，
+            // 对 md/xlsx 建议自检必然吃一次失败调用、白烧一步预算。
+            const nextStep = /\.html?$/i.test(found.name)
+              ? "建议立刻 inspect_artifact 自检一次，确认没有引入新报错。"
+              : "改完可直接告诉用户，或用 read_artifact 复核。";
+            return `已应用 ${params.edits.length} 处修改（第 ${at} 行；文件现为 ${totalLines} 行 / ${sizeKb}）${fellBackNote}。${nextStep}`;
           });
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。

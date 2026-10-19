@@ -2601,11 +2601,16 @@ function PgToolSteps({ steps, running }: { steps: string[]; running: boolean }) 
   // 而一步里可能并行多个工具调用。真实一轮出现过「已执行 28 步工具调用」+「已达 20 步上限」
   // 同屏——两个数字都"对"，单位却不同，用户只会觉得软件在胡言乱语。
   const callCount = steps.filter((step) => step.startsWith("→")).length;
+  // **收尾后还停在 "→ 正在…" 说明这一轮被中断了**（用户点停止 / 出错 / 撞步数上限）：
+  // 工具启动事件到了、结束事件永远不会来。原样显示会让用户以为它**还在跑**——
+  // 而右上角的停止键已经变回发送键。把最后那条改成「已中断」。
+  const danglingStart = !running && last.startsWith("→");
+  const summaryLast = danglingStart ? `${last}（已中断）` : last;
   return <div className="pg-tool-steps-wrap">
     {!running && <button className="pg-tool-steps-toggle" onClick={() => setOpen((v) => !v)} title={expanded ? "收起执行过程" : "展开执行过程"}>
-      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {callCount || steps.length} 次工具调用<span className="pg-tool-steps-last">· {last.length > 40 ? `${sliceSafe(last, 40)}…` : last}</span>
+      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {callCount || steps.length} 次工具调用<span className="pg-tool-steps-last">· {summaryLast.length > 40 ? `${sliceSafe(summaryLast, 40)}…` : summaryLast}</span>
     </button>}
-    {expanded && <div className="pg-tool-steps">{steps.map((step, i) => <div key={i} className="pg-tool-step">{step}</div>)}</div>}
+    {expanded && <div className="pg-tool-steps">{steps.map((step, i) => <div key={i} className="pg-tool-step">{danglingStart && i === steps.length - 1 ? `${step}（已中断）` : step}</div>)}</div>}
   </div>;
 }
 

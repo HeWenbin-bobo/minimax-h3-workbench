@@ -360,7 +360,12 @@ export function formatConsoleLine(level: unknown, message: unknown, lineNumber?:
   // 分 5 次读完再逐段比对（那一轮光读文件就吃掉 5 步，最终仍打满 20 步）。
   // Chromium 早就把行号给了我们，之前丢掉了。
   const where = typeof lineNumber === "number" && lineNumber > 0 ? `（第 ${lineNumber} 行）` : "";
-  return `${level === "warning" ? "警告" : "错误"}${where}：${sliceSafe(cleaned.trim(), MAX_LOG_CHARS)}`;
+  // **截断必须留痕**（实测缺口）：着色器编译错误一次能吐几千字符，截到 400 字是对的，
+  // 但原样切掉末尾会让模型以为报错就这么多——它据此判断"这个错看起来不严重"，
+  // 或把半截的错误信息当成完整原文去搜索。加个尾巴成本为零。
+  const body = cleaned.trim();
+  const shown = body.length > MAX_LOG_CHARS ? `${sliceSafe(body, MAX_LOG_CHARS)}…（已截断）` : body;
+  return `${level === "warning" ? "警告" : "错误"}${where}：${shown}`;
 }
 
 /** 加载后额外等待的时长：让 requestAnimationFrame / 首帧初始化跑完，否则 canvas 采样必然为空。 */

@@ -91,7 +91,9 @@ describe("自检日志过滤（formatConsoleLine）", () => {
 
   it("超长消息被截断（着色器编译错误常一次吐几千字符）", () => {
     const line = formatConsoleLine("error", "x".repeat(5_000))!;
-    expect(line.length).toBeLessThanOrEqual(410);
+    expect(line.length).toBeLessThanOrEqual(420);
+    // **必须留痕**：原样切掉末尾会让模型以为报错就这么长，把半截信息当完整原文去搜索。
+    expect(line.endsWith("…（已截断）")).toBe(true);
   });
 
   it("真实报错原样保留", () => {

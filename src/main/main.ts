@@ -35,7 +35,7 @@ import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
 import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates } from "./modules/artifactDir";
-import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers } from "./modules/artifactEdit";
+import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers, MAX_READ_CHARS } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
@@ -1148,7 +1148,13 @@ function registerIpc(
           const more = slice.truncated
             ? `\n（只显示前 ${slice.to - slice.from + 1} 行；文件共 ${slice.totalLines} 行，还有 ${slice.totalLines - slice.to} 行没显示。需要更多就用 startLine/endLine 分段读，或者用 keyword 直接定位。）`
             : "";
-          return `文件：${safeName}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}`;
+          // **按字符截断也要说**（否则是静默丢失）：超长单行文件（压缩过的 HTML）
+          // 会先撞 `MAX_READ_CHARS`，行数看起来"全给了"，实际内容被切在半路。
+          // 模型不知道就会基于残缺内容下结论（比如以为某个函数只有一半）。
+          const charNote = slice.charCapped
+            ? `\n（这一段总长超限，已按 ${MAX_READ_CHARS} 字符截断——单行很长的文件常见。请用 keyword 精确定位，或缩小 startLine/endLine 范围。）`
+            : "";
+          return `文件：${safeName}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}`;
         },
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));

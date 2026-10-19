@@ -17,7 +17,8 @@ export const PLAN_MODE_PROMPT = `# 本轮是「计划模式」
 
 用户要求你先给方案、暂不执行。请遵守：
 
-1. **只输出计划，不调用任何工具**。不要 generate_video、不要 create_file、不要 web_search——先让用户看清你打算怎么做。
+1. **只输出计划，不产生副作用**。会产生产出的工具本轮**不下发**：不要 generate_video、不要 create_file、不要 edit_artifact / edit_artifact_batch、不要 inspect_artifact——先让用户看清你打算怎么做。
+   **只读工具照常可用**（web_search / open_page / read_artifact）：写计划前该查的事实要查，别凭记忆编参数。
 2. **用户催也不改**。"直接做/别废话/快点"这类话不改变本轮模式——那是让你**把执行本身规划出来**，不是让你开始执行。只有用户明确说"开始吧/执行"才算确认（那时系统会自动切到执行模式，你不用自己判断）。
 3. 计划要**具体到可执行**：每一步写清"用什么工具、对什么内容做什么"，不要写"分析需求"这类空话。
 4. 用有序列表，3–7 步为宜。每步一行，必要时给关键参数（如视频时长、文件名、格式）。
@@ -93,26 +94,42 @@ export const PLAN_EXECUTION_PROMPT = `# 计划已确认，开始执行
 
 用户已确认你上一轮给出的计划。现在按该计划逐步执行：该调工具就调，该出产物就出。不要再复述计划，直接动手，最后简要说明完成了什么。`;
 
-/** 计划模式下禁用（不下发）的工具名。这两个是"产生副作用"的工具。 */
-export const PLAN_MODE_BLOCKED_TOOLS = ["generate_video", "create_file"] as const;
+/**
+ * 计划模式下**不下发**的工具名。判据是"会不会产生副作用/改动产物"：
+ * - `generate_video` / `create_file`：会真的花钱、落盘；
+ * - `edit_artifact` / `edit_artifact_batch`：会改写已有产物；
+ * - `inspect_artifact`：本身只读，但它服务于"刚生成的产物"——本轮不产文件，留着只会让模型以为有东西可查；
+ * - `update_plan`：语义是"动手期间报进度"，与"本轮只出方案"冲突（会分散注意力）。
+ *
+ * 保留的是**只读**工具：`web_search` / `open_page` / `read_artifact`，
+ * 以及 `request_user_input`（计划里该问清的取舍就该问）。
+ * 实际裁在 `main/modules/llmService.ts` 的工具表；这份清单供提示词与测试共用。
+ */
+export const PLAN_MODE_BLOCKED_TOOLS = ["generate_video", "create_file", "edit_artifact", "edit_artifact_batch", "inspect_artifact", "update_plan"] as const;
+
+/** 计划模式下**仍然可用**的只读工具（写进提示词，避免模型以为一律不能调）。 */
+export const PLAN_MODE_READONLY_TOOLS = ["web_search", "open_page", "read_artifact", "request_user_input"] as const;
 
 /**
- * 计划模式下的工具说明：只列出工具供参考，明确说明本轮不要调用。
+ * 计划模式下的工具说明：写清"哪些还在、哪些没了"，不让模型对着提示词猜边界。
  *
- * 末尾两句关于 update_plan 的说明是必要的：它**本身无害**（纯展示），但语义是
- * "动手期间报进度"，与"本轮只出方案"冲突——留着会让模型去更新清单而不是写方案。
- * 实际执行点在 `main/modules/llmService.ts` 的工具表（对齐 Codex 的
- * `update_plan_enabled == false` → `without_update_plan_instructions`：整段移除，
- * 而不是留一句"本轮别用"）。这里只负责让模型也知道这回事。
+ * 旧版这里写的是「本轮仅供参考，不要实际调用」，同时上面第 1 条又说「不调用任何工具」——
+ * 而工具表里 web_search / open_page / read_artifact 其实**是下发**的。
+ * 提示词与工具表互相打架时，模型只能二选一：要么该查的不查（凭记忆编参数），
+ * 要么查了以后以为自己违规、在计划里道歉。两边必须是同一套边界。
+ *
+ * 末尾关于 update_plan 的说明仍然必要：它**本身无害**（纯展示），
+ * 但语义是"动手期间报进度"——留着会让模型去更新清单而不是写方案。
  */
-export const PLAN_MODE_TOOL_NOTE = `# 可用工具（本轮仅供参考，不要实际调用）
+export const PLAN_MODE_TOOL_NOTE = `# 可用工具（本轮只有这些）
 - web_search(query)：联网查资料
 - open_page(url)：打开具体网页看正文
-- generate_video(prompt, duration, count)：生成 AI 视频（4–15 秒、1–4 路）
-- create_file(kind, name, content)：生成文件产物（表格 / 网页 / 文档）
+- read_artifact(name, …)：读回本会话已有的产物
+- request_user_input(questions)：问清 1–3 个关键取舍（用户不答就按最佳判断写进「假设」）
 
-另外：update_plan 本轮不下发（它是"动手期间报进度"用的，与只出方案的本轮冲突）。
-计划直接写在回复正文里。`;
+以下工具**本轮不下发**，因为它们会产生副作用或与"只出方案"冲突：
+generate_video、create_file、edit_artifact、edit_artifact_batch、inspect_artifact、update_plan。
+计划直接写在回复正文里，不要试图调 update_plan。`;
 
 /** 本次发送要带哪种计划语义。undefined = 普通对话（零改动）。 */
 export type PlanMode = "plan" | "execute" | undefined;

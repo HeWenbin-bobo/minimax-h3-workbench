@@ -706,7 +706,11 @@ export function formatProbeReport(result: HtmlProbeResult): string {
     }).join("，");
     lines.push(`画布：${described}。`);
   } else if (result.textLength === 0) {
-    lines.push("页面既没有画布、也没有可见文本——脚本很可能压根没跑起来。");
+    // **主线程卡死时不要再说"脚本压根没跑起来"**（实测矛盾）：它是**跑起来了**
+    // （否则连 load 都不会完成），然后在某个同步循环里出不来了。
+    // 两种成因的修法相反：一种要查"为什么没执行"，另一种要查"哪个循环永不结束"。
+    const hung = result.consoleErrors.some((line) => line.startsWith(MAIN_THREAD_HUNG_MARKER));
+    if (!hung) lines.push("页面既没有画布、也没有可见文本——脚本很可能压根没跑起来。");
   }
   if (flatScreen) {
     lines.push(`画面采样：整屏约有 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).dominant * 100)}% 是同一种颜色（平均亮度 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).brightness)}）。**这通常意味着页面上什么都没画出来**——画面被某个纯色元素盖满、画布尺寸为 0、或渲染循环根本没跑起来。请检查布局与首帧渲染。`);

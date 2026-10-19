@@ -1158,8 +1158,8 @@ function registerIpc(
           // 放在循环内：内容过滤重试会往 effective 追加改写指引，须基于最新历史注入。
           result = await chatAgent(agentOptions, injectWorldState(effective, worldStateText), agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
             sendLlmTool({ tool, input, phase: "start", sessionId: session });
-          }, (tool, summary) => {
-            sendLlmTool({ tool, input: "", phase: "end", result: summary, sessionId: session });
+          }, (tool, summary, ok) => {
+            sendLlmTool({ tool, input: "", phase: "end", result: summary, ok, sessionId: session });
           }, planArg === "plan");
           break;
         } catch (error) {

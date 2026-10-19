@@ -411,6 +411,26 @@ export async function bundledFrameworkVersion(): Promise<string> {
  * 并自动回落普通对话——这正是工具支持检测的运行时落地。
  */
 /**
+ * 工具返回的文本是否代表**这次操作失败**。
+ *
+ * 我们的工具有意"失败也返回文本而不是抛异常"（抛出去会让 AI SDK 把整轮判为失败、
+ * 主进程回落普通对话，用户的请求直接丢失）。代价是调用方无法从异常判断成败。
+ * 实测踩到：`edit_artifact` 拒绝歧义编辑时渲染端拼出 `✓ 修改文件完成（oldText 出现了 2 次…）`，
+ * 打勾与"失败"同屏。
+ *
+ * 判定只认**开头**的失败标记（各工具的错误文案都以"…失败"开头），
+ * 不做全文搜索——正文里出现"失败"二字（比如模型生成的页面里有个错误提示）不算。
+ */
+export function isToolFailure(output: unknown): boolean {
+  if (typeof output !== "string") return false;
+  // 只看**第一小句**（到第一个冒号/句号/换行为止）。
+  // 用"前 N 个字符"不够：实测 `已读取 500 字正文。页面内容：加载失败时请重试。`
+  // 在前 24 字里就出现了"失败"，会被误判成工具失败——而它是一段正常的页面正文。
+  const head = output.slice(0, 40).split(/[：:。\n]/, 1)[0] ?? "";
+  return /失败|未获得用户回答/.test(head);
+}
+
+/**
  * 工具执行结果 → 给用户看的摘要（显示在气泡的步骤条里）。
  *
  * **不能直接展示 output**：工具返回的文本是**写给模型看的**，里面混着大量行为指令。
@@ -544,7 +564,7 @@ export async function chatAgent(
   /** 工具调用开始回调：渲染端据此在气泡上实时显示"正在搜索/正在生成视频"（透明度）。 */
   onToolStart?: (tool: string, input: string) => void,
   /** 工具执行完成回调：渲染端显示结果摘要（"找到 N 条结果"/"已建 N 个任务"），工具全链路透明。 */
-  onToolEnd?: (tool: string, summary: string) => void,
+  onToolEnd?: (tool: string, summary: string, ok: boolean) => void,
   /**
    * 计划模式：**不把产生副作用的工具下发给模型**。
    * 只靠提示词要求"别调工具"不够——模型对工具是否存在的信任远高于对文字约定的信任
@@ -891,7 +911,10 @@ export async function chatAgent(
     onToolExecutionEnd: (event) => {
       if (!onToolEnd || !event) return;
       const toolName = String(event.toolCall.toolName ?? "");
-      onToolEnd(toolName, humanizeToolOutput(toolName, (event as { toolOutput?: { output?: unknown } }).toolOutput?.output));
+      const output = (event as { toolOutput?: { output?: unknown } }).toolOutput?.output;
+      // 成败必须显式传：我们的工具失败也返回文本（见 isToolFailure），
+      // 渲染端没法从摘要里可靠区分"完成"与"失败"。
+      onToolEnd(toolName, humanizeToolOutput(toolName, output), !isToolFailure(output));
     }
   });
   let seq = 0;

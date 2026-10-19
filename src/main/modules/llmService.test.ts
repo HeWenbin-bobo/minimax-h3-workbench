@@ -11,7 +11,7 @@ vi.mock("@ai-sdk/openai-compatible", () => ({
   createOpenAICompatible: () => ({ chatModel: (id: string) => ({ id }) })
 }));
 
-import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, humanizeToolOutput, type LlmServiceOptions } from "./llmService";
+import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, humanizeToolOutput, isToolFailure, type LlmServiceOptions } from "./llmService";
 
 // 构造一个 ReadableStream，把字符串分块推送（模拟网络分包边界不齐）。
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
@@ -107,6 +107,36 @@ describe("consumeSse", () => {
 
 // 步骤条摘要必须只讲**用户关心的事实**。工具返回的文本本来是写给模型的，
 // 里面混着行为指令——实测（鹈鹕案例真机）用户看到过"继续执行下一步，不要在回复里重复整个清单。"
+describe("工具成败判定（isToolFailure）", () => {
+  // 实测踩到：edit_artifact 拒绝歧义编辑时，步骤条渲染成
+  // `✓ 修改文件完成（oldText 在文件里出现了 2 次…）`——打勾与"失败"同屏。
+  // 成败改成结构化字段后，这里锁住判定本身。
+  it("各工具的错误文案被识别为失败", () => {
+    expect(isToolFailure("修改文件失败：oldText 在文件里出现了 2 次（第 3、5 行）。")).toBe(true);
+    expect(isToolFailure("保存文件失败：不支持的产物类型：pdf。")).toBe(true);
+    expect(isToolFailure("打开网页失败：渲染超时。")).toBe(true);
+    expect(isToolFailure("搜索失败：连接重置。")).toBe(true);
+    expect(isToolFailure("自检失败：页面没能加载起来（…）。")).toBe(true);
+  });
+
+  it("成功文案不算失败", () => {
+    expect(isToolFailure("已修改 编辑测试.html（第 5 行，文件现为 8 行 / 1KB）。")).toBe(false);
+    expect(isToolFailure("文件已生成并保存：报告.md（3KB）。")).toBe(false);
+    expect(isToolFailure("[1] 结果一\n[2] 结果二")).toBe(false);
+  });
+
+  it("只在开头判定：正文中间出现'失败'不算（模型生成的页面里可能有错误提示）", () => {
+    const pageBody = "已读取 500 字正文。页面内容：加载失败时请重试。";
+    expect(isToolFailure(pageBody)).toBe(false);
+  });
+
+  it("非字符串一律不算失败（不误报）", () => {
+    expect(isToolFailure(undefined)).toBe(false);
+    expect(isToolFailure(null)).toBe(false);
+    expect(isToolFailure({ ok: false })).toBe(false);
+  });
+});
+
 describe("工具摘要（humanizeToolOutput）", () => {
   it("update_plan 只给进度，不泄漏写给模型的指令", () => {
     const text = humanizeToolOutput("update_plan", "步骤清单已更新（0/4 已完成），用户能在对话里看到。继续执行下一步，不要在回复里重复整个清单。");

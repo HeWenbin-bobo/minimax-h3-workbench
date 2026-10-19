@@ -378,6 +378,16 @@ export interface LlmToolEvent {
   phase?: "start" | "end";
   /** end 阶段的结果摘要文本。 */
   result?: string;
+  /**
+   * end 阶段：这次工具调用**是否成功**。
+   *
+   * 为什么不能靠 result 猜（实测踩到）：`edit_artifact` 拒绝歧义编辑时返回的是
+   * "oldText 出现了 2 次…"，渲染端却把它拼成 `✓ 修改文件完成（oldText 出现了 2 次…）`——
+   * 打勾、"完成"、"失败"三件事同时出现，用户看了一头雾水。
+   * "完成"只表示工具调用结束，不代表操作成功，故把成败做成结构化字段。
+   * 缺省视为成功（兼容旧事件）。
+   */
+  ok?: boolean;
   sessionId?: string;
 }
 

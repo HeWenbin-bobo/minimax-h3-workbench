@@ -1391,7 +1391,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         const summary = (event.result ?? "完成").replace(/\s+/g, " ").trim();
         const shortSummary = summary.length > 60 ? `${sliceSafe(summary, 60)}…` : summary;
         if ((event.phase ?? "start") === "end") {
-          return { ...msg, toolSteps: [...steps, `✓ ${name}完成（${shortSummary}）`] };
+          // 成败用结构化字段，不靠摘要文本猜："完成"指工具调用结束，不代表操作成功。
+          // 实测踩到：edit_artifact 拒绝歧义编辑时曾渲染成 `✓ 修改文件完成（oldText 出现了 2 次…）`。
+          // **失败时不要再加"失败"前缀**：摘要本身已经是"修改文件失败：…"，
+          // 再包一层就成了 `✕ 修改文件失败（修改文件失败：…）`（探针里看到的重复）。
+          // 缺省视为成功（兼容没有该字段的旧事件）。
+          return { ...msg, toolSteps: [...steps, event.ok === false ? `✕ ${shortSummary}` : `✓ ${name}完成（${shortSummary}）`] };
         }
         const label = event.tool === "web_search" ? `→ 正在搜索：${event.input}`
           : event.tool === "generate_video" ? "→ 正在创建视频生成任务…"

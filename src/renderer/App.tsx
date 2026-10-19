@@ -2621,7 +2621,14 @@ function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: 
   onClose: () => void;
   retentionDays: number;
 }) {
-  const daysLeft = (iso: string) => Math.max(0, Math.ceil((retentionDays * 86_400_000 - (Date.now() - new Date(iso).getTime())) / 86_400_000));
+  // **脏时间戳会显示「NaN 天后自动清除」**（实测）：`session.deletedAt` 可能缺失
+  // 或解析不出来。`Math.max(0, Math.ceil(NaN))` 仍是 NaN。拿不到可信时间时不显示剩余天数。
+  const daysLeft = (iso: string | undefined): number | undefined => {
+    if (!iso) return undefined;
+    const time = new Date(iso).getTime();
+    if (!Number.isFinite(time)) return undefined;
+    return Math.max(0, Math.ceil((retentionDays * 86_400_000 - (Date.now() - time)) / 86_400_000));
+  };
   // 二次确认用**内联两段式**而不是 window.confirm：
   // confirm 在 Electron 里会弹阻塞式原生对话框，且自动化（CDP）会被挂住；
   // 本项目对 prompt 已有同样教训（"prompt() is not supported"），统一步调。
@@ -2632,7 +2639,7 @@ function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: 
       {sessions.length === 0 && <p className="footnote">回收站是空的。</p>}
       {sessions.map((session) => <article key={session.id} className="trash-item">
         <div><strong>{session.title || "新对话"}</strong>
-          <small>{session.messages.length} 条消息 · {session.deletedAt ? `${daysLeft(session.deletedAt)} 天后自动清除` : ""}</small></div>
+          <small>{session.messages.length} 条消息{(() => { const left = daysLeft(session.deletedAt); return left === undefined ? "" : ` · ${left} 天后自动清除`; })()}</small></div>
         <div className="trash-actions">
           <button className="text-button" onClick={() => onRestore(session)}>恢复</button>
           {/* 彻底删除不可逆（会话记录 + 产物目录一起删）。第一次点击变成确认态，

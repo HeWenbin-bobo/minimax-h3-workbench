@@ -1060,9 +1060,13 @@ function registerIpc(
         inspectArtifact: async (params: { name: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
-          if (!/\.html?$/i.test(safeName)) throw new Error("只能自检 html 产物（csv/md 没有可运行的脚本）。");
+          // **先解析、再判类型**（实测：两者顺序反了会误拒）。
+          // `create_file` 的参数说明是"不含扩展名"，模型照此调用 `inspect_artifact("鹈鹕")`
+          // 时，若先按 `safeName` 判扩展名 → 没有 `.html` → 直接报"只能自检 html 产物"，
+          // 而文件其实就在那里、也确实能跑。解析器已支持无扩展名补全，先让它找出实际文件。
           const found = await resolveArtifactForTool(dir, safeName);
           if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          if (!/\.html?$/i.test(found.name)) throw new Error(`「${found.name}」不是 html 产物，无法自检（csv/md 没有可运行的脚本）。`);
           const resolved = found.path;
           const actualName = found.name;
           // 与渲染端预览面板拼的是同一个 URL 形状：同一协议、同一 CSP。

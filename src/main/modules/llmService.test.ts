@@ -254,6 +254,27 @@ describe("工具摘要（humanizeToolOutput）", () => {
     const body = "x".repeat(500);
     expect(humanizeToolOutput("open_page", body)).toBe("已读取 500 字正文");
   });
+
+  // 实测：正文过短时工具回的是整段说明 + 正文（共 133 字），
+  // 而摘要用 `output.length` → 显示"已读取 133 字正文"。
+  // 用户真正关心的是"只拿到 35 字"，那才是该换链接的理由。
+  it("open_page 正文过短时报真实字数，不把说明文字算进去", () => {
+    const short = `已打开该网页，但只提取到 35 字正文（可能是登录墙、纯 JS 空壳页或被反爬拦截）。这点内容通常不足以支撑结论——请换一个以文字为主的链接，或改用 web_search。以下是提取到的全部内容：\n\n${"x".repeat(35)}`;
+    const text = humanizeToolOutput("open_page", short);
+    expect(text).toBe("只提取到 35 字正文（可能被登录墙/反爬挡住）");
+    expect(text).not.toContain("133");
+  });
+
+  it("open_page 完全取不到正文时说清楚", () => {
+    expect(humanizeToolOutput("open_page", "已打开该网页，但页面上没有可提取的正文（可能是纯图片/画布/PDF 页面）。可以改用 web_search 搜索相关信息，或换一个以文字为主的链接。"))
+      .toBe("页面上没有可提取的正文");
+  });
+
+  it("open_page 截断说明不算进正文字数", () => {
+    const NL = String.fromCharCode(10);
+    expect(humanizeToolOutput("open_page", `${"y".repeat(500)}${NL}${NL}（页面过长已截断）`))
+      .toBe("已读取 500 字正文（已截断）");
+  });
 });
 
 describe("chatAgent 工具暴露", () => {

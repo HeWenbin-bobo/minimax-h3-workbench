@@ -541,8 +541,17 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
     }
     case "open_page": {
       // 正文长度比正文本身有用：用户只想知道"读到了没有、读了多少"。
-      const truncated = /已截断/.test(output);
-      return `已读取 ${output.length} 字正文${truncated ? "（已截断）" : ""}`;
+      //
+      // **不能用 `output.length`**（实测）：正文过短时工具回的是
+      // "已打开该网页，但只提取到 35 字正文（可能是登录墙…）。以下是提取到的全部内容：\n\nxxx"，
+      // 整段说明 + 正文共 133 字，摘要于是显示"已读取 133 字正文"——
+      // 而用户真正关心的是"只拿到 35 字"，那才是它该去换链接的理由。
+      const short = /只提取到\s*(\d+)\s*字正文/.exec(output)?.[1];
+      if (short) return `只提取到 ${short} 字正文（可能被登录墙/反爬挡住）`;
+      if (/没有可提取的正文/.test(output)) return "页面上没有可提取的正文";
+      // 截断说明是附加在正文末尾的，长度不能算进去。
+      const body = output.replace(/\n\n（页面过长已截断）$/, "");
+      return `已读取 ${body.length} 字正文${/已截断/.test(output) ? "（已截断）" : ""}`;
     }
     case "request_user_input":
       return /未获得用户回答/.test(output) ? "用户未回答，按默认继续" : "已收到你的回答";

@@ -834,8 +834,13 @@ export async function chatAgent(
         inputSchema: z.object({
           name: z.string().min(1).describe("产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。"),
           keyword: z.string().min(1).describe("要定位的字面文本（区分大小写），如报错里出现的标识符、函数名。给了它就不用再分段读全文。").optional(),
-          startLine: z.number().int().min(1).describe("起始行（1 起算，含）。省略则从第 1 行开始。").optional(),
-          endLine: z.number().int().min(1).describe("结束行（含）。省略则读到文件末尾。一次建议不超过 400 行。").optional()
+          // **不要 `.int().min(1)`**（实测同类坑第四次）：模型按 0 起算给 `startLine: 0`、
+          // 或给个小数时，AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
+          // 整个调用被**静默跳过**（收不到回执 → 反复重试 → 步数烧光）。
+          // 而 `sliceWithLineNumbers` 本来就会夹紧（0 → 1、小数 → 向下取整、越界 → 文件末尾），
+          // 所以这里只需要 `z.number()`；"1 起算"写进 describe 即可。
+          startLine: z.number().describe("起始行（1 起算，含；越界会被夹紧）。省略则从第 1 行开始。").optional(),
+          endLine: z.number().describe("结束行（含；越界会被夹紧）。省略则读到文件末尾。一次建议不超过 400 行。").optional()
         }),
         execute: async (params) => {
           try {

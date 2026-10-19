@@ -53,6 +53,31 @@ describe("applyExactEdit", () => {
     expect(applyExactEdit("aaa", "aa", "b")).toMatchObject({ ok: false, reason: "ambiguous", count: 2 });
   });
 
+  // 实测性能事故：600KB 产物里模式 `}` 命中 40,000 次，
+  // 旧实现每处都从头数一遍换行（命中数 × 文件长度）→ **主进程同步阻塞 8.2 秒**，
+  // 整个窗口卡死（渲染进程在等 IPC 回包），用户看到的是"软件没反应了"。
+  // 模型给出过短的 oldText（`}` / `return`）就会触发，而这正是它最常犯的错。
+  it("大量命中时仍然很快，且行号有上限", () => {
+    const text = "function a(){if(x){return 1;}}".repeat(20_000); // 600KB，`}` 命中 4 万次
+    const started = Date.now();
+    const out = applyExactEdit(text, "}", ";");
+    const elapsed = Date.now() - started;
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.reason).toBe("ambiguous");
+      expect(out.count).toBe(40_000);
+      // 调用方只拼前 6 条进错误信息，多算的没人用。
+      expect(out.lines.length).toBeLessThanOrEqual(20);
+    }
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it("行号仍然正确（批量翻译不能数错）", () => {
+    const out = applyExactEdit("a\nb\nmatch\nd\nmatch\ne", "match", "x");
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.lines).toEqual([3, 5]);
+  });
+
   it("CRLF 文件用 LF 的 oldText 也能改到（行尾归一）", () => {
     const text = "a\r\nM.identity();\r\nb";
     const out = applyExactEdit(text, "M.identity();", "M.ident();");

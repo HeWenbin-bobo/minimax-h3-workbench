@@ -34,6 +34,42 @@ function lineOf(text: string, index: number): number {
   return line;
 }
 
+/**
+ * 歧义时最多报几条行号。
+ *
+ * 调用方（`main.ts`）只取前 6 条拼进错误信息，其余没人用。不设上限的话，
+ * 一个过短的 oldText（`}` / `return`）在一个 600KB 的文件里能命中几万处，
+ * 光是构造这个数组就是几十万个数字——而模型只看到 6 个。
+ */
+const MAX_REPORTED_LINES = 20;
+
+/**
+ * 把一组**升序**偏移批量翻译成行号，只扫描一遍文本。
+ *
+ * 旧实现是 `indexes.map((at) => lineOf(text, at))`——每处命中都从头数一遍换行，
+ * 复杂度 = 命中数 × 文件长度。实测（600KB 产物、模式 `}`）：
+ * **命中 40,000 次时主进程被同步阻塞 8.2 秒**，整个窗口卡死（渲染进程等 IPC 回包），
+ * 用户看到的是"软件没反应了"。模型给出一个过短的 oldText 就会触发，
+ * 而这恰恰是它最常犯的错（`oldText` 太短 → 命中多处 → 正好走这条路径）。
+ *
+ * @param indexes 必须升序（`occurrences` 的返回值就是）。
+ */
+function linesOf(text: string, indexes: readonly number[]): number[] {
+  const out: number[] = [];
+  let line = 1;
+  let cursor = 0;
+  for (const index of indexes) {
+    if (out.length >= MAX_REPORTED_LINES) break;
+    // 只补扫"上一次游标到本次命中"这一段，总量与文件长度线性。
+    for (let i = cursor; i < index && i < text.length; i += 1) {
+      if (text.charCodeAt(i) === 10) line += 1;
+    }
+    if (index > cursor) cursor = index;
+    out.push(line);
+  }
+  return out;
+}
+
 /** 找出 needle 在 haystack 里的全部起始位置。 */
 function occurrences(haystack: string, needle: string): number[] {
   const hits: number[] = [];
@@ -111,7 +147,7 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
     return { ok: true, text: text.slice(0, at) + replacement + text.slice(at + needle.length), line: lineOf(text, at) };
   }
   if (direct.length > 1) {
-    return { ok: false, reason: "ambiguous", count: direct.length, lines: direct.map((at) => lineOf(text, at)) };
+    return { ok: false, reason: "ambiguous", count: direct.length, lines: linesOf(text, direct) };
   }
 
   // 行尾归一后再试一次。
@@ -127,7 +163,7 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
     };
   }
   if (hits.length > 1) {
-    return { ok: false, reason: "ambiguous", count: hits.length, lines: hits.map((at) => lineOf(normalizedText, at)) };
+    return { ok: false, reason: "ambiguous", count: hits.length, lines: linesOf(normalizedText, hits) };
   }
   // 找不到时给出**最接近的几行**：只回一句"找不到"，模型只能再读一次文件、再猜一次
   // （真机上它这样重复了 4 次，20 步预算全烧在这上面）。

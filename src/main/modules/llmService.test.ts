@@ -151,6 +151,35 @@ describe("工具成败判定（isToolFailure）", () => {
     expect(text).toBe("共 2118 行");
   });
 
+  // 项目约定：`inspect_artifact` 的回执 = 报告正文 + 末尾的文件身份说明。
+  // 曾经反过来（身份说明在前），于是 `自检失败：…` 落到第二句——
+  // 步骤条打勾、摘要显示"自检完成"，而页面根本没加载起来。
+  // 这条断言把"失败必须出现在开头"这个契约锁住。
+  it("自检失败 + 末尾文件身份说明时仍判为失败", () => {
+    const NL = String.fromCharCode(10);
+    const text = [
+      "自检失败：页面没能加载起来（页面加载失败：ERR_FILE_NOT_FOUND（-6））。请检查 HTML 结构是否完整。",
+      "",
+      "---",
+      "本次检查的文件：鹈鹕.html（41KB，修改于 00:28:06）。"
+    ].join(NL);
+    expect(isToolFailure(text)).toBe(true);
+    expect(humanizeToolOutput("inspect_artifact", text)).toContain("自检失败");
+  });
+
+  it("自检通过 + 末尾文件身份说明时不算失败", () => {
+    const NL = String.fromCharCode(10);
+    const text = [
+      "自检结果：页面已在本机 Chromium 中真实运行（标题「鹈鹕」，30 个元素，可见文本 40 字）。",
+      "控制台没有任何 error/warning，画面也不是纯色。",
+      "",
+      "---",
+      "本次检查的文件：鹈鹕.html（41KB，修改于 00:28:06）。"
+    ].join(NL);
+    expect(isToolFailure(text)).toBe(false);
+    expect(humanizeToolOutput("inspect_artifact", text)).toBe("自检通过，无报错");
+  });
+
   it("非字符串一律不算失败（不误报）", () => {
     expect(isToolFailure(undefined)).toBe(false);
     expect(isToolFailure(null)).toBe(false);

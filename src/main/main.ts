@@ -1113,8 +1113,12 @@ function registerIpc(
           // 标题必须按**实际成因**措辞：同一个判定在 inspect/read/edit/batch 四处共用
           // `describeArtifactFallback`——此前四处各写一遍，加"csv 落成 xlsx"时必然漏改。
           const why = describeArtifactFallback(found.fellBack, safeName, actualName, "inspect");
+          // **身份说明放在报告之后**（实测踩到）：步骤条的成败判定与摘要都只看回执**开头**
+          // （`isToolFailure` 取第一句、`humanizeToolOutput` 按前缀匹配）。把
+          // "本次检查的文件：…" 拼在前面时，`自检失败：…` 落到第二句——
+          // 自检明明失败，步骤条却打勾、摘要显示「自检完成」。
           const header = `本次检查的文件：${actualName}${stamp}。${why ? `\n${why}` : ""}\n\n`;
-          return header + report;
+          return `${report}\n\n---\n${header.trimEnd()}`;
         },
         // read_artifact / edit_artifact：改之前先读，改的时候只改那一处。
         //

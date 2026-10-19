@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: ffef1031-03ba-4d2c-9783-aeb7f514312a
-  modified: 2026-10-19T10:49:18.776Z
+  modified: 2026-10-19T11:32:23.373Z
 ---
 
 2026-10-19 在 `feature/pelican-exploration-2026-10-19` 分支上为游乐场加了 `inspect_artifact`、
@@ -78,5 +78,30 @@ Electron 隐藏窗口（`show:false`）能 `capturePage()`；纯色页主色占�
 
 **踩坑记录**：改完源码没 `npm run build` 就跑探针，两次结果都是 `motion=undefined`
 ——探针加载的是旧 `dist-electron`。CLAUDE.md 记过这条，又犯了一次。
+
+**10. 同名多版本：工具必须永远操作"界面上展示的那一版"。**
+界面把 `名字.html` / `名字 (2).html` 折叠成**只显示最新一版**，
+而模型手里常还留着旧名字：
+
+    模型：edit_artifact("回落测试.html", "v2", "v3")
+    实际：精确命中旧文件 → 改了旧版
+    界面：只展示 "回落测试 (2).html" → **毫无变化**
+
+用户对着没变的文件判断"还是坏的"，模型坚信改好了——两边看的是两个文件。
+修法：解析统一为「同主名优先取最新版本」，并明确回执"你点名的 X 已过期，实际改的是 Y"。
+四个产物工具（inspect/read/edit/editBatch）共用同一个解析函数，别再各写一份。
+
+**11. 编辑后必须推事件，否则界面停留在旧内容。**
+`create_file` 会推 `llm:artifact`，但 `edit_artifact` 原本不推 → 卡片大小是旧值、
+**已打开的预览不重载**（iframe 走 URL 加载，path 没变就不重新请求）。
+修法三处齐全才算完成：主进程推 `updated: true` 事件 → 气泡按 path 就地替换
+→ 预览面板加 `revision` 并放进 iframe 的 key 与读盘依赖。
+
+**12. 探针里 `?? "skip"` 这类兜底会让断言永远 PASS。**
+`check` 只判真值，而 `?? "skip"` 返回非空字符串 → 预览页再空白也报绿。
+另外 `sandbox="allow-scripts"` 的 iframe 是**不透明源**，宿主侧 `contentDocument` 恒为 null；
+`h3preview:` 还是**跨进程 iframe（OOPIF）**，`Page.getFrameTree` 看不到它。
+正解：`Target.getTargets` 找 url 以 `h3preview:` 开头的 target → `attachToTarget(flatten)`
+→ 在该 session 里 `Runtime.evaluate`。拿不到就判失败，不留兜底。
 
 相关：[[agent-prompt-engineering-leverage]]、[[playground-branch-status]]

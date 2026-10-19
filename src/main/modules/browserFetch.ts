@@ -151,6 +151,42 @@ function enqueue<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<
   return task;
 }
 
+/**
+ * Chromium 的 `net::ERR_*` 码 → 用户能理解的一句话。
+ *
+ * 为什么需要（实测，`probe-table-case` 真机跑出来的）：某些失败事件里
+ * **description 是空串**，于是错误文案退化成「浏览器加载失败：（-3）」——
+ * 用户只看到一个数字，既不知道发生了什么，也不知道能不能重试。
+ *
+ * 只收录最常见的十来个；认不出来时退回"错误码 + 通用建议"，
+ * 而不是把空描述原样拼出来（那等于没说）。
+ */
+const NET_ERROR_HINTS: Record<number, string> = {
+  [-2]: "网络请求失败（域名解析或连接被拒）",
+  [-3]: "加载被中断（该站点可能拒绝了自动化访问，或响应不完整）",
+  [-6]: "文件不存在",
+  [-7]: "连接超时",
+  [-20]: "连接被中断",
+  [-21]: "网络连接异常（可能是代理/防火墙）",
+  [-100]: "连接被关闭",
+  [-101]: "连接被重置",
+  [-102]: "服务器无响应",
+  [-105]: "域名解析失败",
+  [-106]: "网络已断开",
+  [-118]: "连接超时",
+  [-137]: "域名解析失败",
+  [-138]: "页面被安全策略拦截"
+};
+
+function describeNetError(code: number, description: string): string {
+  const detail = (description || "").trim();
+  const hint = NET_ERROR_HINTS[code];
+  if (detail && hint) return `${detail}（${hint}，错误码 ${code}）`;
+  if (detail) return `${detail}（错误码 ${code}）`;
+  if (hint) return `${hint}（错误码 ${code}）`;
+  return `页面没能加载（错误码 ${code}）。可以检查地址是否正确、该站点是否需要登录，或稍后重试。`;
+}
+
 async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text", signal?: AbortSignal): Promise<string> {
   const ses = session.fromPartition(PARTITION);
   const win = new BrowserWindow({
@@ -205,8 +241,12 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text",
       // 主框架明明加载好了，却报"浏览器加载失败"（实测 probe-render-subframe 复现）。
       // 注意用 on 而非 once：子框架失败不落定，若用 once 会被第一个子框架事件消耗掉，
       // 之后真·主框架失败就漏判了。done() 里统一 removeListener。
+      //
+      // **description 可能为空**（实测：真实网页里出现「浏览器加载失败：（-3）」）——
+      // 那时用户只看到一个错误码，既不知道原因也不知道能不能重试。
+      // 补一张常见 Chromium net error 码的中文表，并把"description 为空"这个形态兜住。
       const onFail = (_event: unknown, code: number, description: string, _url: string, isMainFrame: boolean) =>
-        isMainFrame ? done(new Error(`浏览器加载失败：${description}（${code}）`)) : undefined;
+        isMainFrame ? done(new Error(`浏览器加载失败：${describeNetError(code, description)}`)) : undefined;
       /**
        * 重定向/后续导航守卫（SSRF 的第二跳）。
        *

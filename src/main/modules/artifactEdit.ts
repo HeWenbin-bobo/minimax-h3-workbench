@@ -74,8 +74,17 @@ function closestLines(text: string, needle: string, limit = 3): Array<{ line: nu
   const scored: Array<{ line: number; text: string; score: number }> = [];
   for (let i = 0; i < lines.length; i += 1) {
     let score = 0;
-    for (const token of tokens) if (lines[i].includes(token)) score += token.length;
-    if (score > 0) scored.push({ line: i + 1, text: lines[i].trim(), score });
+    let firstHitAt = -1;
+    for (const token of tokens) {
+      const at = lines[i].indexOf(token);
+      if (at === -1) continue;
+      score += token.length;
+      if (firstHitAt === -1 || at < firstHitAt) firstHitAt = at;
+    }
+    // **候选行必须围绕命中的词截，不能取行首**（实测复现）：压缩过的产物 HTML
+    // 一行几十万字符，行首 160 字全是 `x`。模型收到"跟它最接近的行是：xxx…"，
+    // 里面根本没有它要找的标识符——提示等于没给，它只能再读一遍再猜一遍。
+    if (score > 0) scored.push({ line: i + 1, text: excerptAround(lines[i], firstHitAt, 240), score });
   }
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, limit).map(({ line, text: body }) => ({ line, text: body }));
@@ -275,6 +284,23 @@ export function findMatchingLines(
     return { matches, total, body: sliceSafe(joined, MAX_READ_CHARS), charCapped: true, lineCapped };
   }
   return { matches, total, body: joined, charCapped: false, lineCapped };
+}
+
+/**
+ * 围绕某个偏移截一段（首尾被省略时加「…」）。
+ *
+ * 用于"最接近的行"提示：压缩过的单行 HTML 有几十万字符，从行首截等于给模型看一屏 `x`。
+ * 必须把**命中的那个词**留在窗口里，提示才有用。
+ */
+function excerptAround(line: string, at: number, max: number): string {
+  const trimmed = line.trim();
+  if (trimmed.length <= max) return trimmed;
+  // trim 会挪动偏移：按 trim 掉的前导空白量修正（否则窗口会整体偏左）。
+  const shift = line.length - line.trimStart().length;
+  const center = Math.max(0, at - shift);
+  const start = Math.max(0, Math.min(center - Math.floor(max / 2), trimmed.length - max));
+  const end = start + max;
+  return `${start > 0 ? "…" : ""}${sliceSafe(trimmed.slice(start, end), max)}${end < trimmed.length ? "…" : ""}`;
 }
 
 /** 单行展示长度上限。命中行取 needle 附近，其余取行首。 */

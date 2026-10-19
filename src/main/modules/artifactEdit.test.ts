@@ -282,6 +282,24 @@ describe("按关键词定位（findMatchingLines）", () => {
     expect(out.body).toBe("");
   });
 
+  it("找不到时的候选行围绕命中的词截断（超长单行也给得出线索）", () => {
+    // 实测复现：一行 18 万字符、标识符在正中间。旧实现把整行原样返回，
+    // 调用方从头截 160 字 → 全是 `x`，提示里看不到模型要找的标识符。
+    const line = "x".repeat(90_000) + "M.identity(); // ok" + "y".repeat(90_000);
+    const out = applyExactEdit(`<script>${line}</script>`, "M.identity(); // 错了", "改");
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.hints?.[0].text).toContain("M.identity");
+      expect(out.hints?.[0].text.length).toBeLessThan(400);
+    }
+  });
+
+  it("候选行不会因为 trim 把窗口挪偏（前导空白很长的行）", () => {
+    const line = " ".repeat(5_000) + "targetSymbol()" + "z".repeat(50_000);
+    const out = applyExactEdit(line, "targetSymbol(1)", "改");
+    if (!out.ok) expect(out.hints?.[0].text).toContain("targetSymbol");
+  });
+
   it("受 limit 限制但 total 仍报真实总数", () => {
     const many = Array.from({ length: 30 }, (_, i) => `hit ${i}`).join(NL);
     const out = findMatchingLines(many, "hit", 5);

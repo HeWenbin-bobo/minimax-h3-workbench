@@ -512,6 +512,34 @@ describe("读回时的字符上限（防超长单行）", () => {
     expect(out.body.length).toBeLessThanOrEqual(MAX_READ_CHARS + 10); // sliceSafe 可能多留几个字符
   });
 
+  // 实测复现：200 行 × 2000 字符的文件，按 60K 上限只装得下 ~30 行，
+  // 而回执标题照旧写"本次显示第 1–200 行"。模型据此以为拿到了 200 行，
+  // 下一次从第 201 行接着读——中间 170 行被**静默跳过**。
+  //
+  // 语义取舍：`to` 取**最后一个完整的行**。被切在半路的那一行算"没读完"，
+  // 下次从 `to + 1` 续读最多重复一行（重叠无害），而按半截行算 `to` 会让最后那段
+  // 被切掉的内容永远拿不到（漏读有害）。宁可重叠，不可跳过。
+  it("字符截断后 to 必须是最后一个**完整**行，不能声称返回了请求的全部行", () => {
+    const lines = Array.from({ length: 200 }, (_, i) => `line${i}:`.padEnd(10, " ") + "x".repeat(1990));
+    const out = sliceWithLineNumbers(lines.join(NL), 1, 200);
+    expect(out.charCapped).toBe(true);
+    expect(out.to).toBeLessThan(200);
+    expect(out.truncated).toBe(true);
+
+    const kept = out.body.split(NL);
+    const lastRendered = kept[kept.length - 1];
+    // 末行一定是被切过的（不完整）——所以它不算"已读到"
+    expect(lastRendered.length).toBeLessThan(2000);
+    const lastRenderedNo = Number(/^\s*(\d+)\|/.exec(lastRendered)?.[1]);
+    expect(out.to).toBe(lastRenderedNo - 1);
+  });
+
+  // 反向自检：没触发字符截断时，范围就是请求的范围（不能被上一处的逻辑改坏）。
+  it("未触发字符截断时 to 等于请求的 endLine", () => {
+    const out = sliceWithLineNumbers("a\nb\nc\nd", 2, 3);
+    expect(out).toMatchObject({ from: 2, to: 3, charCapped: false });
+  });
+
   it("正常文件不触发字符截断", () => {
     const out = sliceWithLineNumbers("a" + NL + "b" + NL + "c");
     expect(out.charCapped).toBe(false);

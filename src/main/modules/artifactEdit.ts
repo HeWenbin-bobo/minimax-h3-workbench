@@ -341,7 +341,23 @@ export function sliceWithLineNumbers(text: string, startLine?: number, endLine?:
   // 字符上限：压缩过的 HTML 可能是"一行几十万字符"，只限行数挡不住。
   if (body.length > MAX_READ_CHARS) {
     // 用 sliceSafe 语义：裸 slice 会切开 emoji 的代理对，留下渲染成 � 的坏字符。
-    return { body: sliceSafe(body, MAX_READ_CHARS), totalLines: total, from, to, truncated: to < total, charCapped: true, reversed };
+    const clipped = sliceSafe(body, MAX_READ_CHARS);
+    // **`to` 必须改成"真正返回到了第几行"**（实测复现）：200 行 × 2000 字符的文件，
+    // 60K 上限只装得下 30 行，而回执标题照旧写"本次显示第 1–200 行"——
+    // 模型据此以为已经拿到 200 行，下一次从第 201 行接着读，中间 170 行被静默跳过。
+    // 数一下截断后还剩几个带行号的完整行：`body` 每行形如 `    42| …`，
+    // 按换行切、丢掉最后一个（很可能是半截），用它的行号作为实际末端。
+    const kept = clipped.split("\n");
+    // 末行可能被切在半路：只保留完整的行（最后一行除非它真的完整，否则也丢掉）。
+    const completeLines = clipped.endsWith("\n") ? kept.filter(Boolean) : kept.slice(0, -1);
+    const lastLineNo = (() => {
+      const lastLine = completeLines[completeLines.length - 1];
+      if (!lastLine) return from - 1;
+      const match = /^\s*(\d+)\|/.exec(lastLine);
+      return match ? Number(match[1]) : to;
+    })();
+    const actualTo = Math.max(from - 1, Math.min(lastLineNo, to));
+    return { body: clipped, totalLines: total, from, to: actualTo, truncated: actualTo < total, charCapped: true, reversed };
   }
   return { body, totalLines: total, from, to, truncated: to < total, charCapped: false, reversed };
 }

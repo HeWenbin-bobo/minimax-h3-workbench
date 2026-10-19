@@ -461,6 +461,9 @@ export function formatProbeReport(result: HtmlProbeResult): string {
     return `自检失败：页面没能加载起来（${reason}）。请检查 HTML 结构是否完整、是否有语法错误，改完重新生成后再自检一次。`;
   }
   const lines: string[] = [`自检结果：页面已在本机 Chromium 中真实运行（标题「${result.title || "无"}」，${result.elementCount} 个元素，可见文本 ${result.textLength} 字）。`];
+  // 整屏接近一种颜色 = 大概率什么都没画出来（清屏成背景色 / 画布尺寸为 0 / 场景被裁掉）。
+  // 这一条必须**先于**"控制台没报错"说出来，否则模型会把"无报错"当成"画面正常"。
+  const flatScreen = Boolean(result.pixel && result.pixel.dominant >= 0.97 && result.elementCount > 1);
   if (result.canvases.length > 0) {
     const described = result.canvases.map((c, i) => {
       // **布局尺寸必须单独报**：缓冲区 800×600、`clientWidth=0` 时画布不占面积，
@@ -468,15 +471,20 @@ export function formatProbeReport(result: HtmlProbeResult): string {
       const layout = c.clientWidth === 0 || c.clientHeight === 0
         ? `**布局尺寸为 0（clientWidth=${c.clientWidth}, clientHeight=${c.clientHeight}）——画布不占面积，屏幕上必然看不见**`
         : `布局 ${c.clientWidth}×${c.clientHeight}`;
-      return `#${i + 1} 缓冲区 ${c.width}×${c.height}，${layout}${c.webgl ? "（WebGL 上下文正常）" : "（未取到 WebGL/2D 上下文）"}`;
+      // 缓冲区停在 HTML 规范的默认值 300×150、而布局大得多 → 脚本多半**没跑到设置绘制分辨率
+      // 那一步就崩了**（先设 width/height 再初始化渲染，是这类页面的常规写法）。
+      // 实测真机：模型自己推断出"画布仍是 300×150，说明 resize() 执行前就崩溃了"，
+      // 但那花了它好几步；这个信号本来就在我们手上。
+      const defaultBuffer = c.width === 300 && c.height === 150 && (c.clientWidth > 400 || c.clientHeight > 300);
+      const bufferHint = defaultBuffer && flatScreen
+        ? "（缓冲区仍是 HTML 默认值 300×150，而布局大得多——脚本多半在设置绘制分辨率之前就中断了）"
+        : "";
+      return `#${i + 1} 缓冲区 ${c.width}×${c.height}${bufferHint}，${layout}${c.webgl ? "（WebGL 上下文正常）" : "（未取到 WebGL/2D 上下文）"}`;
     }).join("，");
     lines.push(`画布：${described}。`);
   } else if (result.textLength === 0) {
     lines.push("页面既没有画布、也没有可见文本——脚本很可能压根没跑起来。");
   }
-  // 整屏接近一种颜色 = 大概率什么都没画出来（清屏成背景色 / 画布尺寸为 0 / 场景被裁掉）。
-  // 这一条必须**先于**"控制台没报错"说出来，否则模型会把"无报错"当成"画面正常"。
-  const flatScreen = result.pixel && result.pixel.dominant >= 0.97 && result.elementCount > 1;
   if (flatScreen) {
     lines.push(`画面采样：整屏约有 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).dominant * 100)}% 是同一种颜色（平均亮度 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).brightness)}）。**这通常意味着页面上什么都没画出来**——画面被某个纯色元素盖满、画布尺寸为 0、或渲染循环根本没跑起来。请检查布局与首帧渲染。`);
   }

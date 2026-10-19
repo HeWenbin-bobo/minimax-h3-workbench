@@ -1088,9 +1088,17 @@ function registerIpc(
           const stamp = info
             ? `（${info.size >= 1024 * 1024 ? `${(info.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(info.size / 1024))}KB`}，修改于 ${new Date(info.mtimeMs).toLocaleTimeString("zh-CN", { hour12: false })}）`
             : "";
-          const header = actualName === safeName
-            ? `本次检查的文件：${actualName}${stamp}。\n\n`
-            : `本次检查的文件：${actualName}${stamp}。\n（你给的「${safeName}」在本会话里不存在，上面是同名的**最新版本**。如果那不是你想验证的那份，请用准确文件名再调用一次。）\n\n`;
+          // 标题必须按**实际成因**措辞（与 read/edit 三处对齐）：
+          // `actualName === safeName` 这个二值判断早就过时了——现在还有"只是没写扩展名"这一种，
+          // 那时 actualName 与 safeName 确实不同，但**不能说成"不存在"**（文件明明在）。
+          const why = found.fellBack === "stale"
+            ? `（你给的「${safeName}」已被更新的版本取代，上面检查的是「${actualName}」。）`
+            : found.fellBack === "missing"
+              ? `（本会话里没有「${safeName}」，上面检查的是同主名的最新版本「${actualName}」。）`
+              : found.fellBack === "ext"
+                ? `（你给的「${safeName}」没带扩展名，已按实际类型检查「${actualName}」。）`
+                : "";
+          const header = `本次检查的文件：${actualName}${stamp}。${why ? `\n${why}` : ""}\n\n`;
           return header + report;
         },
         // read_artifact / edit_artifact：改之前先读，改的时候只改那一处。

@@ -1737,10 +1737,13 @@ function registerIpc(
           const capped = { ...sheet, "!ref": XLSX.utils.encode_range({ s: range.s, e: { r: range.s.r + MAX_ROWS - 1, c: range.e.c } }) };
           return {
             text: XLSX.utils.sheet_to_csv(capped),
+            // **真实总行数也要回给渲染端**（实测矛盾）：只说"预览仅解析前 2000 行"，
+            // 而表格下方的说明按 `text` 算成"共 2000 行"——用户同时看到 5001 与 2000 两个数字。
+            totalRows: rowCount,
             note: `表格共 ${rowCount} 行，预览仅解析前 ${MAX_ROWS} 行；完整内容可在文件夹中打开`
           };
         }
-        return { text: XLSX.utils.sheet_to_csv(sheet) };
+        return { text: XLSX.utils.sheet_to_csv(sheet), totalRows: rowCount };
       } catch (error) {
         // SheetJS 对损坏文件抛的是英文内部错误（实测 "Unsupported ZIP encryption"）。
         // 预览面板会把它原样显示成"读取失败：Unsupported ZIP encryption"，

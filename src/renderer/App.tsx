@@ -2366,6 +2366,9 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
   // 主进程的截断说明（"文件较大，仅显示前 1MB" 等）。**必须与正文分开存**：
   // 表格预览把正文直接喂 `parseCsvRows`，说明拼进去会变成一行假数据。
   const [readNote, setReadNote] = useState<string>();
+  // 表格的**真实总行数**（主进程只回前 2000 行的正文）。表格下方的"共 N 行"
+  // 必须用它，否则用户会同时看到 note 里的"共 5001 行"和表下方的"共 2000 行"（实测矛盾）。
+  const [totalRows, setTotalRows] = useState<number>();
   const [readError, setReadError] = useState<string>();
   // 是否已读完（内容可能是合法的空串）。不区分的话，空文件会永远显示"（正在读取…）"。
   const [loaded, setLoaded] = useState(false);
@@ -2378,6 +2381,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
     setDiskContent(undefined);
     setReadNote(undefined);
     setReadError(undefined);
+    setTotalRows(undefined);
     if (!needsContent) { setLoaded(true); return; }
     let cancelled = false;
     setLoaded(false);
@@ -2385,8 +2389,11 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
       if (cancelled) return;
       // 读取失败必须让人看见（CLAUDE.md「出错必须让人看见」）——否则面板永远停在
       // "（正在读取…）"，看起来像卡住，实际是读文件报错了（xlsx 预览整片失效就是这样被掩盖的）。
-      if (r.data !== undefined) { setDiskContent(r.data.text); setReadNote(r.data.note); }
-      else setReadError(r.message || "读取产物内容失败。");
+      if (r.data !== undefined) {
+        setDiskContent(r.data.text);
+        setReadNote(r.data.note);
+        setTotalRows(r.data.totalRows);
+      } else setReadError(r.message || "读取产物内容失败。");
       setLoaded(true);
     }).catch((e) => { if (!cancelled) { setReadError(describeError(e, "读取产物内容失败。")); setLoaded(true); } });
     return () => { cancelled = true; };
@@ -2475,7 +2482,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
       onLoad={focusFrame}
       title={artifact.name}
     />}
-    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : !loaded ? <p className="pg-preview-doc-empty">（正在读取…）</p> : content ? <><SheetTable csv={content} />{readNote && <p className="pg-preview-doc-empty">{readNote}</p>}</> : <p className="pg-preview-doc-empty">（这个表格没有任何内容）</p>}</div>}
+    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : !loaded ? <p className="pg-preview-doc-empty">（正在读取…）</p> : content ? <><SheetTable csv={content} totalRows={totalRows} />{readNote && <p className="pg-preview-doc-empty">{readNote}</p>}</> : <p className="pg-preview-doc-empty">（这个表格没有任何内容）</p>}</div>}
     {artifact.kind === "doc" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : !loaded ? <p className="pg-preview-doc-empty">（正在读取…）</p> : content ? <>{renderMarkdown(content)}{readNote && <p className="pg-preview-doc-empty">{readNote}</p>}</> : <p className="pg-preview-doc-empty">（这个文档没有任何内容）</p>}</div>}
   </aside>;
 }
@@ -2489,7 +2496,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
  * 超过 `MAX_PREVIEW_ROWS` 只渲染前若干行并明确告知（不静默少给）。 */
 const MAX_PREVIEW_ROWS = 500;
 
-function SheetTable({ csv }: { csv: string }) {
+function SheetTable({ csv, totalRows }: { csv: string; totalRows?: number }) {
   // 解析结果必须记住：拖拽面板宽度时父组件每帧都在 setState，本组件随之重渲染，
   // 而 `parseCsvRows` 是逐字符扫描整段 CSV（预览上限 1MB）——不 memo 的话
   // 拖一次面板会做上百次全量解析，界面明显发涩。
@@ -2498,12 +2505,15 @@ function SheetTable({ csv }: { csv: string }) {
   const [header, ...allBody] = rows;
   const body = allBody.slice(0, MAX_PREVIEW_ROWS);
   const hidden = allBody.length - body.length;
+  // 显示的行数用**文件真实总行数**（主进程只回前 2000 行正文）。
+  // 只看 `allBody.length` 会与上方 note 里的"表格共 5001 行"打架（实测）。
+  const totalForDisplay = totalRows && totalRows > allBody.length ? totalRows : allBody.length;
   return <>
     <table className="pg-sheet-table">
       <thead><tr>{header.map((cell, i) => <th key={i}>{cell}</th>)}</tr></thead>
       <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{cell}</td>)}</tr>)}</tbody>
     </table>
-    {hidden > 0 && <p className="pg-preview-doc-empty">（共 {allBody.length} 行，预览仅显示前 {MAX_PREVIEW_ROWS} 行；完整内容请在文件夹中打开）</p>}
+    {hidden > 0 && <p className="pg-preview-doc-empty">（共 {totalForDisplay} 行，预览仅显示前 {MAX_PREVIEW_ROWS} 行；完整内容请在文件夹中打开）</p>}
   </>;
 }
 

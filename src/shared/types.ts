@@ -256,7 +256,7 @@ export interface WorkbenchApi {
    * 放在 `note` 里。早前把提示拼在 `text` 末尾，表格预览会把它当成**一行数据**
    * 渲染出来（实测：3 行表格变成 4 行，多出一行只有一列的说明文字）。
    */
-  readArtifactText(filePath: string): Promise<ApiResponse<{ text: string; note?: string }>>;
+  readArtifactText(filePath: string): Promise<ApiResponse<{ text: string; note?: string; totalRows?: number }>>;
   /** 会话被彻底删除时清掉它的产物目录（userData/artifacts/<sessionId>/），避免永久占盘。 */
   purgeSessionArtifacts(sessionId: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;

@@ -1681,7 +1681,20 @@ ${tableNote}` : ""}`;
     }
     if ([".txt", ".md", ".json", ".csv", ".srt", ".vtt", ".log"].includes(extension)) {
       if (info.size > 2 * 1024 * 1024) throw new Error("文本附件超过 2MB 上限，请只粘贴相关片段。");
-      const raw = await readFile(filePath, "utf8");
+      // **必须容忍非 UTF-8 编码**（实测）：Windows 记事本、Excel「另存为 CSV」在中文系统上
+      // 默认写 **GBK/GB18030**，按 UTF-8 读会得到一整片 `���Ĳ���`——
+      // 用户看不出原因（文件在自己电脑上明明正常），模型拿到的也是乱码，
+      // 只会答非所问，两边都不知道发生了什么。
+      //
+      // 顺序：先严格 UTF-8（`fatal: true` 会抛而不是静默替换成 U+FFFD），
+      // 失败再按 GB18030 解（它向下兼容 GBK/GB2312，是 Windows 中文环境的实际默认）。
+      const bytes = await readFile(filePath);
+      let raw: string;
+      try {
+        raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        raw = new TextDecoder("gb18030").decode(bytes);
+      }
       // 截断必须**如实上报**：原实现静默 `.slice(0, 100_000)`，用户以为整份文件都发给了模型，
       // 模型也只看到前一段——文件更长时两边都不知道（违反「出错/取舍必须让人看见」）。
       // 同样用 sliceSafe：这段正文会发回模型，不能留孤立代理项。

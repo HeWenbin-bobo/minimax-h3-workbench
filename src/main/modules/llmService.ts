@@ -838,18 +838,29 @@ export async function chatAgent(
 一步定位到命中行及上下文；只有想通读结构时才用 startLine/endLine 分段读。`,
         inputSchema: z.object({
           name: z.string().min(1).describe("产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。"),
-          keyword: z.string().min(1).describe("要定位的字面文本（区分大小写），如报错里出现的标识符、函数名。给了它就不用再分段读全文。").optional(),
+          // **空串 / null 也要收**（实测同类坑第九处）：模型"不用关键词、只想按行读"时
+          // 常显式传 `keyword: ""` 或 `null`，`z.string().min(1).optional()` 会在
+          // `parseToolCall` 阶段拒掉 → 整个调用被**静默跳过**（收不到回执 → 反复重试）。
+          // 这里用 `.nullish()` + 执行侧归一：空值等价于"没给"。
+          keyword: z.string().nullish().describe("要定位的字面文本（区分大小写），如报错里出现的标识符、函数名。给了它就不用再分段读全文。不用时省略或留空。"),
           // **不要 `.int().min(1)`**（实测同类坑第四次）：模型按 0 起算给 `startLine: 0`、
           // 或给个小数时，AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
           // 整个调用被**静默跳过**（收不到回执 → 反复重试 → 步数烧光）。
           // 而 `sliceWithLineNumbers` 本来就会夹紧（0 → 1、小数 → 向下取整、越界 → 文件末尾），
-          // 所以这里只需要 `z.number()`；"1 起算"写进 describe 即可。
-          startLine: z.number().describe("起始行（1 起算，含；越界会被夹紧）。省略则从第 1 行开始。").optional(),
-          endLine: z.number().describe("结束行（含；越界会被夹紧）。省略则读到文件末尾。一次建议不超过 400 行。").optional()
+          // 所以这里只需要"能收 null 的数字"；"1 起算"写进 describe 即可。
+          startLine: z.number().nullish().describe("起始行（1 起算，含；越界会被夹紧）。省略则从第 1 行开始。"),
+          endLine: z.number().nullish().describe("结束行（含；越界会被夹紧）。省略则读到文件末尾。一次建议不超过 400 行。")
         }),
         execute: async (params) => {
           try {
-            return await callbacks.readArtifact(params);
+            // 归一：空串 / null → 不给（"没指定"而不是"指定成空"）。
+            const keyword = typeof params.keyword === "string" && params.keyword.trim() ? params.keyword : undefined;
+            return await callbacks.readArtifact({
+              name: params.name,
+              keyword,
+              startLine: typeof params.startLine === "number" ? params.startLine : undefined,
+              endLine: typeof params.endLine === "number" ? params.endLine : undefined
+            });
           } catch (error) {
             return `读取产物失败：${describeError(error, "未知错误")}。可以先确认文件名（带扩展名）是否与 create_file 生成的一致。`;
           }

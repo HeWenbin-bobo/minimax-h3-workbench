@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { renderMarkdown } from "./markdown";
-import { normalizeStoredSessions, extractArtifact } from "./App";
+import { normalizeStoredSessions, extractArtifact, foldArtifactVersions } from "./App";
 import { PLAN_BLOCK_CLOSE, PLAN_BLOCK_OPEN } from "../shared/planMode";
 
 const render = (text: string) => renderToStaticMarkup(createElement("div", null, renderMarkdown(text)));
@@ -405,5 +405,50 @@ describe("extractArtifact 围栏语言别名", () => {
 
   it("没有围栏的纯文本不产生产物", () => {
     expect(extractArtifact("这是一段普通回答。")).toBeUndefined();
+  });
+});
+
+// 一次请求里模型「写→自检→修→重写」会留下多份同名文件（uniqueArtifactPath 加序号不覆盖）。
+// 默认只展示最新一版，别让用户去读回复猜哪个是最终版。
+describe("产物多版本折叠（foldArtifactVersions）", () => {
+  it("同名文件的 (2)(3) 折成一组，最新的是最后一个", () => {
+    const groups = foldArtifactVersions([
+      { name: "鹈鹕骑自行车_3D.html" },
+      { name: "鹈鹕骑自行车_3D (2).html" },
+      { name: "鹈鹕骑自行车_3D (3).html" }
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].latest.name).toBe("鹈鹕骑自行车_3D (3).html");
+    expect(groups[0].older.map((x) => x.name)).toEqual(["鹈鹕骑自行车_3D.html", "鹈鹕骑自行车_3D (2).html"]);
+  });
+
+  it("不同主名的文件不合并", () => {
+    const groups = foldArtifactVersions([{ name: "报告.md" }, { name: "数据.csv" }]);
+    expect(groups).toHaveLength(2);
+    expect(groups.every((g) => g.older.length === 0)).toBe(true);
+  });
+
+  it("同名但不是序号后缀的算不同文件（中间的括号属于文件名）", () => {
+    const groups = foldArtifactVersions([{ name: "图表 (草稿).html" }, { name: "图表.html" }]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it("只有一个版本时 older 为空（渲染端据此不显示展开按钮）", () => {
+    const groups = foldArtifactVersions([{ name: "单份.html" }]);
+    expect(groups[0].older).toEqual([]);
+    expect(groups[0].latest.name).toBe("单份.html");
+  });
+
+  it("分组顺序按首次出现，卡片位置不因新版本出现而跳动", () => {
+    const groups = foldArtifactVersions([
+      { name: "甲.html" },
+      { name: "乙.md" },
+      { name: "甲 (2).html" }
+    ]);
+    expect(groups.map((g) => g.latest.name)).toEqual(["甲 (2).html", "乙.md"]);
+  });
+
+  it("空列表返回空数组", () => {
+    expect(foldArtifactVersions([])).toEqual([]);
   });
 });

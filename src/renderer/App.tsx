@@ -1983,14 +1983,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
                 // 优先用主进程推来的已落盘产物（元数据，内容在磁盘上）。
                 // 回落到扫描正文围栏：兼容历史消息，以及模型没用工具、直接在回复里写文件内容的老路径。
                 if (msg.role === "assistant" && msg.artifacts?.length) {
-                  return msg.artifacts.map((a, i) => <PgArtifactCard
-                    key={`${msg.id}-art-${i}`}
-                    kind={a.kind}
-                    saved={{ name: a.name, path: a.path, size: a.size, kind: a.kind, content: "" }}
+                  return <PgArtifactList
+                    items={msg.artifacts}
                     sessionId={activeId}
                     onPreview={setPreview}
                     onError={onError}
-                  />);
+                  />;
                 }
                 // 产物三探测（html > 表格 > 文档）：流式未结束先不亮，避免半截内容。
                 const artifact = msg.role === "assistant" && !msg.streaming ? extractArtifact(msg.content) : undefined;
@@ -2146,6 +2144,72 @@ export function extractArtifact(content: string): { kind: ArtifactKind; content:
 }
 
 interface ArtifactInfo { name: string; path: string; size: number; kind: ArtifactKind; content: string }
+
+/**
+ * 同名产物的多个版本折叠成「最新一版 + 旧版本」。
+ *
+ * 为什么会有多版：模型按 `inspect_artifact` 的报错修 bug 时会**整份重写**，
+ * 而 `uniqueArtifactPath`（main.ts）刻意不覆盖同名文件，于是依次落成
+ * `名字.html` → `名字 (2).html` → `名字 (3).html`。一次请求能留下 3–5 张卡片，
+ * 用户得读回复去猜哪张才是最终版——实测真机里模型自己写着
+ * "请用鹈鹕骑自行车_3D (2).html，前面的是废弃初版，可以删掉"。
+ *
+ * 判定"同一份文件的不同版本"只靠命名约定：去掉 ` (n)` 后缀后主名 + 扩展名相同。
+ * 这是 `uniqueArtifactPath` 唯一的产出形状，不做更花哨的相似度猜测
+ * （同名但用户真要两份并存的情况，展开后照旧都在）。
+ *
+ * 返回顺序按各版本**首次出现**的位置，卡片位置不会因后续版本出现而跳动。
+ */
+export function foldArtifactVersions<T extends { name: string }>(items: readonly T[]): Array<{ latest: T; older: T[] }> {
+  // 主名：`鹈鹕 (2).html` → `鹈鹕.html`。只剥末尾的 ` (数字)`，中间的括号是文件名的一部分。
+  const stemOf = (name: string) => name.replace(/ \(\d+\)(?=\.[^.]+$|$)/, "");
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const key = stemOf(item.name);
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(item);
+    else groups.set(key, [item]);
+  }
+  // Map 保持插入顺序 = 首次出现顺序。
+  return Array.from(groups.values()).map((bucket) => ({ latest: bucket[bucket.length - 1], older: bucket.slice(0, -1) }));
+}
+
+/**
+ * 产物卡片列表：每个主名只默认展示**最新一版**，旧版本收在一个小按钮后面。
+ * 只影响展示，磁盘上每一版都还在（用户想比对时可以展开）。
+ */
+function PgArtifactList({ items, sessionId, onPreview, onError }: {
+  items: NonNullable<PlaygroundMessage["artifacts"]>;
+  sessionId: string;
+  onPreview: (artifact: ArtifactInfo) => void;
+  onError: (e: unknown) => void;
+}) {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const groups = foldArtifactVersions(items);
+  return <>{groups.map(({ latest, older }) => {
+    const open = expanded.has(latest.path);
+    const visible = open ? [...older, latest] : [latest];
+    return <div key={latest.path} className="pg-artifact-group">
+      {visible.map((a, i) => <PgArtifactCard
+        key={`${a.path}-${i}`}
+        kind={a.kind}
+        saved={{ name: a.name, path: a.path, size: a.size, kind: a.kind, content: "" }}
+        sessionId={sessionId}
+        onPreview={onPreview}
+        onError={onError}
+      />)}
+      {older.length > 0 && <button
+        className="pg-artifact-versions"
+        title={open ? "只看最新一版" : "展开这次请求留下的所有版本"}
+        onClick={() => setExpanded((all) => {
+          const next = new Set(all);
+          if (open) next.delete(latest.path); else next.add(latest.path);
+          return next;
+        })}
+      >{open ? "收起旧版本" : `另有 ${older.length} 个旧版本`}</button>}
+    </div>;
+  })}</>;
+}
 
 /** 产物文件卡片：图标 + 文件名 + 大小 + 预览/打开文件夹（WorkBuddy 形态）。
  * 两种来源：① 主进程 create_file 推来的**已落盘**元数据（saved 有值，直接可用）；

@@ -488,6 +488,88 @@ describe("chatAgent 工具暴露", () => {
   });
 });
 
+// **本会话最贵的一条教训**：工具 schema 里任何一个"硬校验"，只要模型可能给一个
+// **代码本来就能自动纠正**的值，就会让 AI SDK 在 `parseToolCall` 阶段抛
+// `InvalidToolInputError` → 整个调用被**静默跳过**（toolCall 记进历史但不执行）→
+// 模型收不到回执 → 反复重试同一条 → **20 步预算全烧光**。
+//
+// 本轮用 mock 探针逐个复现并修掉了 10 处：edits.min(2)、edits.max(20)、
+// duration/count 的 min/max/int、url 的 .url()、startLine/endLine 的 .int().min(1)、
+// kind 的 z.enum、status 的 z.enum、oldText 的 .min(1)（单处 + 批量）、
+// keyword 的 .min(1) 与 range 的不可为 null。
+//
+// 这条测试把规律变成可执行断言：**每个工具都必须能吞下自己那句描述里
+// "会被自动纠正/夹紧/补齐"所承诺的输入**。新加工具时它会第一时间变红。
+describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", () => {
+  const options: LlmServiceOptions = { baseUrl: "https://example.com/v1", apiKey: "k", model: "m", systemPrompt: "" };
+  const callbacks = { webSearch: async () => "结果", generateVideo: async () => "已创建" };
+  const messages = [{ role: "user" as const, content: "hi" }];
+
+  async function schemas(): Promise<Record<string, { safeParse: (v: unknown) => { success: boolean; error?: { issues: Array<{ message: string }> } } }>> {
+    streamTextMock.mockImplementation(() => ({
+      textStream: (async function* () { yield "好"; })(),
+      steps: Promise.resolve([]),
+      finishReason: Promise.resolve("stop")
+    }));
+    await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true);
+    const tools = (streamTextMock.mock.calls.at(-1)?.[0] as { tools: Record<string, { inputSchema: unknown }> }).tools;
+    return Object.fromEntries(Object.entries(tools).map(([name, def]) => [name, def.inputSchema as never]));
+  }
+
+  it("read_artifact：空 keyword、null 范围、0 起算行号都能进", async () => {
+    const s = (await schemas()).read_artifact;
+    for (const value of [
+      { name: "a.html", keyword: "" },
+      { name: "a.html", keyword: null },
+      { name: "a.html", startLine: 0 },
+      { name: "a.html", startLine: null, endLine: null },
+      { name: "a.html", startLine: 3.7 }
+    ]) {
+      const parsed = s.safeParse(value);
+      expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
+
+  it("create_file：excel/word 这类别名不能把整轮拒掉", async () => {
+    const s = (await schemas()).create_file;
+    for (const kind of ["excel", "xlsx", "word", "markdown", "网页"]) {
+      const parsed = s.safeParse({ kind, name: "x", content: "y" });
+      expect(parsed.success, `${kind} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
+
+  it("generate_video：越界时长/数量交给代码夹取，不在 schema 拒", async () => {
+    const s = (await schemas()).generate_video;
+    for (const value of [
+      { prompt: "p", duration: 20, count: 9 },
+      { prompt: "p", duration: 6.5, count: 2 }
+    ]) {
+      const parsed = s.safeParse(value);
+      expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
+
+  it("edit_artifact / batch：空 oldText 与 0/超量 edits 都能进工具层", async () => {
+    const tools = await schemas();
+    expect(tools.edit_artifact.safeParse({ name: "a", oldText: "", newText: "x" }).success).toBe(true);
+    expect(tools.edit_artifact_batch.safeParse({ name: "a", edits: [] }).success).toBe(true);
+    expect(tools.edit_artifact_batch.safeParse({
+      name: "a",
+      edits: Array.from({ length: 25 }, () => ({ oldText: "x", newText: "y" }))
+    }).success).toBe(true);
+  });
+
+  it("open_page：不带协议的地址由代码补 https", async () => {
+    expect((await schemas()).open_page.safeParse({ url: "example.com/foo" }).success).toBe(true);
+  });
+
+  it("update_plan：done / in-progress 这类写法在代码里归一", async () => {
+    const s = (await schemas()).update_plan;
+    const parsed = s.safeParse({ plan: [{ step: "a", status: "done" }, { step: "b", status: "in-progress" }] });
+    expect(parsed.success, parsed.error?.issues[0]?.message).toBe(true);
+  });
+});
+
 // 智能体路径端点：AI SDK 固定拼 /chat/completions，但 MiniMax 官方是 /text/chatcompletion_v2。
 // 普通对话早按 resolveChatPath 推导，智能体此前没有 → 同一 baseUrl 下两条路径打到不同端点。
 describe("rewriteChatEndpoint", () => {

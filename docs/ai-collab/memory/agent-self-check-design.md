@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: ffef1031-03ba-4d2c-9783-aeb7f514312a
-  modified: 2026-10-19T08:52:24.188Z
+  modified: 2026-10-19T10:49:18.776Z
 ---
 
 2026-10-19 在 `feature/pelican-exploration-2026-10-19` 分支上为游乐场加了 `inspect_artifact`、
@@ -63,5 +63,20 @@ Electron 隐藏窗口（`show:false`）能 `capturePage()`；纯色页主色占�
 
 → 通用结论：**只设上限而不告知，模型会一直以为还来得及**——拦截必须带"提示面"。
 载体仍必须是 user 消息；且只在最后 1/4 追加，早期刷屏会稀释注意力。
+
+**9. "画面空白"必须再分一步：渲染循环到底有没有在跑。**
+模型连续 5 次改都收到"画面是空的"，但它分不清两种情况，而两者修法完全相反：
+① 循环没启动（初始化提前 return / 抛错被吞）→ 查启动路径；
+② 页面本来就静止（静态图）→ 根本没坏。
+
+做法：画面是纯色时隔 500ms 再截一帧，逐采样点比颜色桶。
+**实测**：rAF 动画页 motion=1.0、只画一次的静态页 motion=0、
+真实崩溃的鹈鹕产物 motion=0（与"初始化第 264 行抛错"一致）。
+只在纯色时多付这一帧，正常页面不受影响。
+
+→ 推论：**给结论时要给出"能区分两种成因"的那一个观测值**，而不是笼统的"是空的"。
+
+**踩坑记录**：改完源码没 `npm run build` 就跑探针，两次结果都是 `motion=undefined`
+——探针加载的是旧 `dist-electron`。CLAUDE.md 记过这条，又犯了一次。
 
 相关：[[agent-prompt-engineering-leverage]]、[[playground-branch-status]]

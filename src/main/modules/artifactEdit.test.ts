@@ -189,3 +189,50 @@ describe("applyExactEdits（批量，原子）", () => {
     if (out.ok) expect(out.text).toBe("const x = final;");
   });
 });
+
+// 真机证据：模型猜错 oldText（缩进差两格）后只收到一句"找不到"，
+// 于是又读 400 行、再猜一次——单轮重复了 4 次，20 步预算全烧在这上面。
+// 失败时给出"最接近的行"，它就能直接照抄准确片段，一轮收敛。
+describe("找不到原文时给出最接近的行", () => {
+  const NL = String.fromCharCode(10);
+  const source = ["function draw() {", "  var M = {};", "  M.identity();", "}"].join(NL);
+
+  it("缩进记错 → not-found，并带上含关键标识符的候选行", () => {
+    const out = applyExactEdit(source, "      M.identity();", "      M.ident();");
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.reason).toBe("not-found");
+      expect(out.hints?.length).toBeGreaterThan(0);
+      // 候选必须指向真实那一行，且内容是原文（模型要照抄它）
+      expect(out.hints?.[0].line).toBe(3);
+      expect(out.hints?.[0].text).toContain("M.identity");
+    }
+  });
+
+  it("候选最多 3 条", () => {
+    const many = ["  M.identity();", "   M.identity();", "    M.identity();", "     M.identity();"].join(NL);
+    // 6 个空格缩进在文件里不存在 → not-found
+    const out = applyExactEdit(many, "      M.identity();", "x");
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect((out.hints ?? []).length).toBeLessThanOrEqual(3);
+  });
+
+  it("没有任何共同片段时不硬凑候选", () => {
+    const out = applyExactEdit("nothing relevant here", "zzz", "x");
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.hints).toEqual([]);
+  });
+
+  it("批量版也会把候选行带出来（第几条 + 候选）", () => {
+    const out = applyExactEdits(source, [
+      { oldText: "var M = {};", newText: "var M = { ok: 1 };" },
+      { oldText: "      M.identity();", newText: "      M.ident();" }
+    ]);
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.index).toBe(1);
+      expect(out.reason).toBe("not-found");
+      expect(out.hints?.[0].text).toContain("M.identity");
+    }
+  });
+});

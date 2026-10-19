@@ -17,7 +17,14 @@
 /** 一次编辑的结果。失败时带足够信息让模型自己修正（不抛异常，让工具层决定怎么措辞）。 */
 export type EditOutcome =
   | { ok: true; text: string; line: number }
-  | { ok: false; reason: "empty-old" | "not-found" | "ambiguous"; count: number; lines: number[] };
+  | {
+      ok: false;
+      reason: "empty-old" | "not-found" | "ambiguous";
+      count: number;
+      lines: number[];
+      /** `not-found` 时给出的"最接近的行"（行号 + 原文），让模型能直接抄准确片段。 */
+      hints?: Array<{ line: number; text: string }>;
+    };
 
 /** 1 起算的行号。用于把"命中多处"翻译成模型能直接用的坐标。 */
 function lineOf(text: string, index: number): number {
@@ -44,6 +51,33 @@ function occurrences(haystack: string, needle: string): number[] {
 /** 行尾归一：Windows 上模型给的 oldText 可能是 `\r\n`，而文件里是 `\n`。 */
 function normalizeEol(text: string): string {
   return text.replace(/\r\n/g, "\n");
+}
+
+/**
+ * 找不到原文时，挑几条**最接近的行**给模型看。
+ *
+ * 为什么需要（实测真机）：模型猜错 oldText（缩进差一点、少个分号）时只收到一句"找不到"，
+ * 它只能再读一次 400 行、再猜一次——单轮里重复了 4 次，20 步预算就这样烧光。
+ * 给出候选行，它就能直接照抄准确片段，一轮收敛。
+ *
+ * 做法：从 oldText 里取最长的几个"有辨识度片段"（标识符/字符串），
+ * 找包含它们的行；按命中长度降序取前 3 条。找不到任何线索就返回空数组。
+ */
+function closestLines(text: string, needle: string, limit = 3): Array<{ line: number; text: string }> {
+  // 取 oldText 里较长的词（标识符、函数名通常最有辨识度），过短的词噪声太大。
+  const tokens = (needle.match(/[A-Za-z_$][\w$.]{3,}|[^\s'"`]{6,}/g) ?? [])
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 4);
+  if (tokens.length === 0) return [];
+  const lines = text.split("\n");
+  const scored: Array<{ line: number; text: string; score: number }> = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    let score = 0;
+    for (const token of tokens) if (lines[i].includes(token)) score += token.length;
+    if (score > 0) scored.push({ line: i + 1, text: lines[i].trim(), score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map(({ line, text: body }) => ({ line, text: body }));
 }
 
 /**
@@ -85,7 +119,9 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
   if (hits.length > 1) {
     return { ok: false, reason: "ambiguous", count: hits.length, lines: hits.map((at) => lineOf(normalizedText, at)) };
   }
-  return { ok: false, reason: "not-found", count: 0, lines: [] };
+  // 找不到时给出**最接近的几行**：只回一句"找不到"，模型只能再读一次文件、再猜一次
+  // （真机上它这样重复了 4 次，20 步预算全烧在这上面）。
+  return { ok: false, reason: "not-found", count: 0, lines: [], hints: closestLines(normalizedText, normalizedNeedle) };
 }
 
 /**
@@ -103,14 +139,24 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
  */
 export type BatchEditOutcome =
   | { ok: true; text: string; lines: number[] }
-  | { ok: false; index: number; reason: "empty-old" | "not-found" | "ambiguous"; count: number; lines: number[] };
+  | {
+      ok: false;
+      index: number;
+      reason: "empty-old" | "not-found" | "ambiguous";
+      count: number;
+      lines: number[];
+      /** `not-found` 时附带的"最接近的行"，让模型直接照抄而不是反复重读。 */
+      hints?: Array<{ line: number; text: string }>;
+    };
 
 export function applyExactEdits(text: string, edits: readonly { oldText: string; newText: string }[]): BatchEditOutcome {
   let current = text;
   const lines: number[] = [];
   for (let index = 0; index < edits.length; index += 1) {
     const outcome = applyExactEdit(current, edits[index].oldText, edits[index].newText);
-    if (!outcome.ok) return { ok: false, index, reason: outcome.reason, count: outcome.count, lines: outcome.lines };
+    // 必须把 hints 一并转发：漏了它，批量版就退化成"只说找不到"，
+    // 模型照样得反复重读（单测「批量版也会把候选行带出来」锁住这一点）。
+    if (!outcome.ok) return { ok: false, index, reason: outcome.reason, count: outcome.count, lines: outcome.lines, hints: outcome.hints };
     current = outcome.text;
     lines.push(outcome.line);
   }

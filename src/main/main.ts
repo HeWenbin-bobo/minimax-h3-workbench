@@ -1107,7 +1107,12 @@ function registerIpc(
               // 失败要说清**为什么**、**在哪**，并给下一步动作——只说"失败"模型会盲目重试。
               if (outcome.reason === "empty-old") throw new Error("oldText 不能为空。");
               if (outcome.reason === "not-found") {
-                throw new Error("在文件里找不到 oldText。内容必须逐字符一致（含缩进与空格）——请先用 read_artifact 读回原文，复制准确的片段再试。");
+                // 附上**最接近的几行**：只说"找不到"，模型只能再读一次再猜一次
+                // （真机上它这样重复了 4 次，20 步预算全烧在这上面）。
+                const hint = (outcome.hints ?? []).length > 0
+                  ? `\n文件里跟它最接近的行是：\n${outcome.hints!.map((h) => `  第 ${h.line} 行：${sliceSafe(h.text, 160)}`).join("\n")}\n请直接照抄其中合适的片段（含缩进）作为 oldText。`
+                  : "";
+                throw new Error(`在文件里找不到 oldText（内容必须逐字符一致，含缩进与空格）。${hint}`);
               }
               const where = outcome.lines.slice(0, 6).join("、");
               throw new Error(`oldText 在文件里出现了 ${outcome.count} 次（第 ${where} 行）。为了不改错位置，我拒绝执行。请把 oldText 连同上下各一行一起贴进去，让它只匹配一处。`);
@@ -1138,7 +1143,11 @@ function registerIpc(
               const nth = `${outcome.index + 1}/${params.edits.length}`;
               if (outcome.reason === "empty-old") throw new Error(`第 ${nth} 条修改的 oldText 为空（整批未写入）。`);
               if (outcome.reason === "not-found") {
-                throw new Error(`第 ${nth} 条修改在文件里找不到原文（整批未写入，文件没有任何改动）。内容必须逐字符一致（含缩进）——请先用 read_artifact 读回原文核对，再重试整批。`);
+                // 与单处编辑同理：附带最接近的行，避免模型反复重读整个文件。
+                const hint = (outcome.hints ?? []).length > 0
+                  ? `\n文件里跟它最接近的行是：\n${outcome.hints!.map((h) => `  第 ${h.line} 行：${sliceSafe(h.text, 160)}`).join("\n")}\n请照抄其中合适的片段（含缩进）作为该条 oldText，然后重试整批。`
+                  : "";
+                throw new Error(`第 ${nth} 条修改在文件里找不到原文（整批未写入，文件没有任何改动）。内容必须逐字符一致（含缩进）。${hint}`);
               }
               const where = outcome.lines.slice(0, 6).join("、");
               throw new Error(`第 ${nth} 条修改的 oldText 出现了 ${outcome.count} 次（第 ${where} 行），无法确定改哪一处（整批未写入）。请把那条 oldText 连同上下各一行一起贴进去，让它在文件里只匹配一处。`);

@@ -488,16 +488,18 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
     }
     case "read_artifact": {
       // 只说"读了多少行"：正文是给模型看的，贴进步骤条会把气泡撑爆。
+      // **不再重复动词**：渲染端已经拼了 `✓ 读取文件完成（…）`，
+      // 摘要再写"读取了文件"就成了"读取文件完成（读取了文件（共 2118 行））"（真机看到的）。
       const range = /共\s*(\d+)\s*行/.exec(output)?.[1];
-      return range ? `读取了文件（共 ${range} 行）` : "已读取文件";
+      return range ? `共 ${range} 行` : "完成";
     }
     case "edit_artifact": {
       const line = /第\s*(\d+)\s*行/.exec(output)?.[1];
-      return line ? `已修改（第 ${line} 行）` : "已修改文件";
+      return line ? `第 ${line} 行` : "完成";
     }
     case "edit_artifact_batch": {
       const count = /已应用\s*(\d+)\s*处修改/.exec(output)?.[1];
-      return count ? `已批量修改 ${count} 处` : "已批量修改";
+      return count ? `${count} 处` : "完成";
     }
     case "inspect_artifact": {
       if (/^自检失败/.test(output)) return "自检失败（页面没能加载）";

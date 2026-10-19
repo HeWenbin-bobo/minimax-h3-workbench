@@ -396,6 +396,41 @@ export function probeHtmlArtifact(url: string, timeoutMs = 20_000, signal?: Abor
   return enqueue(() => probeOnce(url, timeoutMs, signal), signal);
 }
 
+/**
+ * 给一个 Promise 套上**硬截止**。
+ *
+ * 为什么必须有（实测，探针 `_scratch/probe-probe-hang.cjs`）：`probeOnce` 只给
+ * "等 did-finish-load" 设了超时；**之后的两步没有**——
+ * `executeJavaScript(SNAPSHOT_SCRIPT)` 与 `capturePage()` 都依赖页面主线程。
+ * 模型写的页面里只要有一个同步死循环（`while(true)`、着色器死等、无限递归前的巨大循环），
+ * 主线程就永远不回来 → 这两个 Promise **永不落定** → 自检永久挂住。
+ *
+ * 更糟的是 `renderHtml` / `renderPageText` / `probeHtmlArtifact` **共用同一个串行队列**，
+ * 一次挂住会把后面的搜索、open_page 全部拖死（用户看到的是"打开网页一直转圈"）。
+ * 实测：`probeHtmlArtifact(url, 3_000)` 在 15 秒后仍未返回。
+ *
+ * @returns `{ ok: true, value }` 或 `{ ok: false }`（超时/异常都算失败，调用方决定措辞）
+ */
+function deadline<T>(promise: Promise<T>, ms: number): Promise<{ ok: true; value: T } | { ok: false }> {
+  // **必须提前挂一个吞异常的处理器**：超时后窗口会被销毁，那时这个 Promise 会以
+  // "Object has been destroyed" 之类的错误 reject —— 没人接就是未处理拒绝。
+  const guarded = promise.then((value) => ({ ok: true as const, value }), () => ({ ok: false as const }));
+  const timer = new Promise<{ ok: false }>((resolve) => setTimeout(() => resolve({ ok: false }), ms));
+  return Promise.race([guarded, timer]);
+}
+
+/** 取快照/截图的硬截止。给足正常页面的余量（1.2s 静置 + 采样通常 <200ms）。 */
+const SAMPLE_DEADLINE_MS = 8_000;
+
+/**
+ * 「主线程被卡死」的日志前缀。
+ *
+ * **必须能被 `formatProbeReport` 识别成错误**（它以行首"错误"/"警告"区分）：
+ * 不带前缀会被归进「运行时警告（没有 error，只有 warning）」，
+ * 还会附一句「不必为了它们重写页面」——而真实情况是页面已经卡死，必须改。
+ */
+const MAIN_THREAD_HUNG_MARKER = "错误（主线程）";
+
 async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): Promise<HtmlProbeResult> {
   const win = new BrowserWindow({
     show: false,
@@ -449,18 +484,37 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
     }
     // 等首帧：WebGL 页面在 load 时往往还没建好上下文，立刻采样会得到"没有画布"的假结论。
     await new Promise((resolve) => setTimeout(resolve, PROBE_SETTLE_MS));
-    const snapshot = (await win.webContents.executeJavaScript(SNAPSHOT_SCRIPT, true)) as {
-      title: string; textLength: number; elementCount: number;
-      canvases: Array<{ width: number; height: number; clientWidth: number; clientHeight: number; context: "webgl" | "2d" | "none" }>;
-    };
+    // **取快照必须带硬截止**：页面主线程卡死（同步死循环）时 `executeJavaScript`
+    // 永不返回，会把整个串行队列一起拖死（见 `deadline` 的注释与探针）。
+    const snapshotResult = await deadline(
+      win.webContents.executeJavaScript(SNAPSHOT_SCRIPT, true) as Promise<{
+        title: string; textLength: number; elementCount: number;
+        canvases: Array<{ width: number; height: number; clientWidth: number; clientHeight: number; context: "webgl" | "2d" | "none" }>;
+      }>,
+      SAMPLE_DEADLINE_MS
+    );
+    if (!snapshotResult.ok) {
+      // **要如实说"页面卡住了"**：这不是"没加载起来"，也不是"没画出来"——
+      // 而是脚本把主线程占死了。两者的修法完全不同（后者查布局/渲染，前者查死循环）。
+      //
+      // **必须带「错误：」前缀**（实测）：`formatProbeReport` 按行首区分错误与警告，
+      // 不带前缀会被归成「运行时警告（没有 error，只有 warning）」并附一句
+      // 「不必为了它们重写页面」——与真实情况（页面已经卡死）恰好相反。
+      logs.unshift(`${MAIN_THREAD_HUNG_MARKER}：页面脚本把主线程卡住了（同步死循环或长时间计算），无法取到页面状态。请检查 while/for 循环与递归是否存在永不结束的分支。`);
+      return { loaded: true, title: "", consoleErrors: logs, consoleErrorTotal: logTotal, canvases: [], textLength: 0, elementCount: 0 };
+    }
+    const snapshot = snapshotResult.value;
     // 截图采样：失败不能连坐整次自检（拿不到只是少一条证据，不该让工具报错）。
-    const pixel = await samplePixels(win);
+    // 同样要带截止——`capturePage` 也依赖页面主线程。
+    const pixelResult = await deadline(samplePixels(win), SAMPLE_DEADLINE_MS);
+    const pixel = pixelResult.ok ? pixelResult.value : undefined;
     // 两帧比对：空白 + 零变化 ≈ 渲染循环压根没转（与"本来就是静止画面"区分开）。
     // 只在**画面是纯色**时多付这一帧的代价——正常页面不需要这条证据。
     let motion: number | undefined;
     if (pixel && pixel.dominant >= 0.97) {
       await new Promise((resolve) => setTimeout(resolve, MOTION_GAP_MS));
-      motion = await sampleMotion(win, pixel);
+      const motionResult = await deadline(sampleMotion(win, pixel), SAMPLE_DEADLINE_MS);
+      motion = motionResult.ok ? motionResult.value : undefined;
     }
     return {
       loaded: true, consoleErrors: logs, consoleErrorTotal: logTotal, ...snapshot,

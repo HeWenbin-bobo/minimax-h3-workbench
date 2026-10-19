@@ -1171,7 +1171,9 @@ function registerIpc(
             ? `（你点名的「${safeName}」已被更新的版本取代，实际读的是「${found.name}」）\n`
             : found.fellBack === "missing"
               ? `（本会话里没有「${safeName}」，已读同主名的最新版本「${found.name}」）\n`
-              : "";
+              : found.fellBack === "ext"
+                ? `（你写的「${safeName}」没带扩展名，已按实际类型读「${found.name}」）\n`
+                : "";
           return `${nameNote}文件：${found.name}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}`;
         }),
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
@@ -1180,13 +1182,15 @@ function registerIpc(
           const found = await resolveArtifactForTool(dir, safeName);
           if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
           const resolved = found.path;
-          // 下落必须说出来，且**分清两种成因**：名字不存在 vs 名字存在但已过期。
+          // 下落必须说出来，且**分清成因**：名字不存在 / 已过期 / 只是没写扩展名。
           // 不说的话模型以为改的就是自己点的那份（界面上同名只展示最新版）。
           const fellBackNote = found.fellBack === "stale"
             ? `（你点名的「${safeName}」已被更新的版本取代，实际改的是「${found.name}」）`
             : found.fellBack === "missing"
               ? `（本会话里没有「${safeName}」，已改同主名的最新版本「${found.name}」）`
-              : "";
+              : found.fellBack === "ext"
+                ? `（你写的「${safeName}」没带扩展名，已按实际类型改「${found.name}」）`
+                : "";
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
           // 读改写在同一个串行队列里：AI SDK 会在一个 step 里并行执行多个 tool call，
           // 两个 edit 同时读同一份文件时后写的会覆盖前一个改动（与 create_file 同名覆盖同类）。
@@ -1240,7 +1244,9 @@ function registerIpc(
             ? `（你点名的「${safeName}」已被更新的版本取代，实际改的是「${found.name}」）`
             : found.fellBack === "missing"
               ? `（本会话里没有「${safeName}」，已改同主名的最新版本「${found.name}」）`
-              : "";
+              : found.fellBack === "ext"
+                ? `（你写的「${safeName}」没带扩展名，已按实际类型改「${found.name}」）`
+                : "";
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
           return artifactWriteQueue.run(async (): Promise<string> => {
             const before = await readFile(resolved, "utf8");
@@ -1795,16 +1801,18 @@ async function uniqueArtifactPath(dir: string, fileName: string): Promise<string
  * 用户对着没变的文件判断"还是坏的"，模型坚信自己改好了——两边看的是两个文件。
  * 所以只要同主名存在更新的版本，就操作那一份，它才是界面上展示给用户的那份。
  *
- * `fellBack` 让调用方明确告知模型实际发生了什么，且**必须区分两种成因**：
+ * `fellBack` 让调用方明确告知模型实际发生了什么，且**必须区分三种成因**：
  * - `"missing"`：名字根本不存在（模型记错了文件名）；
- * - `"stale"`：名字存在，但同主名有更新的版本（模型拿着旧名字）。
- * 这两种给模型的建议完全不同：前者该让它核对文件名，后者该告诉它"那份已过期"。
- * 混成一句"不存在"会误导——旧名字明明存在，文件也真改动了，模型只会更困惑。
+ * - `"stale"`：名字存在，但同主名有更新的版本（模型拿着旧名字）；
+ * - `"ext"`：名字没写扩展名，补全后才找到（`科技新闻` → `科技新闻.html`）。
+ * 三者的建议完全不同：前者该核对文件名、中者该说"那份已过期"、
+ * 后者只需告诉它"我给你补了扩展名"，**不能**说成"不存在"——
+ * 模型点名的那份明明就在，说"不存在"只会让它去重新生成一份重复产物。
  */
 async function resolveArtifactForTool(
   dir: string,
   requestedName: string
-): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" } | undefined> {
+): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" | "ext" } | undefined> {
   // **不带扩展名也要能解析**（实测契约不一致）：`create_file` 的参数说明是
   // "文件名，不含扩展名（如'科技新闻'）"，而 read/edit 的说明是"带扩展名"。
   // 模型按前者的写法调用后者时（read_artifact("科技新闻")），精确匹配与同主名回落
@@ -1822,7 +1830,10 @@ async function resolveArtifactForTool(
       if (!staleMatch) staleMatch = { name: latest.name, path: latest.path };
       continue;
     }
-    if (exact) return { name: candidate, path: exact, fellBack: candidate === requestedName ? false : "missing" };
+    if (exact) {
+      // 命中的是补全后的候选 → 报 "ext"，不要说成"名字不存在"。
+      return { name: candidate, path: exact, fellBack: candidate === requestedName ? false : "ext" };
+    }
   }
   // 只有在**没有任何精确命中**时才回落到"同主名最新版"。
   if (staleMatch) return { ...staleMatch, fellBack: "stale" };

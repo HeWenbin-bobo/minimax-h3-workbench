@@ -903,7 +903,8 @@ export async function chatAgent(
 
 何时不用：要改的地方超过全文一半、或要整体重构时，重新 create_file 一次写完整更省事。
 
-改完建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`,
+改完如果改的是 **html 产物**，建议立刻 inspect_artifact 自检一次，确认没有引入新报错；
+md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifact 复核即可。`,
         inputSchema: z.object({
           name: z.string().min(1).describe("要修改的产物文件名，带扩展名。必须是本会话里已存在的文件。"),
           oldText: z.string().min(1).describe("被替换的原文，必须与文件中逐字符一致且全文件唯一。建议带上上下各一行以保证唯一。"),

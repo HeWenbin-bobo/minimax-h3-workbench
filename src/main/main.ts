@@ -1061,14 +1061,10 @@ function registerIpc(
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
           if (!/\.html?$/i.test(safeName)) throw new Error("只能自检 html 产物（csv/md 没有可运行的脚本）。");
-          let resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
-          let actualName = safeName;
-          if (!resolved) {
-            const fallback = await latestSiblingArtifact(dir, safeName);
-            if (!fallback) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
-            resolved = fallback.path;
-            actualName = fallback.name;
-          }
+          const found = await resolveArtifactForTool(dir, safeName);
+          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          const resolved = found.path;
+          const actualName = found.name;
           // 与渲染端预览面板拼的是同一个 URL 形状：同一协议、同一 CSP。
           const url = `h3preview://artifact/?path=${encodeURIComponent(resolved)}`;
           const report = await formatProbeReport(await probeHtmlArtifact(url, 20_000, controller.signal));
@@ -1094,8 +1090,9 @@ function registerIpc(
         readArtifact: async (params: { name: string; startLine?: number; endLine?: number; keyword?: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
-          const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
-          if (!resolved) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          const found = await resolveArtifactForTool(dir, safeName);
+          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          const resolved = found.path;
           // xlsx 是二进制，但**不能因此拒绝**（实测真机，表格案例）：模型好不容易
           // 生成出 xlsx，却完全无法核验内容——`read_artifact` 抛"二进制"、
           // `inspect_artifact` 又只收 html，于是"文件已生成"对它来说是个从未看过的黑盒。
@@ -1135,8 +1132,12 @@ function registerIpc(
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
-          const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
-          if (!resolved) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          const found = await resolveArtifactForTool(dir, safeName);
+          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          const resolved = found.path;
+          // 下落必须说出来：模型点名的是旧名字，实际改的是最新版——
+          // 不说的话它以为改的就是自己点的那份（界面上同名只展示最新版）。
+          const fellBackNote = found.fellBack ? `（你点名的「${safeName}」不存在，实际改的是最新版本「${found.name}」）` : "";
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
           // 读改写在同一个串行队列里：AI SDK 会在一个 step 里并行执行多个 tool call，
           // 两个 edit 同时读同一份文件时后写的会覆盖前一个改动（与 create_file 同名覆盖同类）。
@@ -1165,7 +1166,7 @@ function registerIpc(
             // 于是卡片上的大小停在旧值，已打开的预览面板也不会重载——
             // 用户对着旧画面判断"还是坏的"，模型却说改好了。
             notifyArtifactUpdated(resolved, safeName, after.size);
-            return `已修改 ${safeName}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
+            return `已修改 ${safeName}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）${fellBackNote}。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
           });
         },
         // 批量编辑：一次调用应用多处修改，**全部成功才写盘**。
@@ -1176,8 +1177,10 @@ function registerIpc(
         editArtifactBatch: async (params: { name: string; edits: Array<{ oldText: string; newText: string }> }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
-          const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
-          if (!resolved) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          const found = await resolveArtifactForTool(dir, safeName);
+          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          const resolved = found.path;
+          const fellBackNote = found.fellBack ? `（你点名的「${safeName}」不存在，实际改的是最新版本「${found.name}」）` : "";
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
           return artifactWriteQueue.run(async (): Promise<string> => {
             const before = await readFile(resolved, "utf8");
@@ -1201,7 +1204,7 @@ function registerIpc(
             const totalLines = outcome.text.split("\n").length;
             const at = outcome.lines.join("、");
             notifyArtifactUpdated(resolved, safeName, after.size);
-            return `已应用 ${params.edits.length} 处修改（第 ${at} 行；文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
+            return `已应用 ${params.edits.length} 处修改（第 ${at} 行；文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）${fellBackNote}。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
           });
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。
@@ -1702,6 +1705,38 @@ async function uniqueArtifactPath(dir: string, fileName: string): Promise<string
     }
   }
   return path.join(dir, `${stem} (${Date.now()})${ext}`);
+}
+
+/**
+ * 四个产物工具（inspect / read / edit / editBatch）共用的**文件名解析**。
+ *
+ * 规则：**同一主名下永远操作最新版本**（与界面折叠规则保持一致）。
+ *
+ * 为什么不能"精确命中优先"（实测真机 + 探针 probe-name-fallback）：
+ * 模型修完 bug 会重新 `create_file` 同名文件，落成 `名字 (2).html`；
+ * 而界面把同名多版本**折叠成只显示最新一版**。模型手里往往还留着旧名字：
+ *
+ *     模型：edit_artifact("回落测试.html", "v2", "v3")
+ *     实际：精确命中旧文件 → 改了旧版
+ *     界面：同名折叠只显示 "回落测试 (2).html" → **毫无变化**
+ *
+ * 用户对着没变的文件判断"还是坏的"，模型坚信自己改好了——两边看的是两个文件。
+ * 所以只要同主名存在更新的版本，就操作那一份，它才是界面上展示给用户的那份。
+ *
+ * `fellBack` 让调用方明确告知模型"你点名的 X 已过期，实际操作的是 Y"。
+ */
+async function resolveArtifactForTool(
+  dir: string,
+  requestedName: string
+): Promise<{ name: string; path: string; fellBack: boolean } | undefined> {
+  const exact = await resolveWithinRoot(dir, path.join(dir, requestedName));
+  const latest = await latestSiblingArtifact(dir, requestedName);
+  // 最新版优先于精确命中：改旧版等于改给幽灵看（界面根本不展示它）。
+  if (latest && (!exact || latest.path !== exact)) {
+    return { name: latest.name, path: latest.path, fellBack: true };
+  }
+  if (exact) return { name: requestedName, path: exact, fellBack: false };
+  return undefined;
 }
 
 /**

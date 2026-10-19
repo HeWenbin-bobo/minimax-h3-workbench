@@ -522,7 +522,10 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       // "控制台没有 error/warning，但…屏幕是空的"，用"没有任何 error/warning"匹配会漏掉，
       // 于是落进兜底的「自检完成」——把"什么都没画出来"说成平平无奇的完成（真机踩到）。
       if (/什么都没画出来/.test(output)) return "自检发现画面是空的";
-      const errors = /运行时报错（共\s*(\d+)\s*条/.exec(output)?.[1];
+      // **不能写死"（共 N 条"**：报告在被截断时改成了"（去重后共 40 条，下面只列出前 12 条"，
+      // 正则一收紧就掉进兜底的「自检完成」——把 40 条报错说成平平无奇的完成
+      // （本会话里刚因为改写报告文案踩到，摘要倒退了还没人发现）。
+      const errors = /运行时报错（[^）]*?共\s*(\d+)\s*条/.exec(output)?.[1];
       if (errors) return `自检发现 ${errors} 条报错`;
       return /没有任何 error\/warning/.test(output) ? "自检通过，无报错" : "自检完成";
     }

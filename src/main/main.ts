@@ -1228,9 +1228,15 @@ function registerIpc(
               ? `\n（这一段总长超限，已按 ${MAX_READ_CHARS} 字符截断。**这个文件整个就是一行**（压缩过的 HTML 常见），所以 startLine/endLine 帮不上忙——要定位具体内容，用 keyword；要改它，直接用你读到的这一小段作为 oldText。）`
               : `\n（这一段总长超限，已按 ${MAX_READ_CHARS} 字符截断——单行很长的文件常见。请用 keyword 精确定位，或缩小 startLine/endLine 范围。）`
             : "";
+          // **范围写反要明说**：`endLine < startLine` 会被夹成一行，而下面的 `more`
+          // 会说"还有 N 行没显示"——那 N 行其实在范围**之前**。
+          // 模型据此以为自己没读到结尾，会反复换范围重读（实测 8–3 → 一行 + “还有 2 行没显示”）。
+          const reversedNote = slice.reversed
+            ? `\n（注意：你给的 startLine=${params.startLine} 大于 endLine=${params.endLine}，范围是反的。已按起始行显示一行。要看这一段，把两个数字对调；要从某行读到结尾，只给 startLine。）`
+            : "";
           // **标题必须用"实际读到的那个文件"**：`nameNote` 已在上方（keyword 分支之前）
           // 算好——那里提前返回，放这里就看不到回落说明了。
-          return `${nameLead}文件：${found.name}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}`;
+          return `${nameLead}文件：${found.name}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}${reversedNote}`;
         }),
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));

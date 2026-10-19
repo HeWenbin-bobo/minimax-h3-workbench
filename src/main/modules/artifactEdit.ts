@@ -282,12 +282,16 @@ export const MAX_READ_CHARS = 60_000;
  * @param startLine 1 起算，缺省 1
  * @param endLine   含端点，缺省到 startLine + MAX_READ_LINES - 1
  */
-export function sliceWithLineNumbers(text: string, startLine?: number, endLine?: number): { body: string; totalLines: number; from: number; to: number; truncated: boolean; charCapped: boolean } {
+export function sliceWithLineNumbers(text: string, startLine?: number, endLine?: number): { body: string; totalLines: number; from: number; to: number; truncated: boolean; charCapped: boolean; reversed: boolean } {
   const lines = text.split("\n");
   const total = lines.length;
   const from = Math.max(1, Math.min(Math.floor(startLine ?? 1) || 1, total));
   // 有显式 endLine 时尊重它（但也夹到文件末尾）；没给就按默认上限截断。
   const requested = endLine === undefined ? from + MAX_READ_LINES - 1 : Math.floor(endLine) || total;
+  // **范围写反**（endLine < startLine）要如实标出：夹紧后只会返回一行，
+  // 而 `truncated` 分会说"还有 N 行没显示"——那 N 行其实在范围**之前**。
+  // 模型据此会以为自己没读到文件结尾，于是反复换范围重读（实测：8–3 回一行 + "还有 2 行没显示"）。
+  const reversed = endLine !== undefined && Number.isFinite(Math.floor(endLine)) && Math.floor(endLine) < from;
   const to = Math.max(from, Math.min(requested, total));
   const body = lines
     .slice(from - 1, to)
@@ -296,9 +300,9 @@ export function sliceWithLineNumbers(text: string, startLine?: number, endLine?:
   // 字符上限：压缩过的 HTML 可能是"一行几十万字符"，只限行数挡不住。
   if (body.length > MAX_READ_CHARS) {
     // 用 sliceSafe 语义：裸 slice 会切开 emoji 的代理对，留下渲染成 � 的坏字符。
-    return { body: sliceSafe(body, MAX_READ_CHARS), totalLines: total, from, to, truncated: to < total, charCapped: true };
+    return { body: sliceSafe(body, MAX_READ_CHARS), totalLines: total, from, to, truncated: to < total, charCapped: true, reversed };
   }
-  return { body, totalLines: total, from, to, truncated: to < total, charCapped: false };
+  return { body, totalLines: total, from, to, truncated: to < total, charCapped: false, reversed };
 }
 
 /**

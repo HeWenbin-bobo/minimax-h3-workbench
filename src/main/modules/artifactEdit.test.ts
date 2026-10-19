@@ -154,6 +154,24 @@ describe("sliceWithLineNumbers", () => {
     const out = sliceWithLineNumbers("a\nb", 100, undefined);
     expect(out).toMatchObject({ from: 2, to: 2 });
   });
+
+  // 实测：endLine < startLine（范围写反）夹成一行，而调用方的 `truncated` 分支
+  // 会说"还有 N 行没显示"——那 N 行其实在范围**之前**。
+  // 模型据此以为自己没读到结尾，会反复换范围重读。
+  it("范围写反时标出 reversed（调用方据此解释，而不是说'还有 N 行没显示'）", () => {
+    const text = Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join("\n");
+    const out = sliceWithLineNumbers(text, 8, 3);
+    expect(out.reversed).toBe(true);
+    expect(out.from).toBe(8);
+    expect(out.to).toBe(8);
+  });
+
+  it("正常范围与不传 endLine 都不标 reversed", () => {
+    const text = Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join("\n");
+    expect(sliceWithLineNumbers(text, 3, 8).reversed).toBe(false);
+    expect(sliceWithLineNumbers(text, 5).reversed).toBe(false);
+    expect(sliceWithLineNumbers(text, 5, 5).reversed).toBe(false);
+  });
 });
 
 // 实测真机踩到：模型不带范围调用 read_artifact，拿到 1651 行全文，紧接着又读一遍。

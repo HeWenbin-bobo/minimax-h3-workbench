@@ -1378,6 +1378,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       inspect_artifact: "自检页面",
       read_artifact: "读取文件",
       edit_artifact: "修改文件",
+      edit_artifact_batch: "批量修改文件",
       update_plan: "更新步骤清单",
       request_user_input: "向你提问"
     };
@@ -1405,6 +1406,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
                 : event.tool === "inspect_artifact" ? `→ 正在运行页面自检：${event.input}`
                   : event.tool === "read_artifact" ? `→ 正在读取文件：${event.input}`
                     : event.tool === "edit_artifact" ? `→ 正在修改文件：${event.input}`
+                      : event.tool === "edit_artifact_batch" ? `→ 正在批量修改：${event.input}`
                   : event.tool === "update_plan" ? "→ 正在更新步骤清单…"
                   : event.tool === "request_user_input" ? "→ 正在向你提问…"
                     : `→ ${name}中…`;

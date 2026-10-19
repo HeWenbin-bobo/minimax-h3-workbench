@@ -378,6 +378,13 @@ export interface AgentToolCallbacks {
    * 动机同 readArtifact——整份重写 40KB 只为改 3 个字符，且模型无法确认改成没有。
    */
   editArtifact: (params: { name: string; oldText: string; newText: string }) => Promise<string>;
+  /**
+   * 批量局部编辑（edit_artifact_batch）：一次应用多处修改，**全部成功才写盘**。
+   *
+   * 对齐 Codex `apply_patch` 一次提交多个 hunk。实测动因：模型一次修 5 处 bug，
+   * 单处编辑吃 5 步工具预算，叠加 `stepCountIs(10)` 后任务被打断。
+   */
+  editArtifactBatch: (params: { name: string; edits: Array<{ oldText: string; newText: string }> }) => Promise<string>;
   /** 步骤清单工具（update_plan）：把进度推给渲染端，返回给模型的确认文本。 */
   updatePlan: (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => Promise<string>;
   /**
@@ -472,6 +479,10 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       const line = /第\s*(\d+)\s*行/.exec(output)?.[1];
       return line ? `已修改（第 ${line} 行）` : "已修改文件";
     }
+    case "edit_artifact_batch": {
+      const count = /已应用\s*(\d+)\s*处修改/.exec(output)?.[1];
+      return count ? `已批量修改 ${count} 处` : "已批量修改";
+    }
     case "inspect_artifact": {
       if (/^自检失败/.test(output)) return "自检失败（页面没能加载）";
       // 空画面必须排在"无报错"**之前**判：这一分支的正文写的是
@@ -508,6 +519,13 @@ function humanizeToolInput(toolName: string, input: unknown): string {
     const record = input as Record<string, unknown>;
     if (toolName === "web_search" && typeof record.query === "string") return sliceSafe(record.query, 120);
     if (toolName === "inspect_artifact" && typeof record.name === "string") return sliceSafe(record.name, 120);
+    // read/edit 系列只显示文件名；`edit_artifact_batch` 还要带上改几处——
+    // 否则会落到兜底 `JSON.stringify(input)`，把整段 edits 数组糊到步骤条上
+    // （实测：`→ 正在批量修改：{"name":"…","edits":[{"oldText":…` 一直拖到被截断）。
+    if (toolName === "edit_artifact_batch" && typeof record.name === "string") {
+      const count = Array.isArray(record.edits) ? record.edits.length : 0;
+      return count > 0 ? `${sliceSafe(record.name, 80)}（${count} 处）` : sliceSafe(record.name, 120);
+    }
     if ((toolName === "read_artifact" || toolName === "edit_artifact") && typeof record.name === "string") {
       return sliceSafe(record.name, 120);
     }
@@ -816,6 +834,38 @@ export async function chatAgent(
             return `修改文件失败：${describeError(error, "未知错误")}。可以用 read_artifact 读回原文后再试，或改用 create_file 整份重写。`;
           }
         }
+      }),
+      // edit_artifact_batch（对齐 Codex `apply_patch` 一次提交多个 hunk）：
+      //
+      // 实测动因：模型一次要修 5 处 bug，单处 edit 消耗 5 步，叠加 10 步上限后任务被打断
+      // （真机那一轮最后一句就是"本轮工具调用已达 10 步上限"）。合成一次调用后，
+      // 同样的工作只占 1 步，剩下的预算能留给自检与验证。
+      edit_artifact_batch: tool({
+        description: `一次修改产物文件里的**多处**内容，全部成功才写盘（原子操作）。
+
+何时使用：你有 2 处以上独立的修改要落到同一个文件里时，**优先用它**而不是连续调多次 edit_artifact。
+典型场景：自检报了多个问题、或你复查代码时发现好几处 bug，一次全部改掉。
+
+用法要求（与 edit_artifact 相同，且更严）：
+- 每条 oldText 必须逐字符一致、且在**应用前序修改之后**的文本里唯一。
+- **任意一条失败则整批不写入**，并告诉你是第几条失败、为什么失败——文件不会停在"改了一半"的状态。
+- 顺序应用：后一条基于前一条改过的文本匹配，所以相邻改动可以拆成多条，不用手工合并。
+
+何时不用：只有一处要改（用 edit_artifact 更直接）；或要改的地方超过全文一半（重新 create_file）。`,
+        inputSchema: z.object({
+          name: z.string().min(1).describe("要修改的产物文件名，带扩展名。"),
+          edits: z.array(z.object({
+            oldText: z.string().min(1).describe("被替换的原文，逐字符一致且在（前序修改后的）文件中唯一。"),
+            newText: z.string().describe("替换成的新内容。允许为空字符串（删除）。")
+          })).min(2).max(20).describe("2–20 条修改。按数组顺序依次应用。")
+        }),
+        execute: async (params) => {
+          try {
+            return await callbacks.editArtifactBatch(params);
+          } catch (error) {
+            return `批量修改失败：${describeError(error, "未知错误")}（文件未被改动）。可以先用 read_artifact 读回原文核对后再试。`;
+          }
+        }
       })
       }),
       // update_plan（对齐 Codex `plan_spec.rs` 的 update_plan）：把任务拆解**写出来**。
@@ -976,6 +1026,7 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
       inspectArtifact: async () => "（探测）",
       readArtifact: async () => "（探测）",
       editArtifact: async () => "（探测）",
+      editArtifactBatch: async () => "（探测）",
       // 探测不需要真的弹选择题/改清单：给个无害的返回值即可。
       updatePlan: async () => "（探测）",
       requestUserInput: async () => "（探测）"

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyExactEdit, sliceWithLineNumbers, MAX_READ_LINES } from "./artifactEdit";
+import { applyExactEdit, applyExactEdits, sliceWithLineNumbers, MAX_READ_LINES } from "./artifactEdit";
 
 // 这些用例全部来自真机观察到的形态（鹈鹕案例）：
 // 模型为改一处 `M.identity` 整份重写 40KB，改完仍是错的，且它无法核对。
@@ -133,5 +133,59 @@ describe("read_artifact 的默认行数上限", () => {
     expect(out.from).toBe(900);
     expect(out.to).toBe(1000); // 只剩 101 行，不到上限
     expect(out.truncated).toBe(false);
+  });
+});
+
+// 实测动因：模型一次修 5 处 bug，单处 edit 吃 5 步预算，叠加 10 步上限后任务被打断。
+// 批量版对齐 Codex `apply_patch` 一次提交多个 hunk——但必须**全成功才写盘**。
+describe("applyExactEdits（批量，原子）", () => {
+  const source = "let a = 1;\nlet b = 2;\nlet c = 3;";
+
+  it("多处全部命中时一起改，并回报各自行号", () => {
+    const out = applyExactEdits(source, [
+      { oldText: "let a = 1;", newText: "let a = 10;" },
+      { oldText: "let c = 3;", newText: "let c = 30;" }
+    ]);
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.text).toBe("let a = 10;\nlet b = 2;\nlet c = 30;");
+      expect(out.lines).toEqual([1, 3]);
+    }
+  });
+
+  it("任意一条失败 → 整批不返回文本（调用方不会写盘）", () => {
+    const out = applyExactEdits(source, [
+      { oldText: "let a = 1;", newText: "let a = 10;" },
+      { oldText: "不存在的行", newText: "x" }
+    ]);
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.index).toBe(1);
+      expect(out.reason).toBe("not-found");
+      expect(out).not.toHaveProperty("text");
+    }
+  });
+
+  it("歧义失败时报出是第几条 + 命中行号", () => {
+    const dup = "M.identity;\nok\nM.identity;";
+    const out = applyExactEdits(dup, [
+      { oldText: "M.identity", newText: "M.ident" }
+    ]);
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.index).toBe(0);
+      expect(out.reason).toBe("ambiguous");
+      expect(out.lines).toEqual([1, 3]);
+    }
+  });
+
+  it("顺序应用：后一条基于前一条改过的文本匹配", () => {
+    // 第一条把 old 改成 new，第二条匹配的正是改后的内容——若并发/乱序就会失败。
+    const out = applyExactEdits("const x = old;", [
+      { oldText: "old", newText: "new" },
+      { oldText: "const x = new;", newText: "const x = final;" }
+    ]);
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.text).toBe("const x = final;");
   });
 });

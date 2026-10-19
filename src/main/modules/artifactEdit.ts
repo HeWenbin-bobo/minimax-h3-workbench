@@ -89,6 +89,35 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
 }
 
 /**
+ * 一次调用里应用**多处**编辑，全部成功才写盘。
+ *
+ * 为什么需要（实测真机）：模型一次要修 5 处 bug，`edit_artifact` 一次只改一处，
+ * 于是消耗 5 步工具预算；叠加 `stepCountIs(10)` 后任务直接被打断（真机那一轮就停在这里）。
+ * Codex 的 `apply_patch` 本身就是"一次提交多个 hunk"，我们照此补齐。
+ *
+ * **原子性**：任意一处失败就整体不写，并把失败的是第几处报回去。
+ * 半途写盘会让文件停在"改了一半"的状态，模型再基于它继续改只会越改越乱。
+ *
+ * 顺序应用：后一处基于**前一处已改过**的文本匹配——这样模型可以把相邻改动拆成多条，
+ * 不必为了避开互相干扰而手工合并。
+ */
+export type BatchEditOutcome =
+  | { ok: true; text: string; lines: number[] }
+  | { ok: false; index: number; reason: "empty-old" | "not-found" | "ambiguous"; count: number; lines: number[] };
+
+export function applyExactEdits(text: string, edits: readonly { oldText: string; newText: string }[]): BatchEditOutcome {
+  let current = text;
+  const lines: number[] = [];
+  for (let index = 0; index < edits.length; index += 1) {
+    const outcome = applyExactEdit(current, edits[index].oldText, edits[index].newText);
+    if (!outcome.ok) return { ok: false, index, reason: outcome.reason, count: outcome.count, lines: outcome.lines };
+    current = outcome.text;
+    lines.push(outcome.line);
+  }
+  return { ok: true, text: current, lines };
+}
+
+/**
  * 一次读回的最大行数。**必须有默认上限**（实测真机踩到）：模型不带 startLine/endLine
  * 读一个 1651 行的页面时，工具把**全文**塞回上下文，它紧接着又读了一遍——
  * 两次全量读回 ≈ 几十 KB 白烧，还挤掉了后面的修改步骤。

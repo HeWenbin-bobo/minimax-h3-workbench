@@ -35,7 +35,7 @@ import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
 import { artifactSessionDirName, pickLatestVersion } from "./modules/artifactDir";
-import { applyExactEdit, sliceWithLineNumbers } from "./modules/artifactEdit";
+import { applyExactEdit, applyExactEdits, sliceWithLineNumbers } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
@@ -1115,6 +1115,37 @@ function registerIpc(
             // 让模型知道改完共几行 / 多大——据此判断是不是真的只动了那一处。
             const totalLines = outcome.text.split("\n").length;
             return `已修改 ${safeName}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
+          });
+        },
+        // 批量编辑：一次调用应用多处修改，**全部成功才写盘**。
+        //
+        // 实测动因：模型一次修 5 处 bug，单处 edit 消耗 5 步工具预算，
+        // 叠加 `stepCountIs(10)` 后任务被打断（真机那一轮最后一句就是"已达 10 步上限"）。
+        // 合成一次调用后，同样的工作只占 1 步，剩下的预算能留给自检与验证。
+        editArtifactBatch: async (params: { name: string; edits: Array<{ oldText: string; newText: string }> }) => {
+          const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+          const safeName = path.basename(String(params.name || "").trim());
+          const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
+          if (!resolved) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
+          return artifactWriteQueue.run(async (): Promise<string> => {
+            const before = await readFile(resolved, "utf8");
+            const outcome = applyExactEdits(before, params.edits);
+            if (!outcome.ok) {
+              // 失败必须指明是**第几条**、为什么——否则模型不知道从哪一条开始修。
+              const nth = `${outcome.index + 1}/${params.edits.length}`;
+              if (outcome.reason === "empty-old") throw new Error(`第 ${nth} 条修改的 oldText 为空（整批未写入）。`);
+              if (outcome.reason === "not-found") {
+                throw new Error(`第 ${nth} 条修改在文件里找不到原文（整批未写入，文件没有任何改动）。内容必须逐字符一致（含缩进）——请先用 read_artifact 读回原文核对，再重试整批。`);
+              }
+              const where = outcome.lines.slice(0, 6).join("、");
+              throw new Error(`第 ${nth} 条修改的 oldText 出现了 ${outcome.count} 次（第 ${where} 行），无法确定改哪一处（整批未写入）。请把那条 oldText 连同上下各一行一起贴进去，让它在文件里只匹配一处。`);
+            }
+            await writeFile(resolved, outcome.text, "utf8");
+            const after = await stat(resolved);
+            const totalLines = outcome.text.split("\n").length;
+            const at = outcome.lines.join("、");
+            return `已应用 ${params.edits.length} 处修改（第 ${at} 行；文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
           });
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。

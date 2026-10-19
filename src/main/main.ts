@@ -1156,9 +1156,13 @@ function registerIpc(
           const found = await resolveArtifactForTool(dir, safeName);
           if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
           const resolved = found.path;
-          // 下落必须说出来：模型点名的是旧名字，实际改的是最新版——
-          // 不说的话它以为改的就是自己点的那份（界面上同名只展示最新版）。
-          const fellBackNote = found.fellBack ? `（你点名的「${safeName}」不存在，实际改的是最新版本「${found.name}」）` : "";
+          // 下落必须说出来，且**分清两种成因**：名字不存在 vs 名字存在但已过期。
+          // 不说的话模型以为改的就是自己点的那份（界面上同名只展示最新版）。
+          const fellBackNote = found.fellBack === "stale"
+            ? `（你点名的「${safeName}」已被更新的版本取代，实际改的是「${found.name}」）`
+            : found.fellBack === "missing"
+              ? `（本会话里没有「${safeName}」，已改同主名的最新版本「${found.name}」）`
+              : "";
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
           // 读改写在同一个串行队列里：AI SDK 会在一个 step 里并行执行多个 tool call，
           // 两个 edit 同时读同一份文件时后写的会覆盖前一个改动（与 create_file 同名覆盖同类）。
@@ -1201,7 +1205,11 @@ function registerIpc(
           const found = await resolveArtifactForTool(dir, safeName);
           if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
           const resolved = found.path;
-          const fellBackNote = found.fellBack ? `（你点名的「${safeName}」不存在，实际改的是最新版本「${found.name}」）` : "";
+          const fellBackNote = found.fellBack === "stale"
+            ? `（你点名的「${safeName}」已被更新的版本取代，实际改的是「${found.name}」）`
+            : found.fellBack === "missing"
+              ? `（本会话里没有「${safeName}」，已改同主名的最新版本「${found.name}」）`
+              : "";
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
           return artifactWriteQueue.run(async (): Promise<string> => {
             const before = await readFile(resolved, "utf8");
@@ -1756,17 +1764,21 @@ async function uniqueArtifactPath(dir: string, fileName: string): Promise<string
  * 用户对着没变的文件判断"还是坏的"，模型坚信自己改好了——两边看的是两个文件。
  * 所以只要同主名存在更新的版本，就操作那一份，它才是界面上展示给用户的那份。
  *
- * `fellBack` 让调用方明确告知模型"你点名的 X 已过期，实际操作的是 Y"。
+ * `fellBack` 让调用方明确告知模型实际发生了什么，且**必须区分两种成因**：
+ * - `"missing"`：名字根本不存在（模型记错了文件名）；
+ * - `"stale"`：名字存在，但同主名有更新的版本（模型拿着旧名字）。
+ * 这两种给模型的建议完全不同：前者该让它核对文件名，后者该告诉它"那份已过期"。
+ * 混成一句"不存在"会误导——旧名字明明存在，文件也真改动了，模型只会更困惑。
  */
 async function resolveArtifactForTool(
   dir: string,
   requestedName: string
-): Promise<{ name: string; path: string; fellBack: boolean } | undefined> {
+): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" } | undefined> {
   const exact = await resolveWithinRoot(dir, path.join(dir, requestedName));
   const latest = await latestSiblingArtifact(dir, requestedName);
   // 最新版优先于精确命中：改旧版等于改给幽灵看（界面根本不展示它）。
   if (latest && (!exact || latest.path !== exact)) {
-    return { name: latest.name, path: latest.path, fellBack: true };
+    return { name: latest.name, path: latest.path, fellBack: exact ? "stale" : "missing" };
   }
   if (exact) return { name: requestedName, path: exact, fellBack: false };
   return undefined;

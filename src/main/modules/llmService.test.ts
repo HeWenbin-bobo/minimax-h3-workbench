@@ -338,6 +338,30 @@ describe("chatAgent 工具暴露", () => {
     expect(Object.keys(lastTools())).toContain("open_page");
   });
 
+  // 新增产物工具也要守住这条边界：**只读的留下、会改文件的摘掉**。
+  // 读代码看不出来——它们分散在三个不同的 `planMode ? {} : {` 块里，
+  // 全靠人肉记住哪个块包了谁。这条断言把边界变成可执行的事实。
+  it("计划模式保留 read_artifact（只读），摘掉 edit / edit_batch / inspect", async () => {
+    stubStream(["1. 第一步\n2. 第二步"]);
+    await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true, undefined, undefined, true);
+    const tools = Object.keys(lastTools());
+    expect(tools).toContain("read_artifact");
+    expect(tools).not.toContain("edit_artifact");
+    expect(tools).not.toContain("edit_artifact_batch");
+    // inspect_artifact 本身只读，但它服务于"刚生成的产物"——计划模式不产文件，
+    // 留着只会让模型以为有东西可查。与 create_file 同块摘除。
+    expect(tools).not.toContain("inspect_artifact");
+  });
+
+  it("非计划模式下这些产物工具都在", async () => {
+    stubStream(["好"]);
+    await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true, undefined, undefined, false);
+    const tools = Object.keys(lastTools());
+    for (const name of ["read_artifact", "edit_artifact", "edit_artifact_batch", "inspect_artifact", "create_file"]) {
+      expect(tools).toContain(name);
+    }
+  });
+
   it("非计划模式仍下发 update_plan（它只在计划模式被摘）", async () => {
     stubStream(["好"]);
     await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true, undefined, undefined, false);

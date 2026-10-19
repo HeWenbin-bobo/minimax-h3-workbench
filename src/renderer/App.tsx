@@ -2487,13 +2487,16 @@ function PgToolSteps({ steps, running }: { steps: string[]; running: boolean }) 
   // streaming 期间强制展开（实时过程可见）；结束后用户自己控制折叠。
   const expanded = running ? true : open;
   const last = steps[steps.length - 1] || "";
-  // 「N 步工具调用」要数**调用次数**，不是日志行数：每次调用会追加两条
-  //（start 的 "→ …" 与 end 的 "✓ …"）。直接 steps.length 会把 1 次 create_file 说成 2 步
-  //（实测：真实 key 跑一次 create_file，标题显示"已执行 2 步工具调用"）。
+  // 数的是**工具调用次数**（每次调用追加两条：start 的 "→ …" 与 end 的 "✓ …"）。
+  // 直接 steps.length 会把 1 次 create_file 说成 2 步（实测）。
+  //
+  // 措辞用「次」而不是「步」（实测矛盾）：主进程的 `stepCountIs(20)` 数的是**模型步**，
+  // 而一步里可能并行多个工具调用。真实一轮出现过「已执行 28 步工具调用」+「已达 20 步上限」
+  // 同屏——两个数字都"对"，单位却不同，用户只会觉得软件在胡言乱语。
   const callCount = steps.filter((step) => step.startsWith("→")).length;
   return <div className="pg-tool-steps-wrap">
     {!running && <button className="pg-tool-steps-toggle" onClick={() => setOpen((v) => !v)} title={expanded ? "收起执行过程" : "展开执行过程"}>
-      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {callCount || steps.length} 步工具调用<span className="pg-tool-steps-last">· {last.length > 40 ? `${sliceSafe(last, 40)}…` : last}</span>
+      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {callCount || steps.length} 次工具调用<span className="pg-tool-steps-last">· {last.length > 40 ? `${sliceSafe(last, 40)}…` : last}</span>
     </button>}
     {expanded && <div className="pg-tool-steps">{steps.map((step, i) => <div key={i} className="pg-tool-step">{step}</div>)}</div>}
   </div>;

@@ -1180,13 +1180,16 @@ function registerIpc(
           const keyword = String(params.keyword ?? "");
           // 回落说明必须**在分支之前**算好：keyword 分支会提前 return，
           // 若把它放在后面，用 keyword 定位时模型永远看不到"实际读的是哪一份"。
+          // 后面紧跟正文，所以这里补一个换行（共享函数本身不带尾随换行，
+          // 因为 inspect 把它放在"本次检查的文件：…"后面的独立一行）。
           const nameNote = describeArtifactFallback(found.fellBack, safeName, found.name, "read");
+          const nameLead = nameNote ? `${nameNote}\n` : "";
           if (keyword) {
             // **不能叫 `found`**：外层 `found` 是"解析出的实际文件"，同名会遮蔽它，
             // 下面回执就会退回用请求名（`safeName`），模型看到的名字与实际读的文件对不上。
             const hits = findMatchingLines(raw, keyword);
             if (hits.total === 0) {
-              return `${nameNote}在 ${found.name}（共 ${raw.split("\n").length} 行）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。`;
+              return `${nameLead}在 ${found.name}（共 ${raw.split("\n").length} 行）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。`;
             }
             const more = hits.total > hits.matches.length ? `\n（共 ${hits.total} 处命中，只显示前 ${hits.matches.length} 处。）` : "";
             // 命中行本身可能极长（压缩过的 HTML 一行几十万字符），`findMatchingLines`
@@ -1204,7 +1207,7 @@ function registerIpc(
                     : "要精确的 oldText，请用 startLine/endLine 读那一段原文；keyword 只用来定位。"
                 }）`
               : "";
-            return `${nameNote}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。`;
+            return `${nameLead}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。`;
           }
           const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
           // **必须说明被截断了**（实测真机）：模型不带范围读 1651 行全文，紧接着又读一遍，
@@ -1220,7 +1223,7 @@ function registerIpc(
             : "";
           // **标题必须用"实际读到的那个文件"**：`nameNote` 已在上方（keyword 分支之前）
           // 算好——那里提前返回，放这里就看不到回落说明了。
-          return `${nameNote}文件：${found.name}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}`;
+          return `${nameLead}文件：${found.name}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}`;
         }),
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));

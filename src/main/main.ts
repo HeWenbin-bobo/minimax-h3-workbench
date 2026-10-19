@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
-import { readFile, stat, writeFile, unlink, mkdir, rm, realpath, open } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink, mkdir, rm, realpath, open, readdir } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -34,7 +34,7 @@ import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
-import { artifactSessionDirName } from "./modules/artifactDir";
+import { artifactSessionDirName, pickLatestVersion } from "./modules/artifactDir";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
@@ -1032,15 +1032,32 @@ function registerIpc(
         //
         // 只接受**文件名**（不接受路径）：让模型自己解析任意路径等于给它开一个读文件的口子。
         // 会话目录由 `artifactSessionDirName` 决定，仍走 resolveWithinRoot 再做一次白名单。
+        //
+        // **名字对不上时必须回落找同主名的最新版本**（实测真机踩到）：模型修完 bug 会重新
+        // `create_file` 同名文件，而 `uniqueArtifactPath` 不覆盖，落成 `名字 (2).html`。
+        // 模型接着自检时往往还传原名——按精确匹配就会**跑旧版本**，然后回一句"自检通过"。
+        // 那是静默的错误答案：模型据此告诉用户"已验证"，用户点开的却是仍带 bug 的上一版。
+        // 这里的回落规则与渲染端 `foldArtifactVersions` 一致（同主名视为同一份文件的不同版本），
+        // 并且**明确告知实际检查的是哪个文件**，让模型自己发现名字没对上。
         inspectArtifact: async (params: { name: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
           if (!/\.html?$/i.test(safeName)) throw new Error("只能自检 html 产物（csv/md 没有可运行的脚本）。");
-          const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
-          if (!resolved) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          let resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
+          let actualName = safeName;
+          if (!resolved) {
+            const fallback = await latestSiblingArtifact(dir, safeName);
+            if (!fallback) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+            resolved = fallback.path;
+            actualName = fallback.name;
+          }
           // 与渲染端预览面板拼的是同一个 URL 形状：同一协议、同一 CSP。
           const url = `h3preview://artifact/?path=${encodeURIComponent(resolved)}`;
-          return formatProbeReport(await probeHtmlArtifact(url, 20_000, controller.signal));
+          const report = await formatProbeReport(await probeHtmlArtifact(url, 20_000, controller.signal));
+          // 名字不一致要显式说出来，否则模型会以为检查的是自己刚写的那一份。
+          return actualName === safeName
+            ? report
+            : `（注意：你给的「${safeName}」在本会话里不存在，我检查的是同名的**最新版本**「${actualName}」。如果那不是你想验证的那份，请用准确文件名再调用一次。）\n\n${report}`;
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。
         updatePlan: async (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => {
@@ -1527,6 +1544,26 @@ async function uniqueArtifactPath(dir: string, fileName: string): Promise<string
     }
   }
   return path.join(dir, `${stem} (${Date.now()})${ext}`);
+}
+
+/**
+ * 找不到精确文件名时，找回**同一主名的最新版本**（`报告.html` → `报告 (3).html`）。
+ *
+ * 选版规则在 `artifactDir.pickLatestVersion`（纯函数、可单测，按数字比版本号）；
+ * 这里只负责读目录 + 过白名单。**必须过白名单**：文件名是从目录列举出来的，
+ * 仍要防"目录里被放了软链指向外部"。
+ */
+async function latestSiblingArtifact(dir: string, fileName: string): Promise<{ name: string; path: string } | undefined> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return undefined;
+  }
+  const name = pickLatestVersion(entries, fileName);
+  if (!name) return undefined;
+  const resolved = await resolveWithinRoot(dir, path.join(dir, name));
+  return resolved ? { name, path: resolved } : undefined;
 }
 
 /**

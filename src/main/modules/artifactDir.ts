@@ -30,3 +30,38 @@ export function artifactSessionDirName(sessionId: string): string {
   const digest = createHash("sha256").update(raw).digest("hex").slice(0, 12);
   return `${safe}-${digest}`;
 }
+
+/** 去掉末尾的 ` (数字)` 版本后缀：`报告 (2).html` → `报告.html`。与渲染端折叠规则一致。 */
+function versionStem(fileName: string): string {
+  const ext = path.extname(fileName);
+  return fileName.slice(0, fileName.length - ext.length).replace(/ \(\d+\)$/, "");
+}
+
+/**
+ * 在一批文件名里找出与 `fileName` **同一主名的最新版本**（`报告.html` → `报告 (3).html`）。
+ * 找不到返回 undefined。
+ *
+ * 为什么需要（实测真机）：模型修完 bug 会重新 `create_file` 同名文件，而 `uniqueArtifactPath`
+ * 不覆盖，于是落成 `名字 (2).html`；它接着自检时往往还传原名。按精确匹配就会**跑旧版本**，
+ * 然后回一句"自检通过"——模型据此告诉用户"已验证"，用户点开的却仍是带 bug 的上一版。
+ *
+ * **版本号必须按数字比**：字符串比较会把 `(10)` 判成比 `(9)` 小，于是永远选到第 9 版。
+ * 没有后缀的算第 1 版。
+ */
+export function pickLatestVersion(entries: readonly string[], fileName: string): string | undefined {
+  const ext = path.extname(fileName);
+  const stem = versionStem(fileName);
+  const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^${escaped}(?: \\((\\d+)\\))?$`);
+  let best: { name: string; version: number } | undefined;
+  for (const entry of entries) {
+    const entryExt = path.extname(entry);
+    // 扩展名大小写不敏感（Windows 上 `.HTML` 与 `.html` 是同一个文件）。
+    if (entryExt.toLowerCase() !== ext.toLowerCase()) continue;
+    const match = pattern.exec(entry.slice(0, entry.length - entryExt.length));
+    if (!match) continue;
+    const version = match[1] ? Number(match[1]) : 1;
+    if (!best || version > best.version) best = { name: entry, version };
+  }
+  return best?.name;
+}

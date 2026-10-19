@@ -161,6 +161,20 @@ describe("applyExactEdit", () => {
     if (out.ok) expect(out.text).toBe(`a${CR}${NL}B1${CR}${NL}B2${CR}${NL}c`);
   });
 
+  // 实测复现：**行尾归一那条分支**（oldText 用 LF、文件是 CRLF）原先把归一化后的
+  // 全文直接写回，等于把整个 CRLF 文件**静默改成 LF**。
+  // 上面那条只覆盖了"直接命中"的分支，这条覆盖归一分支。
+  it("归一分支也保持 CRLF（不能把整个文件改成 LF）", () => {
+    const NL = String.fromCharCode(10);
+    const CR = String.fromCharCode(13);
+    const out = applyExactEdit(`a${CR}${NL}b${CR}${NL}c`, `a${NL}b`, `A${NL}B`);
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.text).toBe(`A${CR}${NL}B${CR}${NL}c`);
+      expect(/[^\r]\n/.test(out.text)).toBe(false); // 没有裸 LF
+    }
+  });
+
   // 注意：单行子串本来就能在带缩进的行里命中（"indented();" 是 "  indented();" 的子串），
   // 这不是缺陷。真正要防的是**多行块**里的缩进对不上——那才会改错地方。
   it("多行块的行内缩进不一致时找不到（不做模糊匹配）", () => {

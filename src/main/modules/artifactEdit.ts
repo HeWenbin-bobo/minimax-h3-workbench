@@ -184,9 +184,14 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
   const hits = occurrences(normalizedText, normalizedNeedle);
   if (hits.length === 1) {
     const at = hits[0];
+    // **结果要还原成文件的原始行尾**（实测复现）：这条分支用的是归一化后的 `normalizedText`
+    // （全 LF）。原样写回等于把整个 CRLF 文件**静默改成 LF**——
+    // 而上面"直接命中"那条分支已经做了对齐，两条路径行为不一致。
+    // 对生成型产物（由我们写出的文件）通常无感，但用户手改过的 .md/.csv 会被整体改写。
+    const body = normalizedText.slice(0, at) + normalizeEol(replacement) + normalizedText.slice(at + normalizedNeedle.length);
     return {
       ok: true,
-      text: normalizedText.slice(0, at) + normalizeEol(replacement) + normalizedText.slice(at + normalizedNeedle.length),
+      text: matchEolOf(text, body),
       line: lineOf(normalizedText, at)
     };
   }

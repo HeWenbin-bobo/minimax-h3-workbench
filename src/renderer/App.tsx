@@ -2311,7 +2311,14 @@ function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }:
   // 各自调一次 saveArtifact —— 落盘两次、生成两个内容相同的文件（`报告.md` 与 `报告 (2).md`），
   // 用户却在卡片上只看到一张。用同步 ref 兜住。
   const savingRef = useRef<Promise<ArtifactInfo | undefined> | undefined>(undefined);
-  const sizeLabel = (bytes: number) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  // **脏数据会渲染出「NaN KB」**（实测）：`size` 来自 IPC/旧版本 localStorage，
+  // 缺失、null、非数字都可能出现——`undefined / 1024` 就是 NaN，
+  // `Math.round(NaN)` 还是 NaN，于是卡片上显示一个尺寸"NaN KB"。
+  // 拿不到可信数字时不显示尺寸，比显示一个假的数字好（用户会以为文件坏了）。
+  const sizeLabel = (bytes: unknown) => {
+    if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return "";
+    return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  };
   // 表格产物存 .xlsx（Excel 双击可开，主进程 SheetJS 转换）；文档存 .md；网页存 .html。
   const ext = kind === "html" ? ".html" : kind === "sheet" ? ".xlsx" : ".md";
   const label = kind === "html" ? "HTML 文件" : kind === "sheet" ? "Excel 表格" : "Markdown 文档 · Word 可打开";

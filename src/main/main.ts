@@ -1054,10 +1054,18 @@ function registerIpc(
           // 与渲染端预览面板拼的是同一个 URL 形状：同一协议、同一 CSP。
           const url = `h3preview://artifact/?path=${encodeURIComponent(resolved)}`;
           const report = await formatProbeReport(await probeHtmlArtifact(url, 20_000, controller.signal));
-          // 名字不一致要显式说出来，否则模型会以为检查的是自己刚写的那一份。
-          return actualName === safeName
-            ? report
-            : `（注意：你给的「${safeName}」在本会话里不存在，我检查的是同名的**最新版本**「${actualName}」。如果那不是你想验证的那份，请用准确文件名再调用一次。）\n\n${report}`;
+          // **必须声明检查的是哪个文件**（实测真机：模型在自检反复报同一条错时，
+          // 因为不知道工具到底加载了哪一份，花 4 步去怀疑"是不是命中了缓存/旧文件"，
+          // 而我们事后核对磁盘——报错是真的，它自己的新文件里确实还留着那行）。
+          // 报出文件名 + 文件大小 + 修改时间，模型就能自己判断"检的是不是我刚写的那份"。
+          const info = await stat(resolved).catch(() => undefined);
+          const stamp = info
+            ? `（${info.size >= 1024 * 1024 ? `${(info.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(info.size / 1024))}KB`}，修改于 ${new Date(info.mtimeMs).toLocaleTimeString("zh-CN", { hour12: false })}）`
+            : "";
+          const header = actualName === safeName
+            ? `本次检查的文件：${actualName}${stamp}。\n\n`
+            : `本次检查的文件：${actualName}${stamp}。\n（你给的「${safeName}」在本会话里不存在，上面是同名的**最新版本**。如果那不是你想验证的那份，请用准确文件名再调用一次。）\n\n`;
+          return header + report;
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。
         updatePlan: async (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => {

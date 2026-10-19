@@ -1039,16 +1039,29 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
             header: z.string().describe("很短的中文标签，最多 12 个字（如'视频时长'）。"),
             question: z.string().describe("完整问题，一句话说清要用户在什么之间做选择。"),
             multiSelect: z.boolean().describe("是否允许多选。只有确实可以同时选多个时才设为 true。").optional(),
+            // **不要在这里写 min(2).max(4)**（实测同类坑第五处）：模型只给 1 个选项时，
+            // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
+            // 整个调用被**静默跳过** → 模型收不到回执 → 反复重试 → 20 步预算烧光。
+            // 数量约束改在 execute 里夹取（见下），越界只会少一两个选项，不会让整轮失效。
             options: z.array(z.object({
               id: z.string().describe("选项标识（英文短名）。"),
               label: z.string().describe("选项显示文字，简短（如'8 秒'）。"),
               description: z.string().describe("这个选项意味着什么，一句话。")
-            })).min(2).max(4).describe("2–4 个互斥选项。")
-          })).min(1).max(3).describe("1–3 个问题。")
+            })).min(1).describe("互斥选项，建议 2–4 个。")
+          })).min(1).describe("问题清单，建议 1–3 个。")
         }),
         execute: async (params) => {
+          // **夹取而不是拒绝**（见 schema 处的说明）：渲染端能正常画 1 个选项的卡片，
+          // 超过 3 个问题/4 个选项则截断——少问一个总比整轮报废好。
+          const clipped = {
+            ...params,
+            questions: params.questions.slice(0, 3).map((question) => ({
+              ...question,
+              options: question.options.slice(0, 4)
+            }))
+          };
           try {
-            return await callbacks.requestUserInput(params);
+            return await callbacks.requestUserInput(clipped);
           } catch (error) {
             // 用户没回答不算失败：必须让模型继续，而不是让它在这里死等或反复重试。
             return `未获得用户回答（${describeError(error, "用户选择了跳过或未在时限内回答")}）。请按你认为最合理的方式继续执行，并在回复里说明你做了哪些默认假设。`;

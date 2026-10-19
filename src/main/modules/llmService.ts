@@ -843,7 +843,7 @@ export async function chatAgent(
   用原生 Canvas/WebGL/CSS 自己实现，或把必要的少量代码内联进来。`,
         inputSchema: z.object({
           kind: z.enum(["html", "csv", "tsv", "md"]).describe("文件类型。csv/tsv=结构化数据（存为 .xlsx）；html=网页/小工具/游戏；md=文档/报告。"),
-          name: z.string().min(1).describe("文件名，不含扩展名（如'科技新闻'）。不要带 .xlsx / .html 等后缀。"),
+          name: z.string().min(1).describe("文件名。带不带扩展名都行（如「科技新闻」或「科技新闻.html」）——扩展名会按 kind 自动补齐/纠正，返回结果里会告诉你实际存成了什么名字。"),
           content: z.string().min(1).describe("完整文件内容。csv/tsv 首行为表头；html 为完整网页（含 <!DOCTYPE html>）；md 为 markdown 正文。")
         }),
         execute: async (params) => {

@@ -63,6 +63,15 @@ export interface WorldStateInput {
   /** 产物能力：本轮可用的 kind 列表。计划模式下 create_file/generate_video 被摘掉，这里要如实反映。 */
   artifactKinds: string[];
   /**
+   * 本会话**已经产出**的文件名（含扩展名）。
+   *
+   * 为什么要注入：渲染端传给模型的 history 只有 `{ role, content }`，**工具结果不跨轮保留**。
+   * 不给清单的话，用户第二轮说"把刚才那个页面改一下"，模型只能猜文件名——
+   * 猜错就报"找不到产物"或重复生成一份。这是本轮多个"名字解析"补丁的共同根因。
+   * 只放文件名（不放路径），上限 20 条，避免把世界状态撑大。
+   */
+  artifactFiles?: string[];
+  /**
    * 剩余上下文预算（对齐 Codex `TokenBudgetRemainingContext` / `ContextWindowTokenStatus`）。
    * 缺省表示拿不到可信数字——此时**不注入**该 section，而不是注入"未知"。
    *
@@ -161,12 +170,22 @@ function networkSection(input: WorldStateInput): WorldSection {
 }
 
 function artifactsSection(input: WorldStateInput): WorldSection {
-  const body = input.artifactKinds.length > 0
+  const kinds = input.artifactKinds.length > 0
     ? `可用类型：${input.artifactKinds.join(" / ")}。`
     : `**本轮不可用**（当前为计划模式：只出方案、不产出文件）。`;
+  // **必须列出本会话已产出的文件名**（实测缺口）：传给模型的 history 只有
+  // `{ role, content }`（见 shared/types.ts 的 ChatMessage）——**工具结果不跨轮保留**。
+  // 用户第二轮说"把刚才那个页面改一下"时，模型手里没有任何文件名，只能猜；
+  // 猜错就报"找不到产物"，或者重新 create_file 生成一份重复的。
+  // 这一轮为它加的那些"名字回落 / 无扩展名补全"都是在给这个缺口打补丁；
+  // 直接把清单摆在环境事实里，模型就不用猜了。
+  const files = (input.artifactFiles ?? []).slice(0, 20);
+  const fileList = files.length > 0
+    ? `\n本会话已产出的文件：${files.join("、")}（用 read_artifact / edit_artifact / inspect_artifact 时直接引用这些名字）。`
+    : "";
   return {
     id: "artifacts",
-    render: () => `# 产物能力\n${body}`
+    render: () => `# 产物能力\n${kinds}${fileList}`
   };
 }
 

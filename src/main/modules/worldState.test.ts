@@ -207,3 +207,33 @@ describe("当前时间固定按北京时间渲染", () => {
     expect(text).toContain("04:00");
   });
 });
+
+// 实测缺口：传给模型的 history 只有 { role, content }，工具结果**不跨轮保留**。
+// 用户第二轮说"把刚才那个页面改一下"时，模型手里没有任何文件名，只能猜——
+// 猜错就报"找不到产物"或重复生成一份。清单必须出现在环境事实里。
+describe("产物清单注入（artifactFiles）", () => {
+  const artifactsText = (extra) => buildSections({ ...baseInput, ...extra })[2].render();
+
+  it("列出本会话已产出的文件名", () => {
+    const text = artifactsText({ artifactFiles: ["鹈鹕骑自行车_3D.html", "报告.md"] });
+    expect(text).toContain("本会话已产出的文件");
+    expect(text).toContain("鹈鹕骑自行车_3D.html");
+    expect(text).toContain("报告.md");
+  });
+
+  it("没有产物时不多渲染一行（避免噪声）", () => {
+    const text = artifactsText({ artifactFiles: [] });
+    expect(text).not.toContain("本会话已产出的文件");
+  });
+
+  it("缺省字段时也不报错（老调用方兼容）", () => {
+    expect(artifactsText({})).toContain("可用类型");
+  });
+
+  it("最多列 20 个（防世界状态被撑大）", () => {
+    const many = Array.from({ length: 40 }, (_, i) => `f${i}.html`);
+    const text = artifactsText({ artifactFiles: many });
+    expect(text).toContain("f0.html");
+    expect(text).not.toContain("f39.html");
+  });
+});

@@ -930,12 +930,20 @@ function registerIpc(
       // 避免"界面说还剩 30%、模型以为还剩 90%"这种自相矛盾。
       const modelLimit = contextWindowFor(turn.value.model);
       const activeTokens = activeContextTokens(effective, budgetFor(session).sample);
+      // **把本会话已产出的文件名注入环境事实**（实测缺口）：history 只传
+      // `{ role, content }`，工具结果不跨轮保留——用户第二轮说"把刚才那个改一下"时，
+      // 模型手里没有任何文件名，只能猜（这一轮一半的补丁都在替它兜这个底）。
+      // 只读目录、只取文件名；读不到就当空清单，不能因此让整轮失败。
+      const artifactFiles = await readdir(path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session)))
+        .then((entries) => entries.filter((name) => /\.(html?|md|xlsx)$/i.test(name)).sort())
+        .catch(() => [] as string[]);
       const worldDiff = diffWorldState(
         buildSections({
           webSearch: turn.value.webSearch,
           browserSearch: turn.value.browserOnly,
           searchApiReady: Boolean(turn.value.searchBaseUrl),
           artifactKinds: turn.value.planMode === "plan" ? [] : ["html（网页/小工具）", "xlsx（表格，由 csv/tsv 生成）", "md（文档）"],
+          artifactFiles,
           contextBudget: { remainingTokens: Math.max(0, modelLimit - activeTokens), modelLimitTokens: modelLimit }
         }),
         sessionWorldState.get(session)

@@ -430,6 +430,10 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
     }
     case "inspect_artifact": {
       if (/^自检失败/.test(output)) return "自检失败（页面没能加载）";
+      // 空画面必须排在"无报错"**之前**判：这一分支的正文写的是
+      // "控制台没有 error/warning，但…屏幕是空的"，用"没有任何 error/warning"匹配会漏掉，
+      // 于是落进兜底的「自检完成」——把"什么都没画出来"说成平平无奇的完成（真机踩到）。
+      if (/什么都没画出来/.test(output)) return "自检发现画面是空的";
       const errors = /运行时报错（共\s*(\d+)\s*条/.exec(output)?.[1];
       if (errors) return `自检发现 ${errors} 条报错`;
       return /没有任何 error\/warning/.test(output) ? "自检通过，无报错" : "自检完成";

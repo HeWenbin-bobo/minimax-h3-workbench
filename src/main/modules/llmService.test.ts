@@ -139,6 +139,15 @@ describe("工具摘要（humanizeToolOutput）", () => {
       .toBe("自检通过，无报错");
   });
 
+  // 真机踩到：空画面分支的正文是"控制台没有 error/warning，但…屏幕是空的"，
+  // 摘要只匹配"没有任何 error/warning"会漏掉 → 落进兜底的「自检完成」，
+  // 把"什么都没画出来"说成平平无奇的完成。
+  it("inspect_artifact 画面为空时摘要必须说出来，不能只说'完成'", () => {
+    const blank = "自检结果：页面已在本机 Chromium 中真实运行（标题「空白」，6 个元素，可见文本 0 字）。\n画面采样：整屏约有 100% 是同一种颜色（平均亮度 255）。**这通常意味着页面上什么都没画出来**——…\n控制台没有 error/warning，但上面的画面采样说明屏幕是空的——**不要**据此告诉用户页面正常。";
+    expect(humanizeToolOutput("inspect_artifact", blank)).toBe("自检发现画面是空的");
+    expect(humanizeToolOutput("inspect_artifact", blank)).not.toBe("自检完成");
+  });
+
   it("失败信息保留第一句，但仍剥掉后续指令", () => {
     const text = humanizeToolOutput("create_file", "保存文件失败：不支持的产物类型：pdf。请把内容改写成围栏代码块直接输出，并在回复里说明文件未能保存。");
     expect(text).toContain("保存文件失败");

@@ -507,7 +507,15 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
     const group = groups.get(task.parentId);
     if (group) group.push(task); else groups.set(task.parentId, [task]);
   }
-  const daysLeft = (iso: string) => Math.max(0, Math.ceil((retentionMs - (Date.now() - new Date(iso).getTime())) / 86_400_000));
+  // **脏时间戳会显示「NaN 天后自动清除」**（实测）：`group[0].deletedAt || group[0].updatedAt`
+  // 可能两者都缺（旧版本记录）、或是个解析不出来的字符串。`Math.max(0, Math.ceil(NaN))` 仍是 NaN。
+  // 拿不到可信时间时返回 undefined，调用方据此不显示"还剩几天"，而不是显示一个假数字。
+  const daysLeft = (iso: string | undefined): number | undefined => {
+    if (!iso) return undefined;
+    const time = new Date(iso).getTime();
+    if (!Number.isFinite(time)) return undefined;
+    return Math.max(0, Math.ceil((retentionMs - (Date.now() - time)) / 86_400_000));
+  };
   const notifyChanged = () => window.dispatchEvent(new Event("h3-tasks-changed"));
   // 回收站两个操作同样要兜住 IPC reject：否则点了没反应，也没有任何提示。
   async function restore(ids: string[]) {
@@ -539,9 +547,10 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
     {Array.from(groups.values()).map((group) => {
       const ids = group.map((t) => t.id);
       const deletedAt = group[0].deletedAt || group[0].updatedAt;
+      const left = daysLeft(deletedAt);
       return <article key={group[0].parentId} className="trash-item">
         <div><strong>{sliceSafe(group[0].prompt, 40) || "未命名项目"}</strong>
-          <small>{group.length} 条 · {daysLeft(deletedAt)} 天后自动清除</small></div>
+          <small>{group.length} 条{left === undefined ? "" : ` · ${left} 天后自动清除`}</small></div>
         <div className="trash-actions">
           <button className="text-button" onClick={() => restore(ids)}>恢复</button>
           {/* 「彻底删除」会连输出视频一起删，**不可逆**。此前是单击即生效，

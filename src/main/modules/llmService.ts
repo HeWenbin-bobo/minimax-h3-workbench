@@ -766,7 +766,10 @@ export async function chatAgent(
 
 调用后任务卡片会实时显示在对话下方，完成后用户可预览与下载。画面感强的英文 prompt 效果更好。这是**消耗资源**的操作（真实扣费、耗时数十秒），用户没要就别调——同一轮里也不要为同一个意图重复调用。`,
         inputSchema: z.object({
-          prompt: z.string().min(1).describe("视频内容描述：画面主体、动作、镜头运动、光线、风格。建议英文，越具体越好。"),
+          // **`.min(1)` 同样不要**（同一类坑第十一处）：空 prompt 会让整个调用在
+          // `parseToolCall` 阶段被拒、静默跳过。下游 `validateRequest` 本就有
+          // 「请输入视频描述。」这条中文提示，让它来回答比让 SDK 静默丢弃有用得多。
+          prompt: z.string().describe("视频内容描述：画面主体、动作、镜头运动、光线、风格。建议英文，越具体越好。不能为空。"),
           // **不要在这里做范围硬校验**（实测踩到，与 `edit_artifact_batch` 的 min(2) 同一个坑）：
           // 参数越界时 AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
           // **整个调用被静默跳过**（toolCall 记进历史但不执行）——模型看不到任何回执，

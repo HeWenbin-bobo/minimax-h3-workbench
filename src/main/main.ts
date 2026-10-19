@@ -1205,7 +1205,14 @@ function registerIpc(
             // 于是卡片上的大小停在旧值，已打开的预览面板也不会重载——
             // 用户对着旧画面判断"还是坏的"，模型却说改好了。
             notifyArtifactUpdated(resolved, found.name, after.size);
-            return `已修改 ${found.name}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）${fellBackNote}。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
+            // **只有 html 才建议自检**（实测契约）：`inspect_artifact` 只接受 .html，
+            // 改 .md/.xlsx 时无条件写"建议立刻自检"，模型照做必然吃一次"只能自检 html"，
+            // 白烧一步预算——而步数本来就紧。
+            const sizeKb = `${Math.max(1, Math.round(after.size / 1024))}KB`;
+            const nextStep = /\.html?$/i.test(found.name)
+              ? "建议立刻 inspect_artifact 自检一次，确认没有引入新报错。"
+              : "改完可直接告诉用户，或用 read_artifact 复核。";
+            return `已修改 ${found.name}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${sizeKb}）${fellBackNote}。${nextStep}`;
           });
         },
         // 批量编辑：一次调用应用多处修改，**全部成功才写盘**。

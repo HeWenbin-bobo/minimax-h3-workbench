@@ -65,3 +65,28 @@ export function pickLatestVersion(entries: readonly string[], fileName: string):
   }
   return best?.name;
 }
+
+/**
+ * 请求名 → 依次尝试的候选文件名。
+ *
+ * 背景（实测工具契约不一致）：`create_file` 的参数说明是"文件名，**不含**扩展名"，
+ * 而 `read_artifact` / `edit_artifact` 说明是"带扩展名"。模型按前者的写法调用后者时
+ * （`read_artifact("科技新闻")`），精确匹配与同主名回落都按**空扩展名**比对 →
+ * 必然找不到 → 报"本会话里找不到产物"。文件明明在磁盘上，模型只会重新生成一份重复产物。
+ *
+ * 规则：**有扩展名就只试它**（尊重模型明确指定的类型）；
+ * 没有扩展名才按已知产物类型依次补全。
+ */
+export function artifactNameCandidates(requestedName: string): string[] {
+  const name = String(requestedName ?? "").trim();
+  if (!name) return [];
+  // **只认已知产物扩展名**，不能用 `path.extname` 非空就判定"已有扩展名"：
+  // `path.extname("v1.2 报告")` 返回 `".2 报告"`——名字里有点但并没有产物扩展名，
+  // 那种情况仍然必须补全（单测「v1.2 报告」抓到的）。
+  const ext = path.extname(name).toLowerCase();
+  if ((KNOWN_ARTIFACT_EXTS as readonly string[]).includes(ext)) return [name];
+  return [name, ...KNOWN_ARTIFACT_EXTS.map((known) => `${name}${known}`)];
+}
+
+/** 与 `saveArtifactFile` 的 kind 白名单保持一致（新增 kind 时两边都要改）。 */
+export const KNOWN_ARTIFACT_EXTS = [".html", ".md", ".xlsx", ".csv", ".tsv"] as const;

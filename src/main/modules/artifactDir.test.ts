@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { artifactSessionDirName, pickLatestVersion } from "./artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates } from "./artifactDir";
 
 // 背景：`sessionId` 来自渲染端（可构造），而目录名同时用于落盘与 `artifact:purgeSession`。
 // 旧实现只把危险字符替换成 `_`，会产生**目录名碰撞**：
@@ -68,5 +68,34 @@ describe("pickLatestVersion", () => {
 
   it("中间括号属于主名，不当版本后缀", () => {
     expect(pickLatestVersion(["图表 (草稿).html", "图表 (草稿) (2).html"], "图表 (草稿).html")).toBe("图表 (草稿) (2).html");
+  });
+});
+
+// 实测工具契约不一致：create_file 要求"不含扩展名"，read/edit 要求"带扩展名"。
+// 模型按前者写后者时（read_artifact("科技新闻")）会找不到文件。
+describe("artifactNameCandidates（无扩展名补全）", () => {
+  it("有扩展名时只试它（尊重模型指定类型）", () => {
+    expect(artifactNameCandidates("报告.md")).toEqual(["报告.md"]);
+  });
+
+  it("没有扩展名时按已知类型依次补全", () => {
+    const got = artifactNameCandidates("科技新闻");
+    expect(got[0]).toBe("科技新闻");
+    expect(got).toContain("科技新闻.html");
+    expect(got).toContain("科技新闻.md");
+    expect(got).toContain("科技新闻.xlsx");
+  });
+
+  it("空名/空白名返回空数组（不打无谓的 stat）", () => {
+    expect(artifactNameCandidates("")).toEqual([]);
+    expect(artifactNameCandidates("   ")).toEqual([]);
+  });
+
+  it("首尾空格被裁掉（模型常带空格）", () => {
+    expect(artifactNameCandidates("  报告  ")[0]).toBe("报告");
+  });
+
+  it("名字中间的点不算扩展名结束（v1.2 报告 仍会补全）", () => {
+    expect(artifactNameCandidates("v1.2 报告").length).toBeGreaterThan(1);
   });
 });

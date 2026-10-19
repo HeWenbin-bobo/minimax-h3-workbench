@@ -34,7 +34,7 @@ import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
-import { artifactSessionDirName, pickLatestVersion } from "./modules/artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates } from "./modules/artifactDir";
 import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
@@ -1779,12 +1779,8 @@ async function resolveArtifactForTool(
   // 模型按前者的写法调用后者时（read_artifact("科技新闻")），精确匹配与同主名回落
   // 都按空扩展名比对 → 必然返回 undefined → 报"本会话里找不到产物"。
   // 一份文件明明在，却被说成不存在，模型只会去重新 create_file 生成重复产物。
-  //
-  // 做法：请求名没有扩展名时，按已知产物扩展名依次补全再试。
-  const knownExts = [".html", ".md", ".xlsx", ".csv", ".tsv"];
-  const candidates = path.extname(requestedName)
-    ? [requestedName]
-    : [requestedName, ...knownExts.map((ext) => `${requestedName}${ext}`)];
+  // 候选生成规则（含"有扩展名就只试它"）抽在 artifactDir.artifactNameCandidates，可单测。
+  const candidates = artifactNameCandidates(requestedName);
 
   let staleMatch: { name: string; path: string } | undefined;
   for (const candidate of candidates) {

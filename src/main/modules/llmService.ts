@@ -845,7 +845,12 @@ export async function chatAgent(
 提示：一次别读整个 40KB 文件。**知道要找什么（函数名、报错里的标识符）时优先用 keyword**——
 一步定位到命中行及上下文；只有想通读结构时才用 startLine/endLine 分段读。`,
         inputSchema: z.object({
-          name: z.string().min(1).describe("产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。"),
+          // **不要 `.min(1)`**（实测同类坑第十二处）：模型说"刚才那个文件"时会把 name 留空，
+          // `.min(1)` 让 AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
+          // 调用被**静默跳过**——实测复现：1 次 create_file + **19 次空转**，
+          // 20 步预算全烧光、步骤条一片空白，界面还归因成"参数被上游截断"。
+          // 空值交给 execute 回一句可纠正的说明（见下）。
+          name: z.string().describe("产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。不能为空。"),
           // **空串 / null 也要收**（实测同类坑第九处）：模型"不用关键词、只想按行读"时
           // 常显式传 `keyword: ""` 或 `null`，`z.string().min(1).optional()` 会在
           // `parseToolCall` 阶段拒掉 → 整个调用被**静默跳过**（收不到回执 → 反复重试）。
@@ -860,6 +865,11 @@ export async function chatAgent(
           endLine: z.coerce.number().nullish().describe("结束行（含；越界会被夹紧）。省略则读到文件末尾。一次建议不超过 400 行。")
         }),
         execute: async (params) => {
+          // 空文件名：**回一句可纠正的说明**，不要让整轮失效（见 schema 处说明）。
+          // 说清可用的名字——模型手里往往只有"刚才那个文件"这种指代。
+          if (!String(params.name ?? "").trim()) {
+            return "读取产物失败：name 是空的。请填上本会话已产出的文件名（带扩展名），可以先看世界状态里的「本会话已产出的文件」清单。";
+          }
           try {
             // 归一：空串 / null → 不给（"没指定"而不是"指定成空"）。
             const keyword = typeof params.keyword === "string" && params.keyword.trim() ? params.keyword : undefined;
@@ -942,9 +952,13 @@ export async function chatAgent(
 
 注意：它给你的是**运行状态**（有没有报错、画布多大、WebGL 通没通），**不是截图**——你仍然看不到画面长什么样、构图好不好看。自检通过 ≠ 视觉效果符合预期，如实说明这个区别，不要宣称"我看过效果"。`,
         inputSchema: z.object({
-          name: z.string().min(1).describe("要自检的产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。必须是用 create_file 在本会话里生成过的文件。")
+          // 同 read_artifact：`.min(1)` 会让空名字**静默跳过整个调用**（实测复现 19 次空转）。
+          name: z.string().describe("要自检的产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。必须是用 create_file 在本会话里生成过的文件。不能为空。")
         }),
         execute: async ({ name }) => {
+          if (!String(name ?? "").trim()) {
+            return "自检失败：name 是空的。请填上要自检的 html 文件名（带扩展名），可以先看世界状态里的「本会话已产出的文件」清单。";
+          }
           try {
             return await callbacks.inspectArtifact({ name });
           } catch (error) {
@@ -979,7 +993,8 @@ export async function chatAgent(
 改完如果改的是 **html 产物**，建议立刻 inspect_artifact 自检一次，确认没有引入新报错；
 md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifact 复核即可。`,
         inputSchema: z.object({
-          name: z.string().min(1).describe("要修改的产物文件名，带扩展名。必须是本会话里已存在的文件。"),
+          // 同 read_artifact：`.min(1)` 会让空名字**静默跳过整个调用**（实测复现 19 次空转）。
+          name: z.string().describe("要修改的产物文件名，带扩展名。必须是本会话里已存在的文件。不能为空。"),
           // **不要 `.min(1)`**（实测同类坑第七处）：模型给空 oldText 时，
           // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，调用被**静默跳过**——
           // 而 `main.ts` 里那段"oldText 不能为空。"的提示**永远执行不到**，
@@ -988,6 +1003,9 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           newText: z.string().describe("替换成的新内容。允许为空字符串（表示删除这段）。")
         }),
         execute: async (params) => {
+          if (!String(params.name ?? "").trim()) {
+            return "修改文件失败：name 是空的。请填上要修改的文件名（带扩展名），可以先看世界状态里的「本会话已产出的文件」清单。";
+          }
           try {
             return await callbacks.editArtifact(params);
           } catch (error) {
@@ -1013,7 +1031,8 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
 
 何时不用：只有一处要改（用 edit_artifact 更直接）；或要改的地方超过全文一半（重新 create_file）。`,
         inputSchema: z.object({
-          name: z.string().min(1).describe("要修改的产物文件名，带扩展名。"),
+          // 同 read_artifact：`.min(1)` 会让空名字**静默跳过整个调用**（实测复现 19 次空转）。
+          name: z.string().describe("要修改的产物文件名，带扩展名。不能为空。"),
           edits: z.array(z.object({
             // **同单处编辑**：`.min(1)` 会让空串在 `parseToolCall` 阶段被拒、
             // 整个调用被静默跳过；而工具层对空 oldText 本就有「第 N 条修改的 oldText 为空」的说明。
@@ -1033,6 +1052,9 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           })).describe("修改列表，建议 1–20 条（超过 20 条只应用前 20 条）。按数组顺序依次应用。").min(0)
         }),
         execute: async (params) => {
+          if (!String(params.name ?? "").trim()) {
+            return "批量修改失败：name 是空的。请填上要修改的文件名（带扩展名），可以先看世界状态里的「本会话已产出的文件」清单。";
+          }
           // 空数组：直接回一句可纠正的说明（而不是让 SDK 拒掉整个调用）。
           if (params.edits.length === 0) {
             return "没有可应用的修改：edits 是空数组。请把要改的内容写成至少一条 {oldText, newText}。";

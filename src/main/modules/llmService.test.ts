@@ -566,6 +566,23 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
     expect((await schemas()).open_page.safeParse({ url: "example.com/foo" }).success).toBe(true);
   });
 
+  // 实测复现（probe-schema-empty-name）：模型说"刚才那个文件"时把 name 留空，
+  // `z.string().min(1)` 让 AI SDK 在 parseToolCall 阶段抛错、调用被**静默跳过**：
+  // 1 次 create_file + **19 次空转**，20 步预算全烧光、步骤条一片空白。
+  // 空名字必须能进工具层，由 execute 回一句可纠正的说明。
+  it("四个产物工具的 name 为空时不拒掉整轮", async () => {
+    const tools = await schemas();
+    for (const [name, value] of [
+      ["read_artifact", { name: "" }],
+      ["inspect_artifact", { name: "" }],
+      ["edit_artifact", { name: "", oldText: "a", newText: "b" }],
+      ["edit_artifact_batch", { name: "", edits: [{ oldText: "a", newText: "b" }] }]
+    ] as const) {
+      const parsed = tools[name].safeParse(value);
+      expect(parsed.success, `${name} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
+
   it("update_plan：done / in-progress 这类写法在代码里归一", async () => {
     const s = (await schemas()).update_plan;
     const parsed = s.safeParse({ plan: [{ step: "a", status: "done" }, { step: "b", status: "in-progress" }] });

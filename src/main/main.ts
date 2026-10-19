@@ -906,6 +906,8 @@ function registerIpc(
       let agentSent = 0;
       let agentTaskCount = 0; // 本轮已建任务数：非 0 时不得整轮重试（否则会重复建任务）
       let agentArtifactCount = 0; // 本轮已落盘产物数：用于收尾文案（见下面 1243 行附近）
+      /** 本轮**改动过**的文件数（编辑已有产物，不新建）。单独计数才能把收尾文案说对。 */
+      let agentEditCount = 0;
       const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
       const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
       // 编辑产物后推一条"更新"事件：渲染端就地刷新卡片大小与已打开的预览。
@@ -1261,6 +1263,7 @@ function registerIpc(
             // 于是卡片上的大小停在旧值，已打开的预览面板也不会重载——
             // 用户对着旧画面判断"还是坏的"，模型却说改好了。
             notifyArtifactUpdated(resolved, found.name, after.size);
+            agentEditCount += 1;
             // **只有 html 才建议自检**（实测契约）：`inspect_artifact` 只接受 .html，
             // 改 .md/.xlsx 时无条件写"建议立刻自检"，模型照做必然吃一次"只能自检 html"，
             // 白烧一步预算——而步数本来就紧。
@@ -1314,6 +1317,7 @@ function registerIpc(
             // 事件与回执都用 **found.name**（实际改的那份）：用请求名会让卡片标签被打回旧名，
             // 模型也会以为改的是自己点名的那份（`8dc8c3b` 在单处编辑里修过，批量这条漏了）。
             notifyArtifactUpdated(resolved, found.name, after.size);
+            agentEditCount += 1;
             const sizeKb = `${Math.max(1, Math.round(after.size / 1024))}KB`;
             // 同 `f4b9ca7`：只有 html 才建议自检——`inspect_artifact` 只收 .html，
             // 对 md/xlsx 建议自检必然吃一次失败调用、白烧一步预算。
@@ -1425,12 +1429,17 @@ function registerIpc(
         const outcomes: string[] = [];
         if (agentTaskCount > 0) outcomes.push(`${agentTaskCount} 个视频生成任务`);
         if (agentArtifactCount > 0) outcomes.push(`${agentArtifactCount} 个文件`);
-        chunk({
-          seq: 1,
-          delta: outcomes.length > 0
-            ? `本轮已产出 ${outcomes.join("、")}，卡片在下方显示。`
-            : "本轮工具调用已结束，没有产生可展示的产物。"
-        });
+        // **编辑已有产物也必须算进来**（实测复现，probe-edit-only-close）：
+        // `agentArtifactCount` 只在 create_file 里自增，模型"只改文件、不说正文"的一轮
+        // 于是命中 outcomes 为空的分支，对用户说"没有产生可展示的产物"——
+        // 而文件确实被改了、卡片确实更新了。收尾文案说错事比空着更糟。
+        const edits = agentEditCount > 0 ? `改动了 ${agentEditCount} 次文件` : "";
+        const delta = outcomes.length > 0
+          ? `本轮已产出 ${outcomes.join("、")}${edits ? `，并${edits}` : ""}，卡片在下方显示。`
+          : edits
+            ? `本轮${edits}，卡片已同步更新。`
+            : "本轮工具调用已结束，没有产生可展示的产物。";
+        chunk({ seq: 1, delta });
       }
       // 撞上工具步数上限：模型还想继续干（最后一步 finishReason 仍是 tool-calls），是上限把它掐断的。
       // 不说明的话，用户看到的是一段**戛然而止**的回答，会以为软件卡了或模型答完了

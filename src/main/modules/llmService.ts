@@ -449,8 +449,15 @@ export function isToolFailure(output: unknown): boolean {
   // 只看**第一小句**（到第一个冒号/句号/换行为止）。
   // 用"前 N 个字符"不够：实测 `已读取 500 字正文。页面内容：加载失败时请重试。`
   // 在前 24 字里就出现了"失败"，会被误判成工具失败——而它是一段正常的页面正文。
-  const head = output.slice(0, 40).split(/[：:。\n]/, 1)[0] ?? "";
-  return /失败|未获得用户回答/.test(head);
+  //
+  // **第一小句本身也要有长度上限**：`read_artifact(keyword)` 未命中时回的是
+  // "在 很长的文件名.html（共 2118 行）里没有找到「…」。…"，句号在很后面；
+  // 若先按 40 字截再切句，长文件名会把判定标记挤出去（实测 40 字刚好切在「没有找到」前面）。
+  const firstSentence = output.split(/[。\n]/, 1)[0] ?? "";
+  const head = firstSentence.split(/[：:]/, 1)[0] ?? "";
+  // `没有找到` 是 read_artifact(keyword) 的"没命中"，不是失败调用，但对用户是
+  // 「这次没找到」——打勾会让人以为读到了内容（实测渲染成 `✓ 读取文件完成（共 2118 行）`）。
+  return /失败|未获得用户回答|没有找到/.test(sliceSafe(head, 160));
 }
 
 /**
@@ -495,6 +502,9 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       // "在 X 里找到 N 处「…」"、不含"共 N 行"，只匹配行数就会掉进兜底显示成「完成」。
       const found = /找到\s*(\d+)\s*处/.exec(output)?.[1];
       if (found) return `定位到 ${found} 处`;
+      // 没命中：必须先判，否则会掉到下面的"共 N 行"分支，
+      // 摘要写成"共 2118 行"——用户看到的是一个打了叉的数字，读不出"没找到"。
+      if (/没有找到/.test(output)) return "没有找到该片段";
       const range = /共\s*(\d+)\s*行/.exec(output)?.[1];
       return range ? `共 ${range} 行` : "完成";
     }

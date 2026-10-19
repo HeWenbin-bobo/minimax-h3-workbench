@@ -130,6 +130,27 @@ describe("工具成败判定（isToolFailure）", () => {
     expect(isToolFailure(pageBody)).toBe(false);
   });
 
+  // 实测：`read_artifact(keyword)` 没命中时，步骤条渲染成
+  // `✓ 读取文件完成（共 2118 行）`——打了勾、还像是读到了内容。
+  // 两个成因：① 判定用"前 40 字切句"，长文件名把「没有找到」挤出窗口；
+  // ② 摘要优先匹配"共 N 行"，把"没找到"说成了行数。
+  it("keyword 没命中（长文件名）要判成未成功", () => {
+    const missed = "在 一个特别特别长的鹈鹕骑自行车三维演示页面文件名.html（共 2118 行）里没有找到「M.identity」。换个更短或更准确的片段试试（区分大小写）。";
+    expect(isToolFailure(missed)).toBe(true);
+  });
+
+  it("keyword 没命中的摘要要说「没找到」，不能说成行数", () => {
+    const missed = "在 鹈鹕.html（共 2118 行）里没有找到「M.identity」。换个更短或更准确的片段试试（区分大小写）。";
+    const summary = humanizeToolOutput("read_artifact", missed);
+    expect(summary).toBe("没有找到该片段");
+    expect(summary).not.toContain("2118");
+  });
+
+  it("正常按行读回仍报行数（不误伤）", () => {
+    const text = humanizeToolOutput("read_artifact", "文件：鹈鹕.html（共 2118 行，本次显示第 1–400 行）\n   1| …");
+    expect(text).toBe("共 2118 行");
+  });
+
   it("非字符串一律不算失败（不误报）", () => {
     expect(isToolFailure(undefined)).toBe(false);
     expect(isToolFailure(null)).toBe(false);

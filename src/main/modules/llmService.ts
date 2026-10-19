@@ -757,8 +757,18 @@ export async function chatAgent(
 调用后任务卡片会实时显示在对话下方，完成后用户可预览与下载。画面感强的英文 prompt 效果更好。这是**消耗资源**的操作（真实扣费、耗时数十秒），用户没要就别调——同一轮里也不要为同一个意图重复调用。`,
         inputSchema: z.object({
           prompt: z.string().min(1).describe("视频内容描述：画面主体、动作、镜头运动、光线、风格。建议英文，越具体越好。"),
-          duration: z.number().int().min(4).max(15).describe("时长秒数，4–15 之间的整数。用户没说就按 6。"),
-          count: z.number().int().min(1).max(4).describe("生成数量，1–4 之间的整数。用户没说就按 1。")
+          // **不要在这里做范围硬校验**（实测踩到，与 `edit_artifact_batch` 的 min(2) 同一个坑）：
+          // 参数越界时 AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
+          // **整个调用被静默跳过**（toolCall 记进历史但不执行）——模型看不到任何回执，
+          // 只会重试同一条，20 步预算全烧光，而界面把原因归成"参数被上游截断"。
+          //
+          // 下游本来就会夹取（`clampDurationForBackend`：先夹 4–15，RB 再吸附到 4/6/8；
+          // count 也是 `Math.max(1, Math.min(4, …))`），所以放宽 schema 不会产生非法请求。
+          // 建议范围写在 describe 里，让模型看到；越界值由代码兜住而不是让整轮失败。
+          // 连 `.int()` 也不加：模型给 6.5 秒同样会被 `parseToolCall` 拒掉并静默跳过，
+          // 而下游 `Math.round` 本来就会处理小数。
+          duration: z.number().describe("时长秒数，建议 4–15（越界会被自动夹到合法值）。用户没说就按 6。"),
+          count: z.number().describe("生成数量，建议 1–4（越界会被自动夹到合法值）。用户没说就按 1。")
         }),
         // 与其他工具一致：失败要变成**给模型的说明**，而不是抛出。
         // `orchestrator.submit` 会做参数校验并抛中文错误（未保存卡密、RB 预设只收 4/6/8 秒、

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers, MAX_READ_LINES } from "./artifactEdit";
+import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers, MAX_READ_LINES, MAX_READ_CHARS } from "./artifactEdit";
 
 // 这些用例全部来自真机观察到的形态（鹈鹕案例）：
 // 模型为改一处 `M.identity` 整份重写 40KB，改完仍是错的，且它无法核对。
@@ -287,5 +287,33 @@ describe("按关键词定位（findMatchingLines）", () => {
     const out = findMatchingLines(many, "hit", 5);
     expect(out.matches).toHaveLength(5);
     expect(out.total).toBe(30);
+  });
+});
+
+// 实测：真实产物 1757 行、最长单行 169 字符，行数上限够用；
+// 但压缩过的 HTML / 超宽 CSV 可以是"一行几十万字符"——
+// 400 行 × 单行 5000 字符 ≈ 200 万字符 ≈ 57 万 token，一次读爆上下文。
+// 行数只是看起来合理的护栏，字符数才决定真实占用。
+describe("读回时的字符上限（防超长单行）", () => {
+  const NL = String.fromCharCode(10);
+
+  it("超长单行被字符数截断，并标记 charCapped", () => {
+    const text = Array.from({ length: 10 }, () => "x".repeat(20_000)).join(NL);
+    const out = sliceWithLineNumbers(text);
+    expect(out.charCapped).toBe(true);
+    expect(out.body.length).toBeLessThanOrEqual(MAX_READ_CHARS + 10); // sliceSafe 可能多留几个字符
+  });
+
+  it("正常文件不触发字符截断", () => {
+    const out = sliceWithLineNumbers("a" + NL + "b" + NL + "c");
+    expect(out.charCapped).toBe(false);
+    expect(out.body).toContain("a");
+  });
+
+  it("一次读 400 行普通行时总量也在上限内", () => {
+    const text = Array.from({ length: 1000 }, (_, i) => `line ${i} ` + "y".repeat(100)).join(NL);
+    const out = sliceWithLineNumbers(text);
+    expect(out.charCapped).toBe(false);
+    expect(out.body.length).toBeLessThan(MAX_READ_CHARS);
   });
 });

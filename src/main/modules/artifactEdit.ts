@@ -13,6 +13,7 @@
  *
  * 多出来的那点严格是有意的：静默改错地方比报错难查得多。
  */
+import { sliceSafe } from "../../shared/text";
 
 /** 一次编辑的结果。失败时带足够信息让模型自己修正（不抛异常，让工具层决定怎么措辞）。 */
 export type EditOutcome =
@@ -172,18 +173,29 @@ export function applyExactEdits(text: string, edits: readonly { oldText: string;
 export const MAX_READ_LINES = 400;
 
 /**
+ * 一次读回的**字符**上限。
+ *
+ * 为什么只限行数不够（实测：真实产物 1757 行、最长单行 169 字符，没触发；
+ * 但压缩过的 HTML / 超宽 CSV 可以是**一行几十万字符**）：
+ * 400 行 × 单行 5000 字符 = 200 万字符 ≈ 57 万 token，一次就把上下文读爆。
+ * 行数只是"看起来合理"的护栏，**字面量才是真正决定占用的那个量**。
+ */
+export const MAX_READ_CHARS = 60_000;
+
+/**
  * 带行号地切一段出来（读文件工具用）。
  *
  * 为什么要行号：模型据"第 42 行"能补出唯一上下文，而按字符偏移它算不准。
  * 越界一律夹紧而不是报错——模型给个大概范围时要能拿到东西，拿不到才是死路。
  *
- * **未指定 endLine 时最多返回 MAX_READ_LINES 行**，并在 `truncated` 里说明还剩多少行，
- * 让模型知道该用范围继续读，而不是以为文件就这么长。
+ * **两道上限**：未指定 endLine 时最多 `MAX_READ_LINES` 行（行数护栏）；
+ * 渲染出来超过 `MAX_READ_CHARS` 字符时再按字符截（真正决定 token 占用的量）。
+ * 两种截断都通过 `truncated` / `charCapped` 如实报出，让模型知道该用范围或 keyword 继续读。
  *
  * @param startLine 1 起算，缺省 1
  * @param endLine   含端点，缺省到 startLine + MAX_READ_LINES - 1
  */
-export function sliceWithLineNumbers(text: string, startLine?: number, endLine?: number): { body: string; totalLines: number; from: number; to: number; truncated: boolean } {
+export function sliceWithLineNumbers(text: string, startLine?: number, endLine?: number): { body: string; totalLines: number; from: number; to: number; truncated: boolean; charCapped: boolean } {
   const lines = text.split("\n");
   const total = lines.length;
   const from = Math.max(1, Math.min(Math.floor(startLine ?? 1) || 1, total));
@@ -194,7 +206,12 @@ export function sliceWithLineNumbers(text: string, startLine?: number, endLine?:
     .slice(from - 1, to)
     .map((line, i) => `${String(from + i).padStart(5, " ")}| ${line}`)
     .join("\n");
-  return { body, totalLines: total, from, to, truncated: to < total };
+  // 字符上限：压缩过的 HTML 可能是"一行几十万字符"，只限行数挡不住。
+  if (body.length > MAX_READ_CHARS) {
+    // 用 sliceSafe 语义：裸 slice 会切开 emoji 的代理对，留下渲染成 � 的坏字符。
+    return { body: sliceSafe(body, MAX_READ_CHARS), totalLines: total, from, to, truncated: to < total, charCapped: true };
+  }
+  return { body, totalLines: total, from, to, truncated: to < total, charCapped: false };
 }
 
 /**

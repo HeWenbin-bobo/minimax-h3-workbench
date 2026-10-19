@@ -893,11 +893,16 @@ export async function chatAgent(
           // 这种常见叫法时，AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
           // 整个调用被**静默跳过** → 收不到回执 → 反复重试 → 20 步预算烧光，
           // 探针实测「20 步、0 产物」。改成字符串 + 执行侧归一。
-          kind: z.string().min(1).describe("文件类型：html（网页/小工具/游戏）、csv 或 tsv（结构化数据，存为 .xlsx）、md（文档/报告）。常见别名（excel/xlsx/word/doc/markdown）也会被识别。"),
-          name: z.string().min(1).describe("文件名。带不带扩展名都行（如「科技新闻」或「科技新闻.html」）——扩展名会按 kind 自动补齐/纠正，返回结果里会告诉你实际存成了什么名字。"),
-          content: z.string().min(1).describe("完整文件内容。csv/tsv 首行为表头；html 为完整网页（含 <!DOCTYPE html>）；md 为 markdown 正文。")
+          kind: z.string().describe("文件类型：html（网页/小工具/游戏）、csv 或 tsv（结构化数据，存为 .xlsx）、md（文档/报告）。常见别名（excel/xlsx/word/doc/markdown）也会被识别。"),
+          name: z.string().describe("文件名。带不带扩展名都行（如「科技新闻」或「科技新闻.html」）——扩展名会按 kind 自动补齐/纠正；留空时会自动命名。"),
+          content: z.string().describe("完整文件内容。csv/tsv 首行为表头；html 为完整网页（含 <!DOCTYPE html>）；md 为 markdown 正文。不能为空。")
         }),
         execute: async (params) => {
+          // **内容为空要说清楚**（而不是让 schema 拒掉整个调用）：模型偶尔会在
+          // "先建个空文件、再去写"的思路下传空串，直接拒会让它收不到回执、反复重试。
+          if (!String(params.content ?? "").trim()) {
+            return "保存文件失败：content 是空的。请把完整文件内容一次性写在 content 里（csv 首行是表头，html 要含 <!DOCTYPE html>），不要分多次调用。";
+          }
           // **kind 归一**（见 schema 处说明）：把模型的口语化叫法映射到四种规范值。
           // 认不出来时**不在这里拒绝**——交给 `saveArtifactFile` 抛中文错误并回给模型
           // （工具层返回文本比抛异常好：抛出去会让 AI SDK 判整轮失败、回落普通对话）。
@@ -1063,9 +1068,14 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
             // 而 update_plan 几乎每步都调，等于把整轮的进度可视化全部废掉，
             // 还白白烧步数。改在 execute 里归一（见下）。
             status: z.string().describe("步骤状态：pending（未开始）/ in_progress（进行中，全清单最多一项）/ completed（已完成）。")
-          })).min(1).describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。")
+          // **`.min(1)` 也不要**：模型偶尔会给空数组（"这轮没步骤"），
+          // schema 一拒就是整个调用被静默跳过。空清单在 execute 里回一句说明即可。
+          })).describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。")
         }),
         execute: async (params) => {
+          if (params.plan.length === 0) {
+            return "步骤清单是空的：请给出至少一步（每步写清要做什么 + 当前 status）。如果这轮不需要清单，就不用调用本工具。";
+          }
           // status 归一：把模型的口语化写法映射到三个规范值。
           // 认不出来的一律按 pending（宁可显示"未开始"，也不能让整次清单更新被拒）。
           const normalizeStatus = (raw: unknown): "pending" | "in_progress" | "completed" => {

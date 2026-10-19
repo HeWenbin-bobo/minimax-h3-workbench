@@ -221,6 +221,47 @@ describe("chatAgent 工具暴露", () => {
   function lastTools(): Record<string, unknown> {
     return (streamTextMock.mock.calls.at(-1)?.[0] as { tools: Record<string, unknown> }).tools;
   }
+  function lastPrepareStep(): (arg: unknown) => { messages?: unknown[] } {
+    return (streamTextMock.mock.calls.at(-1)?.[0] as { prepareStep: (arg: unknown) => { messages?: unknown[] } }).prepareStep;
+  }
+
+  // 严重回归护栏：预算提示注入时必须**保留已累积的对话**。
+  // 初版用的是 `chatAgent` 入参（初始历史）而不是回调参数里的当前 messages，
+  // 导致第 16 步消息数从 31 条骤降到 4 条——前面搜到的资料全被抹掉，
+  // 模型恰好在"该收敛"的那一刻失忆（探针 probe-preparestep-history 抓到）。
+  describe("剩余预算提示（prepareStep）", () => {
+    it("未到阈值时不覆盖 messages", async () => {
+      stubStream(["好"]);
+      await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal);
+      const out = lastPrepareStep()({ stepNumber: 2, messages: [{ role: "user", content: "a" }] });
+      expect(out.messages).toBeUndefined();
+    });
+
+    it("跨过阈值时保留当前消息并追加提示", async () => {
+      stubStream(["好"]);
+      await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal);
+      const current = [
+        { role: "user", content: "最初的问题" },
+        { role: "assistant", content: "我搜一下" },
+        { role: "tool", content: "步骤清单已更新" }
+      ];
+      // 阈值 = MAX_AGENT_STEPS / 4 = 5；stepNumber = 20 - 5 = 15
+      const out = lastPrepareStep()({ stepNumber: 15, messages: current });
+      expect(out.messages).toHaveLength(current.length + 1);
+      // 关键：原有消息**一条都不能少**
+      expect(out.messages?.slice(0, current.length)).toEqual(current);
+      expect(JSON.stringify(out.messages?.at(-1))).toContain("剩余预算");
+    });
+
+    it("只在跨阈值那一步注入（不每步都刷）", async () => {
+      stubStream(["好"]);
+      await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal);
+      const step = lastPrepareStep();
+      // 阈值之前、之后都不注入：覆盖 carry-forward，不会重复堆叠
+      expect(step({ stepNumber: 14, messages: [] }).messages).toBeUndefined();
+      expect(step({ stepNumber: 16, messages: [] }).messages).toBeUndefined();
+    });
+  });
 
   // 撞满步骤上限必须能被识别：否则用户看到一段戛然而止的回答，界面上没有任何说明
   // （实测 probe-step-limit：10 步打满后气泡停在"正在做第 10 步。"）。

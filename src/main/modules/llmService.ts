@@ -982,13 +982,22 @@ export async function chatAgent(
     // 每搜一次都看到"找到 6 条结果"，就以为还来得及。
     //
     // 载体必须是 **user 消息**（对齐 worldState 的结论：拼进 system 的指令会被无视）。
-    // 这里只在**剩余步数进入最后 1/4** 时追加一条，避免每步都刷一遍稀释注意力。
-    prepareStep: ({ stepNumber }) => {
+    //
+    // **必须用参数里的 `messages`，不能用闭包外层的 `messages`**（实测踩到，且是严重 bug）：
+    // 外层那个是 `chatAgent` 的入参 = **初始历史**。而 `prepareStep` 返回的 messages
+    // 会 carry forward 到后续步骤，于是第 16 步的消息数从 31 条**骤降到 4 条**——
+    // 前面 15 步搜到的资料、读过的网页全被抹掉，模型在"该收敛"的那一刻正好失忆。
+    // 探针 `_scratch/probe-preparestep-history.mjs` 抓到了这个形状。
+    //
+    // 只在**恰好跨过阈值**的那一步注入一次（返回的覆盖会 carry forward），
+    // 每步都注入会让提示层层累积。
+    prepareStep: ({ stepNumber, messages: stepMessages }) => {
+      const threshold = Math.max(1, Math.floor(MAX_AGENT_STEPS / 4));
       const remaining = MAX_AGENT_STEPS - stepNumber;
-      if (remaining > Math.max(1, Math.floor(MAX_AGENT_STEPS / 4))) return {};
+      if (remaining !== threshold) return {};
       return {
         messages: [
-          ...toModelMessages(messages),
+          ...stepMessages,
           {
             role: "user" as const,
             content: `# 剩余预算\n本轮的 ${MAX_AGENT_STEPS} 步工具预算只剩约 ${remaining} 步。请**立刻收敛**：优先把已有的东西交付出来（该出文件就出文件），不要再展开新的搜索或调研。如果确实没做完，就在回复里说明还差什么。`

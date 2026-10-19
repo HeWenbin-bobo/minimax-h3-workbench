@@ -971,6 +971,26 @@ export async function chatAgent(
     // 持续烧 token 而用户拿不到更多东西。20 步 ≈ 3–4 个完整修复循环，够用且有界。
     // 撞上限时仍会明确告知用户（见 main.ts 的 hitStepLimit 提示）。
     stopWhen: stepCountIs(MAX_AGENT_STEPS),
+    // **每步告知剩余预算**（实测依据，2026-10-19 真机跑表格案例）：
+    // 模型为了凑一份显卡对比表，连续搜了 20 多次、打开 6 个网页，**最终一个文件都没产出**，
+    // 22 步全部耗在"再搜一次可能更准"上。它并不知道自己只剩几步——
+    // 每搜一次都看到"找到 6 条结果"，就以为还来得及。
+    //
+    // 载体必须是 **user 消息**（对齐 worldState 的结论：拼进 system 的指令会被无视）。
+    // 这里只在**剩余步数进入最后 1/4** 时追加一条，避免每步都刷一遍稀释注意力。
+    prepareStep: ({ stepNumber }) => {
+      const remaining = MAX_AGENT_STEPS - stepNumber;
+      if (remaining > Math.max(1, Math.floor(MAX_AGENT_STEPS / 4))) return {};
+      return {
+        messages: [
+          ...toModelMessages(messages),
+          {
+            role: "user" as const,
+            content: `# 剩余预算\n本轮的 ${MAX_AGENT_STEPS} 步工具预算只剩约 ${remaining} 步。请**立刻收敛**：优先把已有的东西交付出来（该出文件就出文件），不要再展开新的搜索或调研。如果确实没做完，就在回复里说明还差什么。`
+          }
+        ]
+      };
+    },
     // 输出上限：**必须显式设置**，否则用上游默认值（实测该中转默认约 4096 tokens）。
     // 后果很隐蔽：模型写大文件（单文件 3D 页面/游戏常 >20k 字符）时输出被硬截断，
     // 工具入参 JSON 断在半截 → 解析失败 → 模型误以为是"内容太长"，反复重写、越写越短、

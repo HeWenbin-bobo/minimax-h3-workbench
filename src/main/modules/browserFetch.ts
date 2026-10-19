@@ -603,14 +603,22 @@ export function formatProbeReport(result: HtmlProbeResult): string {
   }
   if (flatScreen) {
     lines.push(`画面采样：整屏约有 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).dominant * 100)}% 是同一种颜色（平均亮度 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).brightness)}）。**这通常意味着页面上什么都没画出来**——画面被某个纯色元素盖满、画布尺寸为 0、或渲染循环根本没跑起来。请检查布局与首帧渲染。`);
-    // 两帧比对：把"循环有没有在转"这条定性结论直接给出来。
-    // 模型分不清"循环没启动"和"页面本来就静止"，只能反复改代码试（真机连改 5 次）。
-    if (typeof result.motion === "number") {
-      const percent = Math.round(result.motion * 100);
-      lines.push(result.motion < 0.01
-        ? `画面变化：间隔 ${MOTION_GAP_MS}ms 的两帧**几乎完全相同**（变化 ${percent}%）。渲染循环很可能**根本没有在跑**——请检查 requestAnimationFrame 是否启动、初始化是否在绘制前就抛错/提前 return。`
-        : `画面变化：间隔 ${MOTION_GAP_MS}ms 的两帧有 ${percent}% 的像素不同——渲染循环**确实在运行**。那么空白更可能是画到了看不见的地方（尺寸/裁剪/相机矩阵），而不是没在画。`);
-    }
+  }
+  // 两帧比对：把"循环有没有在转"这条定性结论直接给出来。
+  // 模型分不清"循环没启动"和"页面本来就静止"，只能反复改代码试（真机连改 5 次）。
+  //
+  // **不能塞在上面的 `flatScreen` 块里**（实测）：采样阶段只要 `pixel.dominant >= 0.97`
+  // 就会多等 500ms 算 motion，而 `flatScreen` 还额外要求 `elementCount > 1`。
+  // 整页只有一个 `<canvas>` 的产物（很常见）于是"算了却不用"——白等半秒，模型还少了
+  // 最有价值的那条结论（循环到底转没转）。
+  //
+  // 判据用 `dominant >= 0.97`（= 采样阶段真的算过 motion 的那个条件），**不是** `flatScreen`：
+  // 非纯色页面压根不会算 motion，那条数据不存在，也就不会有噪声。
+  if (typeof result.motion === "number" && result.pixel && result.pixel.dominant >= 0.97) {
+    const percent = Math.round(result.motion * 100);
+    lines.push(result.motion < 0.01
+      ? `画面变化：间隔 ${MOTION_GAP_MS}ms 的两帧**几乎完全相同**（变化 ${percent}%）。渲染循环很可能**根本没有在跑**——请检查 requestAnimationFrame 是否启动、初始化是否在绘制前就抛错/提前 return。`
+      : `画面变化：间隔 ${MOTION_GAP_MS}ms 的两帧有 ${percent}% 的像素不同——渲染循环**确实在运行**。那么空白更可能是画到了看不见的地方（尺寸/裁剪/相机矩阵），而不是没在画。`);
   }
   if (result.consoleErrors.length > 0) {
     // **"共 N 条"必须用真实总数**：数组被 `MAX_LOGS` 截过，

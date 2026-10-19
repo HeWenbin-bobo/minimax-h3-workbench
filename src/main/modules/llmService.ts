@@ -634,6 +634,11 @@ export interface AgentRunResult {
    * 调用方据此给出可行动提示（而不是让用户对着空白猜）。
    */
   skippedToolCalls: number;
+  /**
+   * 被跳过的工具名（去重）。调用方据此把"是哪个工具的参数不对"说出来——
+   * 只说一个总数时，模型下一轮不知道该改哪一处。
+   */
+  skippedToolNames?: string[];
   usage?: { inputTokens: number };
 }
 
@@ -1185,24 +1190,39 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
   let lastFinishReason: string | undefined;
   /** 被 SDK **跳过**的工具调用数：调用了，但参数解析失败 → 根本没执行。 */
   let skippedToolCalls = 0;
+  /**
+   * 被跳过的工具**名字**（去重）。只说"有 N 次没执行"时，用户和模型都无从下手；
+   * 说出是哪个工具，模型下一轮就能只改那一个参数（实测：本会话遇到的跳过
+   * 全是"某个工具的参数不满足 schema"，而非输出截断）。
+   */
+  const skippedToolNames: string[] = [];
   try {
     // ai v7 的 steps 是 PromiseLike<Array<StepResult>>——await 后按步累计工具调用数。
     const steps = await stream.steps;
     for (const step of steps) {
       toolCalls += step.toolCalls.length;
       lastFinishReason = step.finishReason;
-      // **参数 JSON 断在半截时，SDK 只记录 toolCall、不执行它**（没有 toolResult），
-      // 于是 onToolExecutionStart/End 都不触发。实测（probe-truncated-toolcall）：
-      // 上游连续 20 步都返回截断参数 → 界面**工具步骤一片空白**、20 步全部耗尽，
-      // 用户只看到"本轮工具调用已结束，没有产生可展示的产物"。
-      // 模型那边则以为"内容太长被截断"，反复重写、越写越短（CLAUDE.md 记过这个坑）。
+      // **参数 JSON 断在半截 / 不满足 schema 时，SDK 只记录 toolCall、不执行它**
+      // （没有 toolResult），于是 onToolExecutionStart/End 都不触发。实测：
+      // 上游连续 20 步都返回坏参数 → 界面**工具步骤一片空白**、步数全部耗尽，
+      // 用户只看到"没有产生可展示的产物"。
       //
       // **`toolResults` 可能整个缺失**（部分 provider 组合不产出它）——那时按"都执行了"算，
       // 只在**有明确证据**（toolResults 存在但少于 toolCalls）时才报"被跳过"，
       // 不能因为字段不存在就误报一批"没有真正执行"（单测已抓到过这个错）。
       const results = (step as { toolResults?: unknown[] }).toolResults;
       if (Array.isArray(results)) {
-        skippedToolCalls += Math.max(0, step.toolCalls.length - results.length);
+        const missing = step.toolCalls.length - results.length;
+        if (missing > 0) {
+          skippedToolCalls += missing;
+          // 按 toolCallId 差集找出**具体是哪几个**，把名字记下来给文案用。
+          const done = new Set(results.map((entry) => String((entry as { toolCallId?: unknown })?.toolCallId ?? "")));
+          for (const call of step.toolCalls) {
+            const name = String((call as { toolName?: unknown }).toolName ?? "");
+            if (!name || done.has(String((call as { toolCallId?: unknown }).toolCallId ?? ""))) continue;
+            if (!skippedToolNames.includes(name)) skippedToolNames.push(name);
+          }
+        }
       }
     }
   } catch {
@@ -1225,7 +1245,7 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
   } catch {
     // usage 不可用不影响本轮结果。
   }
-  return { textLength, toolCalls, hitStepLimit: lastFinishReason === "tool-calls", skippedToolCalls, usage };
+  return { textLength, toolCalls, hitStepLimit: lastFinishReason === "tool-calls", skippedToolCalls, skippedToolNames, usage };
 }
 
 /**

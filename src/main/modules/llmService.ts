@@ -475,6 +475,16 @@ function humanizeToolInput(toolName: string, input: unknown): string {
 export interface AgentRunResult {
   textLength: number;
   toolCalls: number;
+  /**
+   * 本轮是否**撞上了工具步数上限**（`stepCountIs`）而被迫中断。
+   *
+   * 为什么必须区分（实测 probe-step-limit，mock 让模型无限调工具）：
+   * 打满 10 步时循环直接停下，最终气泡是模型**话说到一半**的正文，界面没有任何提示。
+   * 用户看到的是一段戛然而止的回答，会以为软件卡住或者模型答完了。
+   * 判定依据是最后一步的 `finishReason === "tool-calls"`：模型还想继续调工具，
+   * 是步数上限把它掐断的（自然收尾会是 `stop`）。
+   */
+  hitStepLimit: boolean;
   usage?: { inputTokens: number };
 }
 
@@ -800,10 +810,13 @@ export async function chatAgent(
       send({ seq: (seq += 1), delta: part });
     }
   }
+  let lastFinishReason: string | undefined;
   try {
     // ai v7 的 steps 是 PromiseLike<Array<StepResult>>——await 后按步累计工具调用数。
-    for (const step of await stream.steps) {
+    const steps = await stream.steps;
+    for (const step of steps) {
       toolCalls += step.toolCalls.length;
+      lastFinishReason = step.finishReason;
     }
   } catch {
     // steps 不可用时按 0 计（部分 provider 组合不产 steps）。
@@ -825,7 +838,7 @@ export async function chatAgent(
   } catch {
     // usage 不可用不影响本轮结果。
   }
-  return { textLength, toolCalls, usage };
+  return { textLength, toolCalls, hitStepLimit: lastFinishReason === "tool-calls", usage };
 }
 
 /**

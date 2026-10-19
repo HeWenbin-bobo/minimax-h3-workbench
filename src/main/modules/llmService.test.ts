@@ -172,6 +172,38 @@ describe("chatAgent 工具暴露", () => {
     return (streamTextMock.mock.calls.at(-1)?.[0] as { tools: Record<string, unknown> }).tools;
   }
 
+  // 撞满步骤上限必须能被识别：否则用户看到一段戛然而止的回答，界面上没有任何说明
+  // （实测 probe-step-limit：10 步打满后气泡停在"正在做第 10 步。"）。
+  // 判据是**最后一步**的 finishReason：还是 tool-calls 说明模型想继续、被上限掐断；
+  // 自然收尾会是 stop。
+  describe("步数上限识别（hitStepLimit）", () => {
+    const stubSteps = (finishReasons: string[]) => {
+      streamTextMock.mockImplementation(() => ({
+        textStream: (async function* () { yield "边干边说"; })(),
+        steps: Promise.resolve(finishReasons.map((finishReason) => ({ finishReason, toolCalls: [{ toolName: "update_plan" }] }))),
+        finishReason: Promise.resolve(finishReasons.at(-1) ?? "stop")
+      }));
+    };
+
+    it("最后一步仍是 tool-calls → 判定撞上限", async () => {
+      stubSteps(["tool-calls", "tool-calls", "tool-calls"]);
+      const result = await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal);
+      expect(result.hitStepLimit).toBe(true);
+    });
+
+    it("自然收尾（stop）→ 不算撞上限", async () => {
+      stubSteps(["tool-calls", "stop"]);
+      const result = await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal);
+      expect(result.hitStepLimit).toBe(false);
+    });
+
+    it("没有 steps 信息时保守判为未撞上限（不误报）", async () => {
+      stubStream(["好"]);
+      const result = await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal);
+      expect(result.hitStepLimit).toBe(false);
+    });
+  });
+
   // 回归护栏：曾无条件下发 web_search，导致游乐场「联网」开关形同虚设。
   it("联网开关关闭时不暴露 web_search 工具", async () => {
     stubStream(["好"]);

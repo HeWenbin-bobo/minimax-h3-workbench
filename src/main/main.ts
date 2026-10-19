@@ -1237,8 +1237,14 @@ function registerIpc(
           const displayTotal = realRowCount ?? slice.totalLines;
           // **必须说明被截断了**（实测真机）：模型不带范围读 1651 行全文，紧接着又读一遍，
           // 白烧几十 KB 还挤掉后续修改步骤。默认上限 400 行，并告诉它还剩多少、怎么继续读。
+          //
+          // **但"还能读多少"与"文件共多少行"是两件事**（实测）：大表格只有前 2000 行进了
+          // `raw`，往后 startLine/endLine 与 keyword 都够不着。旧文案写"还有 4601 行没显示，
+          // 用 startLine/endLine 分段读"，是让模型去读一段不存在的内容——它照做只会拿到夹紧后的末尾。
           const more = slice.truncated
-            ? `\n（只显示前 ${slice.to - slice.from + 1} 行；文件共 ${displayTotal} 行，还有 ${Math.max(0, displayTotal - slice.to)} 行没显示。需要更多就用 startLine/endLine 分段读，或者用 keyword 直接定位。）`
+            ? realRowCount !== undefined
+              ? `\n（本次显示第 ${slice.from}–${slice.to} 行。这个表格共 ${realRowCount} 行，但**只有前 ${slice.totalLines - 1} 行能读**——后面的行没有载入，startLine/endLine 与 keyword 都够不到。要看后面请在回复里说明要哪几行/哪一列，或让用户直接用 Excel 打开；继续读前面的，用 startLine/endLine 分段。）`
+              : `\n（只显示前 ${slice.to - slice.from + 1} 行；文件共 ${displayTotal} 行，还有 ${Math.max(0, displayTotal - slice.to)} 行没显示。需要更多就用 startLine/endLine 分段读，或者用 keyword 直接定位。）`
             : "";
           // **按字符截断也要说**（否则是静默丢失）：超长单行文件（压缩过的 HTML）
           // 会先撞 `MAX_READ_CHARS`，行数看起来"全给了"，实际内容被切在半路。

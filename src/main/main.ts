@@ -1103,7 +1103,28 @@ function registerIpc(
             try {
               const book = XLSX.readFile(resolved);
               const first = book.SheetNames[0];
-              raw = first ? XLSX.utils.sheet_to_csv(book.Sheets[first]) : "";
+              if (!first) raw = "";
+              else {
+                const sheet = book.Sheets[first];
+                // **必须自己限行**（与预览面板同一口径 2000 行，实测对齐）：
+                // `sheet_to_csv` 没有上限选项，一个十万行表格会整张塞进模型上下文——
+                // 那不是"能核验"，那是把上下文一次烧光。预览路径早有这个限制，
+                // 智能体路径漏了（同一类判断写两处、只改一处）。
+                const range = XLSX.utils.decode_range(sheet["!ref"] || "A1");
+                const MAX_ROWS = 2_000;
+                const rowCount = range.e.r - range.s.r + 1;
+                if (rowCount > MAX_ROWS) {
+                  const capped = {
+                    ...sheet,
+                    "!ref": XLSX.utils.encode_range({ s: range.s, e: { r: range.s.r + MAX_ROWS - 1, c: range.e.c } })
+                  };
+                  // 截断说明走**单独一行**并明确标出：模型看到它就知道该按 keyword 定位或分段，
+                  // 而不是以为表格只有 2000 行。
+                  raw = `${XLSX.utils.sheet_to_csv(capped)}\n\n（表格共 ${rowCount} 行，这里只给了前 ${MAX_ROWS} 行。需要看后面的，用 keyword 定位，或告诉我你要哪一段。）`;
+                } else {
+                  raw = XLSX.utils.sheet_to_csv(sheet);
+                }
+              }
             } catch (error) {
               throw new Error(`表格文件已损坏或格式不受支持，无法读取（${error instanceof Error ? error.message : "未知错误"}）。`);
             }

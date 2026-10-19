@@ -732,8 +732,13 @@ export async function chatAgent(
 何时不用：纯创作、代码、数学、翻译，或用户明确说"不用联网/凭你自己知道的说"。这些情况直接回答更快。
 
 查询词提炼为最核心的 3–6 个词（不是整句话，也不要加"请帮我搜索"之类的礼貌语）。结果不相关就换一组词再搜一次；连续两次不相关就如实告知，不要反复搜同一个词。`,
-          inputSchema: z.object({ query: z.string().min(1).describe("搜索关键词，3–6 个词，如'iPhone 18 Pro 京东 价格'。不要写整句话。") }),
+          // 同样不做 `.min(1)` 硬校验：空 query 时让工具层回一句可纠正的说明，
+          // 而不是在 `parseToolCall` 阶段把整个调用丢掉（那一丢就是"收不到回执 → 反复重试"）。
+          inputSchema: z.object({ query: z.string().describe("搜索关键词，3–6 个词，如'iPhone 18 Pro 京东 价格'。不要写整句话。") }),
           execute: async ({ query }) => {
+            if (!String(query ?? "").trim()) {
+              return "搜索关键词是空的。请给出 3–6 个具体的词（如'iPhone 18 Pro 京东 价格'），不要写整句话。";
+            }
             try {
               const results = await callbacks.webSearch(query);
               return results || "未搜索到相关内容。可换一组关键词重试，或改用 open_page 打开已知的站点。";

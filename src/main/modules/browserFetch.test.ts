@@ -198,13 +198,28 @@ describe("产物自检报告（formatProbeReport）", () => {
     expect(text).toContain("页面已实际运行且未报错");
   });
 
-  it("拿不到截图时不误判（pixel 缺省照常给结论）", () => {
+  // 拿不到截图采样时**不能替它下结论**。旧断言是"照常给结论（已实际运行且未报错）"，
+  // 可"画面不是纯色"这句话本身就没有证据——`pixel` 是 undefined。
+  // 模型会据此告诉用户"页面正常"，而屏幕可能是空的（正是这套采样要防的假通过）。
+  it("拿不到截图采样时不下「画面正常」的结论", () => {
     const text = formatProbeReport({
       loaded: true, title: "x", consoleErrors: [],
       canvases: [{ width: 10, height: 10, clientWidth: 10, clientHeight: 10, context: "webgl" }], textLength: 5, elementCount: 4
     });
     expect(text).not.toContain("什么都没画出来");
-    expect(text).toContain("页面已实际运行且未报错");
+    expect(text).not.toContain("画面也不是纯色");
+    expect(text).toContain("未能取得画面采样");
+  });
+
+  // 实测：3 个元素、0 字文本、无画布——脚本多半压根没跑起来。
+  // 旧逻辑落进"未报错 = 通过"那一支，报告与摘要双双说"正常"。
+  it("既无画布也无文本时说明这不算正常", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "", consoleErrors: [], canvases: [], textLength: 0, elementCount: 3
+    });
+    expect(text).toContain("既没有画布也没有可见文本");
+    expect(text).toContain("这不等于正常");
+    expect(text).not.toContain("画面也不是纯色");
   });
 
   // 真机证据：模型连续 5 次修改都提示"画面是空的"，它在回复里自己怀疑

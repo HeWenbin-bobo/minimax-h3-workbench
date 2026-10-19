@@ -626,6 +626,15 @@ export function formatProbeReport(result: HtmlProbeResult): string {
     lines.push("请针对这些报错修改后重新生成，并在回复里说明修了什么。");
   } else if (flatScreen) {
     lines.push("控制台没有 error/warning，但上面的画面采样说明屏幕是空的——**不要**据此告诉用户页面正常。");
+  } else if (result.canvases.length === 0 && result.textLength === 0) {
+    // **既没有画布也没有文本**：这是"脚本压根没跑起来"的最强信号，
+    // 不能落进"未报错 = 通过"那一支（实测：3 个元素、0 字文本、无画布，
+    // 报告却在说"画面也不是纯色"，而截图采样其实没拿到——`pixel` 是 undefined，
+    // 那句"不是纯色"无据可依）。摘要也会跟着说"自检通过"。
+    lines.push("控制台没有 error/warning，但页面既没有画布也没有可见文本——**这不等于正常**：多半是脚本没跑起来、或内容没渲染出来。请检查 <script> 是否执行（初始化是否提前 return / 抛错后被吞）、内容是否依赖了不允许的外链资源。");
+  } else if (!result.pixel) {
+    // 拿不到截图采样时**不能替它下结论**（说"画面不是纯色"是没有证据的判断）。
+    lines.push("控制台没有任何 error/warning；本次**未能取得画面采样**（截图失败），所以无法判断画面是否为空——不要据此告诉用户页面正常，也不要声称看过画面效果。");
   } else {
     lines.push("控制台没有任何 error/warning，画面也不是纯色。可以据此如实告诉用户页面已实际运行且未报错；但不要声称看过画面效果——你拿到的是运行状态，不是截图。");
   }

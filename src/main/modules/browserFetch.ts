@@ -522,7 +522,8 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
       const onLoad = () => finish(true);
       // 只认主框架失败：子框架（iframe）失败是常态，不该把整页判成"没跑起来"。
       const onFail = (_e: unknown, code: number, description: string, _u: string, isMainFrame: boolean) => {
-        if (isMainFrame) { logs.unshift(`页面加载失败：${description}（${code}）`); finish(false); }
+        // 与 `renderOnce` 同一套措辞（`description` 可能为空，别拼出「页面加载失败：（-3）」）。
+        if (isMainFrame) { logs.unshift(`页面加载失败：${describeNetError(code, description)}`); finish(false); }
       };
       if (signal?.aborted) { onAbort(); return; }
       signal?.addEventListener("abort", onAbort, { once: true });

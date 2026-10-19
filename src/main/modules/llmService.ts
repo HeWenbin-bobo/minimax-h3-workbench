@@ -940,7 +940,15 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           edits: z.array(z.object({
             oldText: z.string().min(1).describe("被替换的原文，逐字符一致且在（前序修改后的）文件中唯一。"),
             newText: z.string().describe("替换成的新内容。允许为空字符串（删除）。")
-          })).min(2).max(20).describe("2–20 条修改。按数组顺序依次应用。")
+          // **下限必须是 1**（实测踩到）：原来写 `min(2)`，模型只给 1 条时
+          // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
+          // **整个调用被静默跳过**（toolCall 记进历史但不执行）——
+          // 模型看不到任何回执，会一直重试同一条，20 步预算全烧光，
+          // 而界面把原因归成"参数被上游截断"（完全误导）。
+          //
+          // 而且这条约束本来就没有依据：`applyExactEdits` 对 1 条编辑照常工作，
+          // "2 条以上才值得批量"是给模型的**建议**，不该做成硬校验。
+          })).min(1).max(20).describe("1–20 条修改。按数组顺序依次应用。")
         }),
         execute: async (params) => {
           try {

@@ -1386,7 +1386,19 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 按"最近使用"裁剪，且绝不丢弃正在生成回复的会话——否则一段正在跑的对话会被静默砍掉。
   useEffect(() => {
     const capped = sessions.length > PG_SESSION_CAP ? capSessions(sessions, generatingIds) : sessions;
-    if (capped !== sessions) setSessions(capped);
+    if (capped !== sessions) {
+      // **被裁掉的会话，产物目录也要清**（实测泄漏）：清理只覆盖「用户彻底删除」与
+      // 「回收站 7 天过期」两条路径，而这第三条（超出 50 个上限被淘汰）从来没走过
+      // `purgeSessionArtifacts` —— 会话记录从 localStorage 消失、界面再也打不开，
+      // 但 `userData/artifacts/<sessionId>/` 一直躺在磁盘上（模型一个 3D 页面就是几百 KB）。
+      // 副作用必须放在 updater **之外**（React 开发模式会重复调用 updater）。
+      const keptIds = new Set(capped.map((s) => s.id));
+      for (const session of sessions) {
+        if (keptIds.has(session.id)) continue;
+        void window.h3.purgeSessionArtifacts(session.id).catch(() => undefined);
+      }
+      setSessions(capped);
+    }
     // 空对话不落盘：关软件即"永久删除"（用户要求——空状态只是临时草稿）；正在生成回复的空壳除外（防截断）。
     persistPendingRef.current = capped.filter((s) => s.messages.length > 0 || generatingIds.includes(s.id));
     // 已有排期就只更新待写数据（run-once timer），避免每个 chunk 都重置计时器

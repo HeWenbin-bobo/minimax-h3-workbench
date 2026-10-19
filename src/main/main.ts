@@ -1270,7 +1270,12 @@ function registerIpc(
             const nextStep = /\.html?$/i.test(found.name)
               ? "建议立刻 inspect_artifact 自检一次，确认没有引入新报错。"
               : "改完可直接告诉用户，或用 read_artifact 复核。";
-            return `已修改 ${found.name}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${sizeKb}）${fellBackNote}。${nextStep}`;
+            // 模型把**读回结果的行号前缀**一起抄进 oldText 时，这里替它剥掉了。
+            // 必须说出来：否则它下次还会照抄（并且不知道自己抄错了，只是"这次居然成功了"）。
+            const gutterNote = outcome.strippedGutter
+              ? "\n（注意：你给的 oldText 带着 read_artifact 的行号前缀（`  42| `），我已自动剥掉后再匹配。以后写 oldText 时不要带行号那一栏。）"
+              : "";
+            return `已修改 ${found.name}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${sizeKb}）${fellBackNote}。${nextStep}${gutterNote}`;
           });
         },
         // 批量编辑：一次调用应用多处修改，**全部成功才写盘**。

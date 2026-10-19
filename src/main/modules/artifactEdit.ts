@@ -17,7 +17,16 @@ import { sliceSafe } from "../../shared/text";
 
 /** 一次编辑的结果。失败时带足够信息让模型自己修正（不抛异常，让工具层决定怎么措辞）。 */
 export type EditOutcome =
-  | { ok: true; text: string; line: number }
+  | {
+      ok: true;
+      text: string;
+      line: number;
+      /**
+       * oldText 原本带着 `read_artifact` 的行号前缀（`   42| …`），已被自动剥掉。
+       * 调用方应当告诉模型这一点，否则它不知道"我抄错了却没报错"是怎么发生的。
+       */
+      strippedGutter?: boolean;
+    }
   | {
       ok: false;
       reason: "empty-old" | "not-found" | "ambiguous";
@@ -165,6 +174,39 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
   if (hits.length > 1) {
     return { ok: false, reason: "ambiguous", count: hits.length, lines: linesOf(normalizedText, hits) };
   }
+
+  // 第三次尝试：剥掉 `read_artifact` 的**行号前缀**再匹配。
+  //
+  // 为什么需要（实测复现）：`read_artifact` 返回的是 `    42| const a = 1;` 这种带行号的文本，
+  // 而模型照着抄进 oldText 时，很自然地连着 `42| ` 一起复制（它看到的就是这段）。
+  // 那不是文件里的内容，精确匹配必然失败 → 模型只能再读一遍、再猜一遍。
+  // 这是我们**自己的输出格式**给它挖的坑，理应在这里替它剥掉。
+  //
+  // 只在"至少一半的行都带行号前缀"时才剥：单看第一行不足以判断——
+  // 产物里本来就可能出现 `1| ` 这样的文本（ASCII 表格、竖线分隔的笔记）。
+  const degutter = (value: string): string | undefined => {
+    const lines = value.split("\n");
+    const withGutter = lines.filter((line) => /^\s*\d+\| ?/.test(line)).length;
+    if (withGutter === 0 || withGutter * 2 < lines.length) return undefined;
+    return lines.map((line) => line.replace(/^\s*\d+\| ?/, "")).join("\n");
+  };
+  const degutterNeedle = degutter(normalizedNeedle);
+  if (degutterNeedle !== undefined && degutterNeedle !== normalizedNeedle) {
+    const strippedHits = occurrences(normalizedText, degutterNeedle);
+    if (strippedHits.length === 1) {
+      const at = strippedHits[0];
+      return {
+        ok: true,
+        text: normalizedText.slice(0, at) + normalizeEol(replacement) + normalizedText.slice(at + degutterNeedle.length),
+        line: lineOf(normalizedText, at),
+        strippedGutter: true
+      };
+    }
+    if (strippedHits.length > 1) {
+      return { ok: false, reason: "ambiguous", count: strippedHits.length, lines: linesOf(normalizedText, strippedHits) };
+    }
+  }
+
   // 找不到时给出**最接近的几行**：只回一句"找不到"，模型只能再读一次文件、再猜一次
   // （真机上它这样重复了 4 次，20 步预算全烧在这上面）。
   return { ok: false, reason: "not-found", count: 0, lines: [], hints: closestLines(normalizedText, normalizedNeedle) };

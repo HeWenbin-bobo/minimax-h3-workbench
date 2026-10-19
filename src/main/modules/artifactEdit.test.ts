@@ -78,6 +78,34 @@ describe("applyExactEdit", () => {
     if (!out.ok) expect(out.lines).toEqual([3, 5]);
   });
 
+  // 实测复现：`read_artifact` 返回的是 `    42| const a = 1;`，
+  // 模型照抄进 oldText 时连着行号一起复制（它看到的就是这段）。
+  // 那不是文件内容 → 精确匹配必然失败 → 再读一遍再猜一遍。
+  // 这是我们自己的输出格式挖的坑，理应在编辑这一侧替它剥掉。
+  it("oldText 带着 read_artifact 的行号前缀也能改到", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["const a = 1;", "const b = 2;"].join(NL);
+    // 模型照抄读回结果（前导空格 + 行号 + | ）
+    const copied = ["    1| const a = 1;", "    2| const b = 2;"].join(NL);
+    const out = applyExactEdit(file, copied, "const a = 9;");
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.text).toBe("const a = 9;");
+      // 必须告诉调用方"我替你剥了行号"，否则模型不知道发生了什么
+      expect(out.strippedGutter).toBe(true);
+    }
+  });
+
+  // 反向自检：产物里本来就可能有 `1| ` 这种文本（ASCII 表格、竖线分隔的笔记），
+  // 不能因为第一行像行号就整段乱剥。
+  it("普通文本（只有一行带竖线）不会被误当行号剥掉", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["1| 这不是行号，是正文", "普通第二行"].join(NL);
+    const out = applyExactEdit(file, file, "改掉了");
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.strippedGutter).toBeUndefined();
+  });
+
   it("CRLF 文件用 LF 的 oldText 也能改到（行尾归一）", () => {
     const text = "a\r\nM.identity();\r\nb";
     const out = applyExactEdit(text, "M.identity();", "M.ident();");

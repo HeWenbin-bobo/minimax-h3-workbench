@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { renderMarkdown } from "./markdown";
-import { normalizeStoredSessions, extractArtifact, foldArtifactVersions } from "./App";
+import { normalizeStoredSessions, extractArtifact, foldArtifactVersions, stripTransientForPersist } from "./App";
 import { PLAN_BLOCK_CLOSE, PLAN_BLOCK_OPEN } from "../shared/planMode";
 
 const render = (text: string) => renderToStaticMarkup(createElement("div", null, renderMarkdown(text)));
@@ -450,5 +450,38 @@ describe("产物多版本折叠（foldArtifactVersions）", () => {
 
   it("空列表返回空数组", () => {
     expect(foldArtifactVersions([])).toEqual([]);
+  });
+});
+
+// 实测不一致：注释说 toolSteps / streaming 是"瞬态、读取时强制剥离"，
+// 但写入侧一直没剥离——每条消息的工具日志被原样写进 localStorage（配额只有 5–10MB）。
+describe("落盘前剥离瞬态字段（stripTransientForPersist）", () => {
+  const base = (over: Record<string, unknown>) => ({
+    id: "s1", title: "t", createdAt: "2026-10-19T00:00:00.000Z", updatedAt: "2026-10-19T00:00:00.000Z",
+    // `role` 必须窄成字面量类型，否则整个对象不满足 PlaygroundSession（TS2322）。
+    messages: [{ id: "m1", role: "assistant" as const, content: "hi", ...over }]
+  });
+
+  it("toolSteps 不落盘（内存态不动，只影响写的拷贝）", () => {
+    const out = stripTransientForPersist([base({ toolSteps: ["→ 正在搜索：x", "✓ 找到 3 条结果"] })]);
+    expect(out[0].messages[0].toolSteps).toBeUndefined();
+    expect(out[0].messages[0].content).toBe("hi");
+  });
+
+  it("streaming 标记不落盘", () => {
+    const out = stripTransientForPersist([base({ streaming: true })]);
+    expect(out[0].messages[0].streaming).toBeUndefined();
+  });
+
+  it("没有瞬态字段的消息**原样返回同一个引用**（避免无谓复制）", () => {
+    const input = [base({})];
+    expect(stripTransientForPersist(input)[0].messages[0]).toBe(input[0].messages[0]);
+  });
+
+  it("其它字段与 artifacts 完整保留", () => {
+    const artifacts = [{ name: "a.html", path: "p", size: 1, kind: "html" }];
+    const out = stripTransientForPersist([base({ artifacts, toolSteps: ["x"] })]);
+    expect(out[0].messages[0].artifacts).toEqual(artifacts);
+    expect(out[0].title).toBe("t");
   });
 });

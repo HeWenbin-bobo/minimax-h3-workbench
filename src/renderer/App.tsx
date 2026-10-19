@@ -1126,6 +1126,27 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
   }));
 }
 
+/**
+ * 落盘前剥掉**瞬态字段**（`toolSteps` / `streaming`）。
+ *
+ * 读取侧（`normalizeStoredSessions`）本来就会强制剥离这两项，但**写入侧一直没剥**——
+ * 于是每条消息的工具日志（一次多步任务能攒二三十行）被原样写进 localStorage。
+ * 配额只有 5–10MB，长会话里工具日志是纯浪费：读回来立刻被丢掉，却先占了一次配额，
+ * 顶到上限时用户看到的是"本地存储空间不足，最近的对话可能无法保存"。
+ *
+ * 内存态**不动**（界面还要显示步骤条），只影响写到磁盘的那份拷贝。
+ */
+export function stripTransientForPersist(sessions: PlaygroundSession[]): PlaygroundSession[] {
+  return sessions.map((session) => ({
+    ...session,
+    messages: session.messages.map((msg) => {
+      if (!msg.streaming && !msg.toolSteps) return msg;
+      const { toolSteps: _steps, streaming: _streaming, ...rest } = msg;
+      return rest;
+    })
+  }));
+}
+
 function loadSessions(): PlaygroundSession[] {
   try {
     return normalizeStoredSessions(JSON.parse(localStorage.getItem(pgSessionsKey) || "[]"));
@@ -1330,7 +1351,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     // 不兜的话 effect 直接抛异常 → 整个 PlaygroundPage 崩溃、界面塌成空白，
     // 用户还不知道会话其实没存下来（实测复现）。
     try {
-      localStorage.setItem(pgSessionsKey, JSON.stringify(data));
+      localStorage.setItem(pgSessionsKey, JSON.stringify(stripTransientForPersist(data)));
       storageWarnedRef.current = false; // 写成功即复位，下次真失败时还能再提醒一次
     } catch {
       if (!storageWarnedRef.current) {

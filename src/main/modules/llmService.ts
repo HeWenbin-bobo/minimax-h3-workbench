@@ -539,6 +539,9 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       if (errors) return `自检发现 ${errors} 条报错`;
       // 拿不到截图采样时也不能说"通过"：那种情况我们无从判断画面。
       if (/未能取得画面采样/.test(output)) return "自检完成，但没拿到画面采样（无法判断是否空白）";
+      // 采样是纯色、但元素太少（≤1）没能走"什么都没画出来"那一支：
+      // 也**不能**说成平淡的"自检完成"——纯色本身就是个信号。
+      if (/是同一种颜色/.test(output)) return "自检完成，但画面是纯色（可能没画出来）";
       return /没有任何 error\/warning/.test(output) ? "自检通过，无报错" : "自检完成";
     }
     case "update_plan": {

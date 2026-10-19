@@ -211,7 +211,20 @@ describe("产物自检报告（formatProbeReport）", () => {
     expect(text).toContain("未能取得画面采样");
   });
 
-  // 实测：3 个元素、0 字文本、无画布——脚本多半压根没跑起来。
+  // 实测：只有 1 个元素（例如整页就一个全屏 canvas）时 `flatScreen` 恒为假
+  // （它要求 elementCount > 1），最终分支于是写"画面也不是纯色"——
+  // 可采样明明是 100% 纯色。这是与证据相反的**事实错误**。
+  it("元素极少但采样是纯色时，不能反过来说「画面也不是纯色」", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "sole", consoleErrors: [],
+      canvases: [{ width: 1280, height: 720, clientWidth: 1280, clientHeight: 720, context: "webgl" }],
+      textLength: 0, elementCount: 1,
+      pixel: { dominant: 1, brightness: 255, sampled: 1000 }
+    });
+    expect(text).not.toContain("画面也不是纯色");
+    expect(text).toContain("是同一种颜色");
+    expect(text).toContain("不能据此确认画面正常");
+  });
   // 旧逻辑落进"未报错 = 通过"那一支，报告与摘要双双说"正常"。
   it("既无画布也无文本时说明这不算正常", () => {
     const text = formatProbeReport({

@@ -635,6 +635,11 @@ export function formatProbeReport(result: HtmlProbeResult): string {
   } else if (!result.pixel) {
     // 拿不到截图采样时**不能替它下结论**（说"画面不是纯色"是没有证据的判断）。
     lines.push("控制台没有任何 error/warning；本次**未能取得画面采样**（截图失败），所以无法判断画面是否为空——不要据此告诉用户页面正常，也不要声称看过画面效果。");
+  } else if (result.pixel.dominant >= 0.97) {
+    // 采样**确实是纯色**，但 `flatScreen` 因为元素太少（≤1）没敢下"什么都没画出来"的结论。
+    // 这时候**不能**说"画面也不是纯色"——那是与证据相反的事实错误。
+    // 元素极少通常意味着页面结构本身就不完整，纯色这件事仍然要如实报出来。
+    lines.push(`画面采样：整屏约有 ${Math.round(result.pixel.dominant * 100)}% 是同一种颜色，但这个页面只有 ${result.elementCount} 个元素——**不能据此确认画面正常**（页面结构可能不完整）。请检查 HTML 是否完整、内容是否真的渲染到了页面上。`);
   } else {
     lines.push("控制台没有任何 error/warning，画面也不是纯色。可以据此如实告诉用户页面已实际运行且未报错；但不要声称看过画面效果——你拿到的是运行状态，不是截图。");
   }

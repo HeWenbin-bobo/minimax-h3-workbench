@@ -988,10 +988,12 @@ function registerIpc(
         //   ② 历史使用习惯（从既有任务提炼，用户自定义提示词时仍追加）
         // 环境事实**不放这里**（实测被忽略），改由 injectWorldState 拼成 user 片段。
         // 最后再套 withPlanMode：本轮规则是强约束，放最末才不被稀释。
+        // **要传真实的联网开关**：用户关掉「联网」时 web_search 不下发，
+        // 而计划模式的"可用工具"清单若照旧写它可用，模型会去调一个不存在的工具。
         systemPrompt: withPlanMode(buildSystemPrompt({
           custom: turn.value.systemPrompt,
           memoryHint: buildAgentMemoryHint(orchestrator.list())
-        }), planArg),
+        }), planArg, { webSearch: Boolean(webSearch || browserOnly) }),
         searchBaseUrl: turn.value.searchBaseUrl || undefined,
         searchApiKey: turn.value.searchApiKey
       };

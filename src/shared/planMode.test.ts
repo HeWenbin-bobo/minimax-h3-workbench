@@ -115,6 +115,28 @@ describe("withPlanMode 拼接", () => {
   it("基础提示词为空时不产生前导空行", () => {
     expect(withPlanMode("", "plan").startsWith("# 本轮是")).toBe(true);
   });
+
+  // 实测同类不一致：用户关掉「联网」时 web_search 根本不下发，
+  // 而计划模式的"可用工具"清单照旧写它可用——模型会去调一个不存在的工具，
+  // 然后为"我调不了搜索"道歉。清单必须是本轮**真实**的可用集合。
+  it("用户关掉联网时，计划模式不再宣称 web_search 可用", () => {
+    const result = withPlanMode("你是助手。", "plan", { webSearch: false });
+    expect(result).not.toContain("- web_search(query)");
+    expect(result).toContain("关闭了「联网」");
+    // 其它只读工具仍在清单里
+    expect(result).toContain("- open_page(url)");
+    expect(result).toContain("- read_artifact(name");
+  });
+
+  it("联网可用时清单照旧包含 web_search", () => {
+    const result = withPlanMode("你是助手。", "plan", { webSearch: true });
+    expect(result).toContain("- web_search(query)");
+    expect(result).not.toContain("关闭了「联网」");
+  });
+
+  it("不传 available 时按联网可用处理（向后兼容）", () => {
+    expect(withPlanMode("你是助手。", "plan")).toContain("- web_search(query)");
+  });
 });
 
 describe("looksLikePlan 判定", () => {

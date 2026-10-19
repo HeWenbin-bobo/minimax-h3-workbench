@@ -120,16 +120,30 @@ export const PLAN_MODE_READONLY_TOOLS = ["web_search", "open_page", "read_artifa
  *
  * 末尾关于 update_plan 的说明仍然必要：它**本身无害**（纯展示），
  * 但语义是"动手期间报进度"——留着会让模型去更新清单而不是写方案。
+ *
+ * **web_search 另有一层开关**（实测同类不一致）：用户关掉「联网」时它根本不下发
+ * （`chatAgent` 的 `enableWebSearch`）。说明里若照旧写"可用"，模型会去调一个不存在的工具，
+ * 然后为"我调不了搜索"道歉。故这个说明做成函数，按本轮**真实**可用集合生成。
  */
-export const PLAN_MODE_TOOL_NOTE = `# 可用工具（本轮只有这些）
-- web_search(query)：联网查资料
-- open_page(url)：打开具体网页看正文
-- read_artifact(name, …)：读回本会话已有的产物
-- request_user_input(questions)：问清 1–3 个关键取舍（用户不答就按最佳判断写进「假设」）
-
+export function planModeToolNote(available: { webSearch: boolean }): string {
+  const readonly: string[] = [];
+  if (available.webSearch) readonly.push("- web_search(query)：联网查资料");
+  readonly.push("- open_page(url)：打开具体网页看正文");
+  readonly.push("- read_artifact(name, …)：读回本会话已有的产物");
+  readonly.push("- request_user_input(questions)：问清 1–3 个关键取舍（用户不答就按最佳判断写进「假设」）");
+  const webNote = available.webSearch
+    ? ""
+    : "\n（本轮用户关闭了「联网」，web_search 不下发；涉及实时信息时在计划里说明「需要联网核实」，不要假装查过。）";
+  return `# 可用工具（本轮只有这些）
+${readonly.join("\n")}
+${webNote}
 以下工具**本轮不下发**，因为它们会产生副作用或与"只出方案"冲突：
 generate_video、create_file、edit_artifact、edit_artifact_batch、inspect_artifact、update_plan。
 计划直接写在回复正文里，不要试图调 update_plan。`;
+}
+
+/** 默认（联网可用）的工具说明。保留给测试与"不关心开关"的调用方。 */
+export const PLAN_MODE_TOOL_NOTE = planModeToolNote({ webSearch: true });
 
 /** 本次发送要带哪种计划语义。undefined = 普通对话（零改动）。 */
 export type PlanMode = "plan" | "execute" | undefined;
@@ -137,10 +151,17 @@ export type PlanMode = "plan" | "execute" | undefined;
 /**
  * 把计划模式段落拼进系统提示词。mode 为 undefined 时原样返回（普通对话零改动）。
  * 放在用户自定义提示词**之后**——计划约束是本轮的强规则，不该被覆盖。
+ *
+ * @param available 本轮**真实**可用的只读工具（决定"可用工具"那段怎么写）。
  */
-export function withPlanMode(base: string, mode?: PlanMode): string {
+export function withPlanMode(
+  base: string,
+  mode?: PlanMode,
+  available: { webSearch: boolean } = { webSearch: true }
+): string {
   if (!mode) return base;
-  const section = mode === "plan" ? `${PLAN_MODE_PROMPT}\n\n${PLAN_MODE_TOOL_NOTE}` : PLAN_EXECUTION_PROMPT;
+  const note = mode === "plan" ? planModeToolNote(available) : "";
+  const section = mode === "plan" ? `${PLAN_MODE_PROMPT}\n\n${note}` : PLAN_EXECUTION_PROMPT;
   return base ? `${base}\n\n${section}` : section;
 }
 

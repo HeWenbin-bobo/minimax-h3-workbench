@@ -1218,8 +1218,15 @@ function registerIpc(
           // **按字符截断也要说**（否则是静默丢失）：超长单行文件（压缩过的 HTML）
           // 会先撞 `MAX_READ_CHARS`，行数看起来"全给了"，实际内容被切在半路。
           // 模型不知道就会基于残缺内容下结论（比如以为某个函数只有一半）。
+          //
+          // **建议要分情况**（与本文件里 keyword 分支同一处坑）：整个文件只有一行时，
+          // "缩小 startLine/endLine 范围"是死路——第 1 行就是全部，再窄也还是同一行，
+          // 照样被截在行首。那种文件只能用 keyword 定位。
+          const oneLineFile = !raw.includes("\n");
           const charNote = slice.charCapped
-            ? `\n（这一段总长超限，已按 ${MAX_READ_CHARS} 字符截断——单行很长的文件常见。请用 keyword 精确定位，或缩小 startLine/endLine 范围。）`
+            ? oneLineFile
+              ? `\n（这一段总长超限，已按 ${MAX_READ_CHARS} 字符截断。**这个文件整个就是一行**（压缩过的 HTML 常见），所以 startLine/endLine 帮不上忙——要定位具体内容，用 keyword；要改它，直接用你读到的这一小段作为 oldText。）`
+              : `\n（这一段总长超限，已按 ${MAX_READ_CHARS} 字符截断——单行很长的文件常见。请用 keyword 精确定位，或缩小 startLine/endLine 范围。）`
             : "";
           // **标题必须用"实际读到的那个文件"**：`nameNote` 已在上方（keyword 分支之前）
           // 算好——那里提前返回，放这里就看不到回落说明了。

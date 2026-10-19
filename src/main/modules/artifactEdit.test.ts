@@ -116,6 +116,28 @@ describe("applyExactEdit", () => {
     }
   });
 
+  // 实测复现：文件是 LF、模型给的 newText 是 CRLF 时，直接拼会写出**混合行尾**
+  // （`a\nB1\r\nB2\nc`）。下一次读回时 `\r` 藏在行尾、显示出来看不见，
+  // 模型照抄的 oldText 少了它，于是匹配不上——它只会以为"改错地方了"，反复重读。
+  it("newText 的行尾对齐文件（LF 文件不混进 CRLF）", () => {
+    const NL = String.fromCharCode(10);
+    const CR = String.fromCharCode(13);
+    const out = applyExactEdit(`a${NL}b${NL}c`, "b", `B1${CR}${NL}B2`);
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.text).toBe(`a${NL}B1${NL}B2${NL}c`);
+      expect(out.text).not.toContain(CR);
+    }
+  });
+
+  it("CRLF 文件保持 CRLF（不把原有格式改成 LF）", () => {
+    const NL = String.fromCharCode(10);
+    const CR = String.fromCharCode(13);
+    const out = applyExactEdit(`a${CR}${NL}b${CR}${NL}c`, "b", `B1${NL}B2`);
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.text).toBe(`a${CR}${NL}B1${CR}${NL}B2${CR}${NL}c`);
+  });
+
   // 注意：单行子串本来就能在带缩进的行里命中（"indented();" 是 "  indented();" 的子串），
   // 这不是缺陷。真正要防的是**多行块**里的缩进对不上——那才会改错地方。
   it("多行块的行内缩进不一致时找不到（不做模糊匹配）", () => {

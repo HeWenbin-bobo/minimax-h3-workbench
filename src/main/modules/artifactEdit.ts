@@ -100,6 +100,23 @@ function normalizeEol(text: string): string {
 }
 
 /**
+ * 把 `newText` 的行尾对齐到**文件的**行尾风格。
+ *
+ * 为什么必须在写入前对齐（实测复现）：文件是 LF，模型给的 newText 却是 CRLF 时，
+ * 直接拼进去会写出**混合行尾**的文件（`a\nB1\r\nB2\nc`）。后果不是"看起来乱"：
+ * - 下一次 `read_artifact` 读回时，`split("\n")` 会把 `\r` 留在行尾，而显示出来的文本
+ *   看不出区别——模型照抄的那一段**少了 `\r`**，于是 `oldText` 匹配不上；
+ * - `findMatchingLines` 同理；模型只会以为是"改错地方了"，反复重读。
+ *
+ * 判据：文件里含 `\r\n` 就按 CRLF 输出，否则一律 LF（生成型产物本来就该是 LF）。
+ * 只看文件、不看 oldText——oldText 的写法不可信（它可能已经被归一过）。
+ */
+function matchEolOf(text: string, replacement: string): string {
+  const normalized = normalizeEol(replacement);
+  return text.includes("\r\n") ? normalized.replace(/\n/g, "\r\n") : normalized;
+}
+
+/**
  * 找不到原文时，挑几条**最接近的行**给模型看。
  *
  * 为什么需要（实测真机）：模型猜错 oldText（缩进差一点、少个分号）时只收到一句"找不到"，
@@ -153,7 +170,9 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
   const direct = occurrences(text, needle);
   if (direct.length === 1) {
     const at = direct[0];
-    return { ok: true, text: text.slice(0, at) + replacement + text.slice(at + needle.length), line: lineOf(text, at) };
+    // **`newText` 的行尾要对齐文件**：直接拼会把 CRLF 塞进 LF 文件（实测复现），
+    // 下一次读回时模型看不到 `\r`，照抄的 oldText 就匹配不上了。
+    return { ok: true, text: text.slice(0, at) + matchEolOf(text, replacement) + text.slice(at + needle.length), line: lineOf(text, at) };
   }
   if (direct.length > 1) {
     return { ok: false, reason: "ambiguous", count: direct.length, lines: linesOf(text, direct) };

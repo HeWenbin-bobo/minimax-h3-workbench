@@ -552,6 +552,11 @@ function humanizeToolInput(toolName: string, input: unknown): string {
     if ((toolName === "read_artifact" || toolName === "edit_artifact") && typeof record.name === "string") {
       return sliceSafe(record.name, 120);
     }
+    // open_page 只显示域名+路径，别把整个 JSON 糊到步骤条上。
+    // 实测真机：`→ 正在打开网页：{"url":"https://post.smzdm.com/p/awwnml6g/"}`，用户看到的是代码。
+    if (toolName === "open_page" && typeof record.url === "string") {
+      return sliceSafe(record.url.replace(/^https?:\/\//, ""), 120);
+    }
     if (toolName === "generate_video") {
       const prompt = typeof record.prompt === "string" ? sliceSafe(record.prompt, 80) : "";
       const duration = typeof record.duration === "number" ? `${record.duration} 秒` : "";

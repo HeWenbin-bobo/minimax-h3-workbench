@@ -226,7 +226,18 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
  * 不必为了避开互相干扰而手工合并。
  */
 export type BatchEditOutcome =
-  | { ok: true; text: string; lines: number[] }
+  | {
+      ok: true;
+      text: string;
+      lines: number[];
+      /**
+       * 这批里有条目带着 `read_artifact` 的行号前缀、已被自动剥掉。
+       * 必须往上传：批量版走的是同一个 `applyExactEdit`，但**这条信息原本被丢在这里**——
+       * 模型整批都抄了行号、居然全部成功，却一个字都没被告知"你抄错了"，
+       * 下一批它还会继续抄（单处编辑那条路已经会提示，批量漏了）。
+       */
+      strippedGutter?: boolean;
+    }
   | {
       ok: false;
       index: number;
@@ -240,15 +251,19 @@ export type BatchEditOutcome =
 export function applyExactEdits(text: string, edits: readonly { oldText: string; newText: string }[]): BatchEditOutcome {
   let current = text;
   const lines: number[] = [];
+  let strippedGutter = false;
   for (let index = 0; index < edits.length; index += 1) {
     const outcome = applyExactEdit(current, edits[index].oldText, edits[index].newText);
     // 必须把 hints 一并转发：漏了它，批量版就退化成"只说找不到"，
     // 模型照样得反复重读（单测「批量版也会把候选行带出来」锁住这一点）。
     if (!outcome.ok) return { ok: false, index, reason: outcome.reason, count: outcome.count, lines: outcome.lines, hints: outcome.hints };
+    if (outcome.strippedGutter) strippedGutter = true;
     current = outcome.text;
     lines.push(outcome.line);
   }
-  return { ok: true, text: current, lines };
+  // **每条编辑的 strippedGutter 都要汇总上来**：单处版会告诉模型"我替你剥了行号"，
+  // 批量版若丢掉它，模型整批抄行号却全成功、还毫不知情（实测复现）。
+  return strippedGutter ? { ok: true, text: current, lines, strippedGutter } : { ok: true, text: current, lines };
 }
 
 /**

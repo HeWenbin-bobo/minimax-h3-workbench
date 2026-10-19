@@ -306,6 +306,32 @@ describe("找不到原文时给出最接近的行", () => {
       expect(out.hints?.[0].text).toContain("M.identity");
     }
   });
+
+  // 批量版走的是同一个 applyExactEdit（会剥行号），但**这条信息原本被丢在返回值里**：
+  // 模型整批都抄了行号、居然全部成功，却一个字都没被告知"你抄错了"，下一批还会继续抄。
+  // 单处编辑那条路早就会提示，批量这条漏了。
+  it("批量版也把「替你剥了行号」这条信息传上来", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["const a = 1;", "const b = 2;"].join(NL);
+    const out = applyExactEdits(file, [
+      { oldText: "    1| const a = 1;", newText: "const a = 9;" },
+      { oldText: "    2| const b = 2;", newText: "const b = 8;" }
+    ]);
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.strippedGutter).toBe(true);
+      expect(out.text).toBe("const a = 9;" + NL + "const b = 8;");
+    }
+  });
+
+  it("没有行号前缀时不误标 strippedGutter", () => {
+    const out = applyExactEdits("const x = old;", [
+      { oldText: "old", newText: "new" },
+      { oldText: "const x", newText: "let x" }
+    ]);
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.strippedGutter).toBeUndefined();
+  });
 });
 
 // 实测真机：模型要找某个函数在哪，却没有搜索能力，把 2118 行的文件按 400 行一段

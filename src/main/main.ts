@@ -1345,7 +1345,13 @@ function registerIpc(
             const nextStep = /\.html?$/i.test(found.name)
               ? "建议立刻 inspect_artifact 自检一次，确认没有引入新报错。"
               : "改完可直接告诉用户，或用 read_artifact 复核。";
-            return `已应用 ${params.edits.length} 处修改（第 ${at} 行；文件现为 ${totalLines} 行 / ${sizeKb}）${fellBackNote}。${nextStep}`;
+            // 同单处编辑：模型把读回结果的行号前缀一起抄进 oldText 时，
+            // `applyExactEdit` 已替它剥掉。批量版原本**丢掉了这条信息**——
+            // 整批都抄行号却全部成功，模型毫不知情，下一批还会继续抄。
+            const gutterNote = outcome.strippedGutter
+              ? "\n（注意：这批 oldText 里带着 read_artifact 的行号前缀（`  42| `），我已自动剥掉后再匹配。以后写 oldText 时不要带行号那一栏。）"
+              : "";
+            return `已应用 ${params.edits.length} 处修改（第 ${at} 行；文件现为 ${totalLines} 行 / ${sizeKb}）${fellBackNote}。${nextStep}${gutterNote}`;
           });
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。

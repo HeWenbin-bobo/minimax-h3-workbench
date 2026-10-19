@@ -96,7 +96,11 @@ export function artifactNameCandidates(requestedName: string): string[] {
     }
     return [name];
   }
-  return [name, ...KNOWN_ARTIFACT_EXTS.map((known) => `${name}${known}`)];
+  // **`.htm` 顺带试 `.html`**（实测死路）：`saveArtifactFile` 会把 `.htm` 剥掉再补 `.html`
+  // （它的正则 `\.(html?|…)` 认 `.htm`），于是 `create_file(html, "鹈鹕.htm")` 落成
+  // `鹈鹕.html`；而这里按"有扩展名只试它"去 stat `鹈鹕.htm` —— 那个文件从来不存在。
+  const htm = ext === ".htm" ? `${name.slice(0, name.length - ext.length)}.html` : undefined;
+  return [name, ...(htm ? [htm] : []), ...KNOWN_ARTIFACT_EXTS.map((known) => `${name}${known}`)];
 }
 
 /** 在磁盘上永远成对出现的表格扩展名：请求其中任何一个，都要顺带找另一个。 */

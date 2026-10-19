@@ -91,6 +91,14 @@ describe("artifactNameCandidates（无扩展名补全）", () => {
     expect(artifactNameCandidates("data.xlsx")).toEqual(["data.xlsx"]);
   });
 
+  // 同一类死路：`saveArtifactFile` 的正则是 `\.(html?|…)`，认 `.htm`，
+  // 于是 `create_file(html, "鹈鹕.htm")` 落成 `鹈鹕.html`。
+  // 而名字解析若按"有扩展名只试它"去 stat `鹈鹕.htm`，那个文件从来不存在。
+  it(".htm 顺带试 .html（落盘时已被改写成 html）", () => {
+    expect(artifactNameCandidates("鹈鹕.htm")[1]).toBe("鹈鹕.html");
+    expect(artifactNameCandidates("鹈鹕.html")).toEqual(["鹈鹕.html"]);
+  });
+
   it("没有扩展名时按已知类型依次补全", () => {
     const got = artifactNameCandidates("科技新闻");
     expect(got[0]).toBe("科技新闻");

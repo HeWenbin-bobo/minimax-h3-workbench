@@ -594,7 +594,7 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
 }
 
 /** 工具调用入参的人类可读摘要：状态条展示用，别把原始 JSON 糊到用户脸上。 */
-function humanizeToolInput(toolName: string, input: unknown): string {
+export function humanizeToolInput(toolName: string, input: unknown): string {
   if (input == null) return "";
   // 全部走 `sliceSafe`：这些摘要会显示在气泡的步骤日志里（"→ 正在搜索：…"），
   // 裸 slice 切在 emoji 代理对中间会渲染成 `�`（与渲染端那批截断同一处理）。
@@ -620,8 +620,13 @@ function humanizeToolInput(toolName: string, input: unknown): string {
     }
     if (toolName === "generate_video") {
       const prompt = typeof record.prompt === "string" ? sliceSafe(record.prompt, 80) : "";
-      const duration = typeof record.duration === "number" ? `${record.duration} 秒` : "";
-      const count = typeof record.count === "number" ? `${record.count} 路` : "";
+      // 走 `toFiniteNumber`：模型现在允许把时长/数量写成 `"8 秒"` / `"2 路"`
+      // （见 schema 处说明），只判 `typeof === "number"` 会让这两个值**从步骤条上消失**——
+      // 而"这一轮到底生成几秒、几条"正是用户在步骤条上最想确认的东西。
+      const durationValue = toFiniteNumber(record.duration);
+      const countValue = toFiniteNumber(record.count);
+      const duration = durationValue === undefined ? "" : `${durationValue} 秒`;
+      const count = countValue === undefined ? "" : `${countValue} 路`;
       return [prompt, duration, count].filter(Boolean).join(" · ");
     }
     return sliceSafe(JSON.stringify(input), 120);

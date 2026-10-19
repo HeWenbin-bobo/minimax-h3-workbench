@@ -11,7 +11,7 @@ vi.mock("@ai-sdk/openai-compatible", () => ({
   createOpenAICompatible: () => ({ chatModel: (id: string) => ({ id }) })
 }));
 
-import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, humanizeToolOutput, isToolFailure, type LlmServiceOptions } from "./llmService";
+import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, humanizeToolInput, humanizeToolOutput, isToolFailure, type LlmServiceOptions } from "./llmService";
 
 // 构造一个 ReadableStream，把字符串分块推送（模拟网络分包边界不齐）。
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
@@ -149,6 +149,19 @@ describe("工具成败判定（isToolFailure）", () => {
   it("正常按行读回仍报行数（不误伤）", () => {
     const text = humanizeToolOutput("read_artifact", "文件：鹈鹕.html（共 2118 行，本次显示第 1–400 行）\n   1| …");
     expect(text).toBe("共 2118 行");
+  });
+
+  // 本会话自引入：允许 `duration` / `count` 写成 `"8 秒"` / `"2 路"` 之后，
+  // 步骤条仍要显示这两个值——只判 `typeof === "number"` 会让它们**从步骤条上消失**，
+  // 而"这一轮生成几秒、几条"正是用户最想在这一行确认的东西。
+  it("步骤条摘要能显示带单位的时长与数量", () => {
+    expect(humanizeToolInput("generate_video", { prompt: "a cat", duration: "8 秒", count: "2 路" }))
+      .toBe("a cat · 8 秒 · 2 路");
+    expect(humanizeToolInput("generate_video", { prompt: "a cat", duration: 6, count: 1 }))
+      .toBe("a cat · 6 秒 · 1 路");
+    // 读不出数字时不要显示 "NaN 秒"。
+    expect(humanizeToolInput("generate_video", { prompt: "a cat", duration: "很久" }))
+      .toBe("a cat");
   });
 
   // 项目约定：`inspect_artifact` 的回执 = 报告正文 + 末尾的文件身份说明。

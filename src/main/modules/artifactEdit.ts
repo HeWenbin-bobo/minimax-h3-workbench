@@ -224,6 +224,12 @@ export function sliceWithLineNumbers(text: string, startLine?: number, endLine?:
  * 匹配是**字面量**（大小写敏感），不做正则：模型给的多半是标识符原文，
  * 正则元字符反而会让它写出匹配不到的模式。
  *
+ * **也要按字符截断**（实测复现）：压缩过的产物 HTML 常常是**一行几十万字符**，
+ * 关键词又正好落在那一行里——`context` 带出的"前后各 2 行"其实就是整行全文。
+ * 实测 600KB 文件里 locate 一个标识符，返回 600,034 字符（= 10 × `MAX_READ_CHARS`），
+ * 一次就把上下文烧掉约 15 万 token。`sliceWithLineNumbers` 早有这道闸门，
+ * 这里漏了（同一类上限写两处、只改一处）。
+ *
  * @param limit 最多返回几条命中
  * @param context 每条命中额外带前后各几行
  */
@@ -232,10 +238,10 @@ export function findMatchingLines(
   keyword: string,
   limit = 20,
   context = 2
-): { matches: Array<{ line: number; text: string }>; total: number; body: string } {
+): { matches: Array<{ line: number; text: string }>; total: number; body: string; charCapped: boolean; lineCapped: boolean } {
   const needle = String(keyword ?? "");
   const lines = text.split("\n");
-  if (!needle) return { matches: [], total: 0, body: "" };
+  if (!needle) return { matches: [], total: 0, body: "", charCapped: false, lineCapped: false };
   const hits: number[] = [];
   for (let i = 0; i < lines.length && hits.length < limit; i += 1) {
     if (lines[i].includes(needle)) hits.push(i + 1);
@@ -246,6 +252,9 @@ export function findMatchingLines(
   const blocks: string[] = [];
   const matches: Array<{ line: number; text: string }> = [];
   const shown = new Set<number>();
+  // 是否发生过**行内**截断。必须单独标出来（而不是靠 body 里出现「…」判断：
+  // 产物正文本来就可能含省略号），否则模型把节选当成原文照抄，oldText 必然匹配不上。
+  let lineCapped = false;
   for (const hit of hits) {
     matches.push({ line: hit, text: lines[hit - 1].trim() });
     const from = Math.max(1, hit - context);
@@ -253,9 +262,34 @@ export function findMatchingLines(
     for (let n = from; n <= to; n += 1) {
       if (shown.has(n)) continue;
       shown.add(n);
-      blocks.push(`${String(n).padStart(5, " ")}| ${lines[n - 1]}`);
+      // **命中行按 needle 居中截**：压缩过的单行 HTML 有几十万字符，
+      // 直接裸拼等于把整行塞回上下文；而按行首截又会把 needle 本身切掉
+      // （它在行尾时模型看到的正好是"没有命中"的一段）。
+      if (lines[n - 1].length > EXCERPT_CHARS) lineCapped = true;
+      blocks.push(`${String(n).padStart(5, " ")}| ${excerptLine(lines[n - 1], n === hit ? needle : undefined)}`);
     }
     blocks.push("      …");
   }
-  return { matches, total, body: blocks.join("\n") };
+  const joined = blocks.join("\n");
+  if (joined.length > MAX_READ_CHARS) {
+    return { matches, total, body: sliceSafe(joined, MAX_READ_CHARS), charCapped: true, lineCapped };
+  }
+  return { matches, total, body: joined, charCapped: false, lineCapped };
+}
+
+/** 单行展示长度上限。命中行取 needle 附近，其余取行首。 */
+const EXCERPT_CHARS = 400;
+
+function excerptLine(line: string, needle?: string): string {
+  if (line.length <= EXCERPT_CHARS) return line;
+  if (needle) {
+    const at = line.indexOf(needle);
+    // 前后各留一段，保证 needle 与它的缩进/赋值上下文都能看到。
+    const start = Math.max(0, at - Math.floor((EXCERPT_CHARS - needle.length) / 2));
+    const end = Math.min(line.length, start + EXCERPT_CHARS);
+    const head = start > 0 ? "…" : "";
+    const tail = end < line.length ? "…" : "";
+    return `${head}${sliceSafe(line.slice(start, end), EXCERPT_CHARS)}${tail}`;
+  }
+  return `${sliceSafe(line, EXCERPT_CHARS)}…`;
 }

@@ -1194,7 +1194,13 @@ function registerIpc(
               return `${nameNote}在 ${found.name}（共 ${raw.split("\n").length} 行）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。`;
             }
             const more = hits.total > hits.matches.length ? `\n（共 ${hits.total} 处命中，只显示前 ${hits.matches.length} 处。）` : "";
-            return `${nameNote}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。`;
+            // 命中行本身可能极长（压缩过的 HTML 一行几十万字符），`findMatchingLines`
+            // 已按行截断并再兜一道字符上限——必须告诉模型"你看到的是节选"，
+            // 否则它会以为原文就是这么短，照抄 oldText 时必然匹配不上。
+            const capped = hits.lineCapped || hits.charCapped
+              ? "\n（上面的命中行过长了，已做**节选**：行内首尾的「…」表示省略。要精确的 oldText，请用 startLine/endLine 读那一段原文；keyword 只用来定位，不要直接把节选当原文。）"
+              : "";
+            return `${nameNote}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。`;
           }
           const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
           // **必须说明被截断了**（实测真机）：模型不带范围读 1651 行全文，紧接着又读一遍，

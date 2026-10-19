@@ -288,6 +288,40 @@ describe("按关键词定位（findMatchingLines）", () => {
     expect(out.matches).toHaveLength(5);
     expect(out.total).toBe(30);
   });
+
+  // 实测复现：600KB 的压缩 HTML（一行 600,000 字符）里 locate 一个标识符，
+  // 上下文"前后各 2 行"其实就是整行 → 返回 600,034 字符，
+  // 是 MAX_READ_CHARS 的 10 倍（约 15 万 token），一次读爆上下文。
+  // sliceWithLineNumbers 早有这道闸门，keyword 分支漏了。
+  it("超长单行：命中行按 needle 居中截断，仍能看到 needle", () => {
+    const line = "a".repeat(50_000) + "NEEDLE" + "b".repeat(50_000);
+    const out = findMatchingLines(line, "NEEDLE");
+    expect(out.total).toBe(1);
+    expect(out.body).toContain("NEEDLE");
+    expect(out.body.length).toBeLessThan(2_000);
+    // **必须显式标记节选**：产物正文本来就可能含「…」，
+    // 靠 body 里有没有省略号判断会漏报；模型把节选当原文抄，oldText 必然匹配不上。
+    expect(out.lineCapped).toBe(true);
+  });
+
+  it("正常长度的文件不标 lineCapped", () => {
+    expect(findMatchingLines(src, "M.identity").lineCapped).toBe(false);
+  });
+
+  it("整体输出超 MAX_READ_CHARS 时再截一次并标记 charCapped", () => {
+    // 每行都在「按行截断」阈值（400）以内，所以行级截断救不了——
+    // 只有命中条数够多时总量才会超，这正是第二道闸门要拦的形状。
+    const lines: string[] = [];
+    for (let i = 0; i < 200; i += 1) lines.push("HIT" + "x".repeat(350));
+    const out = findMatchingLines(lines.join(NL), "HIT", 200);
+    expect(out.charCapped).toBe(true);
+    expect(out.body.length).toBeLessThanOrEqual(MAX_READ_CHARS + 10);
+  });
+
+  it("单行超长但总量不超时，不需要标 charCapped（行级截断已够）", () => {
+    const line = "a".repeat(50_000) + "NEEDLE" + "b".repeat(50_000);
+    expect(findMatchingLines(line, "NEEDLE").charCapped).toBe(false);
+  });
 });
 
 // 实测：真实产物 1757 行、最长单行 169 字符，行数上限够用；

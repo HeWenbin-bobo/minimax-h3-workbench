@@ -70,4 +70,18 @@ describe("buildAgentMemoryHint", () => {
     const tasks = Array.from({ length: 3 }, () => task({ request: { duration: "abc" } as never }));
     expect(buildAgentMemoryHint(tasks)).not.toContain("常用时长");
   });
+
+  // 实测（本会话）：任务记录的 `backend` 是数字时，平票排序会调
+  // `a[0].localeCompare(b[0])` → `TypeError: localeCompare is not a function`。
+  // 而本函数跑在"构建 system prompt"的热路径上——一个脏任务记录就能让**整轮对话**抛错。
+  it("backend 是数字等脏类型时不抛错（也不产出脏习惯）", () => {
+    const tasks = [
+      task({ backend: 111 as never }),
+      task({ backend: 222 as never }),
+      task({ backend: "local" as never })
+    ];
+    expect(() => buildAgentMemoryHint(tasks)).not.toThrow();
+    // 三条各 1 条 → 平票，但仍应给出一个稳定结果（不会崩）
+    expect(buildAgentMemoryHint(tasks)).toContain("常用后端");
+  });
 });

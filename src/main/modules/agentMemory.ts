@@ -12,16 +12,22 @@ export function buildAgentMemoryHint(tasks: GenerationTask[]): string {
   if (real.length < 3) return ""; // 样本太少不提炼，避免把偶然当习惯
 
   const lines: string[] = [];
-  const topMode = (values: Array<string | undefined>, unit: string) => {
+  // **入参来自任务记录，类型没有保证**（实测：`backend` 是数字时直接抛
+  // `a[0].localeCompare is not a function`，而本函数跑在"构建系统提示词"的热路径上——
+  // 一个脏任务记录就能让**整轮对话**抛错）。这里统一收敛成字符串：
+  // 非字符串先 `String()`，空串跳过；排序与展示都只处理字符串。
+  const topMode = (values: Array<unknown>, unit: string) => {
     const counts = new Map<string, number>();
-    for (const value of values) {
+    for (const raw of values) {
       // **空串必须跳过**，不能当成一个取值参与统计。
       // `String(t.request?.duration ?? "")` 会给"没有这个字段"的任务塞一个 `""`，
       // 而它与真实值平票时，Map 里**先插入**的那个胜出——于是缺字段的任务排在前面时，
       // `best` 拿到空串、`best ? …` 判假，整条「常用时长 / 常用数量」提示**静默消失**。
       // 实测（probe-memory2）：同样的 4 条任务，只是缺字段的排在前后不同，
       // 提示就时有时无。用户看不到任何线索说"你的习惯没被采用"。
-      if (value == null || value === "") continue;
+      if (raw == null) continue;
+      const value = typeof raw === "string" ? raw : String(raw);
+      if (!value) continue;
       counts.set(value, (counts.get(value) ?? 0) + 1);
     }
     // 平票时按字典序定序：`sort` 对平票元素保留插入顺序，结果会随任务顺序变化，

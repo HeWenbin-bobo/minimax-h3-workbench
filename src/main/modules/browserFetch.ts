@@ -256,10 +256,22 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text",
     });
     // 按调用方需要取两种视图：搜索解析要 HTML 结构，open_page 要可读正文。
     // `open_page` 用 HTML 的实测后果见 renderPageText 的注释（正文被脚本挤掉）。
+    //
+    // **必须带硬截止**（实测，探针 `_scratch/probe-render-hang.cjs`）：
+    // 上面的超时只覆盖"等 did-finish-load / dom-ready"，而这一步依赖页面主线程——
+    // 页面里有同步死循环时它**永不返回**，于是 open_page / 搜索全部永久挂住
+    // （而且共用同一条串行队列，后面的调用也会一起卡）。
+    // 实测：`renderPageText(url, 3_000)` 在 15 秒后仍未返回。
     const expression = mode === "text"
       ? "document.body ? document.body.innerText : ''"
       : "document.documentElement.outerHTML";
-    return (await win.webContents.executeJavaScript(expression, true)) as string;
+    const read = await deadline(win.webContents.executeJavaScript(expression, true) as Promise<string>, Math.max(SAMPLE_DEADLINE_MS, timeoutMs));
+    if (!read.ok) {
+      // 与自检那边同一套措辞：这不是"加载失败"，而是**脚本占死了主线程**。
+      // 用中文 throw（调用方 `describeError` 会原样透传），并给出可行的下一步。
+      throw new Error("页面脚本把主线程卡住了（同步死循环或长时间计算），无法读取页面内容。可以换一个页面，或让用户检查该页面里的循环/递归是否有可能永不结束。");
+    }
+    return read.value;
   } finally {
     if (!win.isDestroyed()) win.destroy();
   }

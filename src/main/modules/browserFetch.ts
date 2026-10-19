@@ -259,7 +259,15 @@ export interface HtmlProbeResult {
     height: number;
     clientWidth: number;
     clientHeight: number;
-    webgl: boolean;
+    /**
+     * 画布拿到了哪种上下文。
+     *
+     * **不能只报 boolean webgl**（实测真机）：一个真实产物用的是
+     * `getContext("2d", { alpha: false })`（纯 2D Canvas），旧字段 `webgl=false`
+     * 被渲染成"未取到 WebGL/2D 上下文"——把"用的是 2D"说成"没有上下文"，
+     * 模型据此去查一个根本不存在的问题。
+     */
+    context: "webgl" | "2d" | "none";
   }>;
   /** 渲染后的可见文本长度（0 通常意味着脚本没跑起来或页面是纯 canvas）。 */
   textLength: number;
@@ -394,7 +402,7 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
     await new Promise((resolve) => setTimeout(resolve, PROBE_SETTLE_MS));
     const snapshot = (await win.webContents.executeJavaScript(SNAPSHOT_SCRIPT, true)) as {
       title: string; textLength: number; elementCount: number;
-      canvases: Array<{ width: number; height: number; clientWidth: number; clientHeight: number; webgl: boolean }>;
+      canvases: Array<{ width: number; height: number; clientWidth: number; clientHeight: number; context: "webgl" | "2d" | "none" }>;
     };
     // 截图采样：失败不能连坐整次自检（拿不到只是少一条证据，不该让工具报错）。
     const pixel = await samplePixels(win);
@@ -483,11 +491,17 @@ const SNAPSHOT_SCRIPT = `(() => {
     // 它自己怀疑"clientWidth=0"，但当时自检没报这个数字，它无从验证。
     clientWidth: safe(() => Math.round(c.getBoundingClientRect().width), 0),
     clientHeight: safe(() => Math.round(c.getBoundingClientRect().height), 0),
-    // 已经拿到 2d 上下文的画布再要 webgl 会返回 null —— 那不是错误，只是类型不同。
-    webgl: safe(() => {
-      if (c.getContext("2d")) return false;
-      return Boolean(c.getContext("webgl2") || c.getContext("webgl") || c.getContext("experimental-webgl"));
-    }, false)
+    // 画布拿到了哪种上下文。**必须区分 webgl / 2d / none**（实测真机）：
+    // 一个真实产物用的是 getContext("2d", { alpha: false })（纯 2D Canvas），
+    // 旧字段只报 webgl=false，渲染成"未取到 WebGL/2D 上下文"——
+    // 把"用的是 2D"说成"没有上下文"，模型据此去查一个根本不存在的问题。
+    // 注意顺序：已经拿过 2d 的 canvas 再要 webgl 会返回 null，反之亦然，
+    // 所以只问一次，问到哪个算哪个。
+    context: safe(() => {
+      if (c.getContext("2d")) return "2d";
+      if (c.getContext("webgl2") || c.getContext("webgl") || c.getContext("experimental-webgl")) return "webgl";
+      return "none";
+    }, "none")
   })), []);
   return {
     title: safe(() => document.title || "", ""),
@@ -527,7 +541,12 @@ export function formatProbeReport(result: HtmlProbeResult): string {
       const bufferHint = defaultBuffer && flatScreen
         ? "（缓冲区仍是 HTML 默认值 300×150，而布局大得多——脚本多半在设置绘制分辨率之前就中断了）"
         : "";
-      return `#${i + 1} 缓冲区 ${c.width}×${c.height}${bufferHint}，${layout}${c.webgl ? "（WebGL 上下文正常）" : "（未取到 WebGL/2D 上下文）"}`;
+      const contextLabel = c.context === "webgl"
+        ? "（WebGL 上下文正常）"
+        : c.context === "2d"
+          ? "（2D Canvas 上下文正常）"
+          : "（**未取到任何绘制上下文**——这通常意味着渲染初始化没能完成）";
+      return `#${i + 1} 缓冲区 ${c.width}×${c.height}${bufferHint}，${layout}${contextLabel}`;
     }).join("，");
     lines.push(`画布：${described}。`);
   } else if (result.textLength === 0) {

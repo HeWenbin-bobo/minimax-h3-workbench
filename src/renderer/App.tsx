@@ -1844,7 +1844,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     } finally {
       setGeneratingIds((all) => all.filter((id) => id !== activeId));
       sendingRef.current.delete(activeId);
-      setSessions((all) => patchLast(all, activeId, (msg) => ({ ...msg, streaming: false })));
+      // **主动停止要留下说明**（实测）：一个字都还没吐出来就点停止时，
+      // 气泡会落到「（空回复）」——看起来像软件坏了，其实是用户自己停的。
+      // 已经有内容时不动它（不要让"停止"覆盖已到的回复）。
+      setSessions((all) => patchLast(all, activeId, (msg) => (
+        msg.streaming === false
+          ? msg
+          : { ...msg, streaming: false, content: msg.content || "（已停止生成）" }
+      )));
     }
   }
 

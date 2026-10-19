@@ -278,6 +278,14 @@ export interface HtmlProbeResult {
   /** 控制台 error/warning（含未捕获异常、CSP 拦截、WebGL 报错）。已去重并截断。 */
   consoleErrors: string[];
   /**
+   * 去重后的**真实**条数（可能远大于 `consoleErrors.length`）。
+   *
+   * 为什么要单独报：数组被 `MAX_LOGS` 截到 12 条，而报告写的是"共 N 条"——
+   * 一个循环报错 40 次的页面会被说成"共 12 条"，模型以为已经掌握全部问题，
+   * 改完 12 条就宣布"自检通过"，用户打开还是报错。静默少给比多给更误导。
+   */
+  consoleErrorTotal?: number;
+  /**
    * 画布实际状态：**缓冲区**尺寸（`width/height` 属性）、**布局**尺寸（CSS 像素）
    * 与是否真的拿到了 WebGL 上下文。
    *
@@ -394,6 +402,8 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
   // 应用默认 session，把全局权限改成一律拒绝会波及主窗口。
   hardenWindow(win);
   const logs: string[] = [];
+  /** 去重后的真实条数（不受 MAX_LOGS 限制）。报告里的"共 N 条"必须用它。 */
+  let logTotal = 0;
   // 新版 Electron 把参数合进了第一个 Event 对象（位置参数已 deprecated），两种都读。
   win.webContents.on("console-message", (event: Electron.Event<Electron.WebContentsConsoleMessageEventParams>) => {
     const level = (event as unknown as { level?: string }).level;
@@ -402,6 +412,8 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
     const lineNumber = (event as unknown as { lineNumber?: number }).lineNumber;
     const line = formatConsoleLine(level, message, lineNumber);
     if (!line || logs.includes(line)) return;
+    // **先计数再判断是否入数组**：只增不减才能反映"到底报了多少条"。
+    logTotal += 1;
     if (logs.length < MAX_LOGS) logs.push(line);
   });
   try {
@@ -428,7 +440,7 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
     });
     if (signal?.aborted) throw new DOMException("自检已取消", "AbortError");
     if (!loaded) {
-      return { loaded: false, title: "", consoleErrors: logs, canvases: [], textLength: 0, elementCount: 0 };
+      return { loaded: false, title: "", consoleErrors: logs, consoleErrorTotal: logTotal, canvases: [], textLength: 0, elementCount: 0 };
     }
     // 等首帧：WebGL 页面在 load 时往往还没建好上下文，立刻采样会得到"没有画布"的假结论。
     await new Promise((resolve) => setTimeout(resolve, PROBE_SETTLE_MS));
@@ -446,7 +458,7 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
       motion = await sampleMotion(win, pixel);
     }
     return {
-      loaded: true, consoleErrors: logs, ...snapshot,
+      loaded: true, consoleErrors: logs, consoleErrorTotal: logTotal, ...snapshot,
       ...(pixel ? { pixel } : {}),
       ...(motion === undefined ? {} : { motion })
     };
@@ -596,7 +608,15 @@ export function formatProbeReport(result: HtmlProbeResult): string {
     }
   }
   if (result.consoleErrors.length > 0) {
-    lines.push(`运行时报错（共 ${result.consoleErrors.length} 条，已去重）：`);
+    // **"共 N 条"必须用真实总数**：数组被 `MAX_LOGS` 截过，
+    // 一个循环报错 40 次的页面若说成"共 12 条"，模型会以为已经看到全部，
+    // 改完这 12 条就宣布通过——用户打开还是报错。
+    const total = Math.max(result.consoleErrorTotal ?? result.consoleErrors.length, result.consoleErrors.length);
+    const shown = result.consoleErrors.length;
+    const head = total > shown
+      ? `运行时报错（去重后共 ${total} 条，下面只列出前 ${shown} 条——同一类错误往往成片出现，修掉根因后重新自检看剩余）：`
+      : `运行时报错（共 ${total} 条，已去重）：`;
+    lines.push(head);
     for (const entry of result.consoleErrors) lines.push(`- ${entry}`);
     lines.push("请针对这些报错修改后重新生成，并在回复里说明修了什么。");
   } else if (flatScreen) {

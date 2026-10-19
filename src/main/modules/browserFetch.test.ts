@@ -134,6 +134,29 @@ describe("产物自检报告（formatProbeReport）", () => {
     expect(text).toContain("修改后重新生成");
   });
 
+  // 实测缺口：数组被 MAX_LOGS(12) 截断，报告却写"共 12 条"。
+  // 循环报错 40 次的页面会被说成只报 12 条——模型以为已掌握全部问题，
+  // 改完就宣布"自检通过"，用户打开还是报错。
+  it("报错被截断时说明真实总数与只列出了前几条", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "循环报错", consoleErrors: Array.from({ length: 12 }, (_, i) => `错误：boom ${i}`),
+      consoleErrorTotal: 40,
+      canvases: [], textLength: 10, elementCount: 20
+    });
+    expect(text).toContain("去重后共 40 条");
+    expect(text).toContain("只列出前 12 条");
+    expect(text).not.toContain("共 12 条，已去重");
+  });
+
+  it("没有截断时仍报「共 N 条，已去重」（不制造虚假的截断说明）", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "x", consoleErrors: ["错误：a", "错误：b"],
+      canvases: [], textLength: 10, elementCount: 20
+    });
+    expect(text).toContain("共 2 条，已去重");
+    expect(text).not.toContain("只列出前");
+  });
+
   it("无报错时明确区分「运行状态」与「画面效果」——不能让它宣称看过截图", () => {
     const text = formatProbeReport({
       loaded: true, title: "鹈鹕骑自行车", consoleErrors: [],

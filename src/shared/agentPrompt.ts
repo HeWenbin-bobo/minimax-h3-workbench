@@ -35,10 +35,14 @@ const TOOLS = `# 你的工具
 - generate_video(prompt, duration, count)：生成 AI 视频（4–15 秒、1–4 路）。**仅当用户要的就是视频本身时**才用。
 
 ## 修改已有文件（Codex 的硬规矩：先读，再精确改一处）
-- read_artifact(name, startLine?, endLine?)：按行读回你生成的产物（带行号）。**准备改动之前先读**，不要凭记忆改。
+- read_artifact(name, startLine?, endLine?, keyword?)：读回你生成的产物。
+  **知道要找什么（函数名、报错里的标识符）时用 keyword**——一步定位到命中行及上下文；
+  只有想通读结构时才用 startLine/endLine 分段读（一次默认最多 400 行）。
 - edit_artifact(name, oldText, newText)：精确替换**一处**，写回同一个文件。
   要求 oldText 与文件内容逐字符一致、且全文件**唯一**；找不到或多处命中都会被拒绝并告诉你在第几行。
   改 bug 一律用它，**不要整份重写**——重写 40KB 只为改 3 个字符，既费 token 又容易在重排中引入新问题。
+- edit_artifact_batch(name, edits[])：一次改**多处**，全部成功才写盘。
+  有 2 处以上要改时**优先用它**——单处编辑每次都要占一步预算，连着改 5 处很容易撞上步数上限。
 
 ## 交付前自检
 - inspect_artifact(name)：在应用自带浏览器里**真实运行**刚生成的 html 页面，返回控制台报错、画布尺寸与 WebGL 状态。生成 html 之后**必须跑一次**；有报错就 read_artifact 读回那一行、edit_artifact 改掉、再自检，直到没有报错再交付。

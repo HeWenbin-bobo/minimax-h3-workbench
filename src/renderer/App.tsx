@@ -2348,7 +2348,12 @@ function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }:
     if (content === undefined) return undefined; // 既没落盘元数据也没内容：无从保存
     // 已有一次保存在进行中：直接复用那个 Promise，不再发第二次 IPC。
     if (savingRef.current) return savingRef.current;
-    const name = `artifact-${Date.now()}${ext}`;
+    // **别用时间戳当文件名**（实测观感问题）：旧路径（从回复围栏里扫出来的产物）
+    // 首次点「预览」才落盘，原来命名成 `artifact-1792444806941.html`——卡片标题、
+    // 预览面板标题、以及用户在资源管理器里看到的都是这串时间戳。
+    // 改用按类型的中文名；重名由主进程的 `uniqueArtifactPath` 补 ` (2)`。
+    const baseName = kind === "sheet" ? "表格产物" : kind === "doc" ? "文档产物" : "网页产物";
+    const name = `${baseName}${ext}`;
     const saveKind = kind === "sheet" ? "xlsx" : kind === "doc" ? "md" : "html";
     // IPC 也可能**抛异常**（不只是返回 ok:false）。不兜住的话点「预览」毫无反应、
     // 也没有任何提示（与 send()/executePlan() 同一类问题）。

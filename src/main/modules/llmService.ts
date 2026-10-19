@@ -395,18 +395,56 @@ export async function bundledFrameworkVersion(): Promise<string> {
  * 返回 { textLength, toolCalls }：调用方据此判断"模型不支持工具"（0 文本 0 工具调用）
  * 并自动回落普通对话——这正是工具支持检测的运行时落地。
  */
-/** 工具执行结果的人类可读摘要（onToolExecutionEnd 的 toolOutput.output 形态随工具而异）。 */
-function humanizeToolOutput(toolName: string, output: unknown): string {
-  if (output == null) return "完成";
-  if (typeof output === "string") {
-    // web_search 返回 "[n] 标题…" 格式的参考段落：数条目数给用户确定感。
-    if (toolName === "web_search") {
+/**
+ * 工具执行结果 → 给用户看的摘要（显示在气泡的步骤条里）。
+ *
+ * **不能直接展示 output**：工具返回的文本是**写给模型看的**，里面混着大量行为指令。
+ * 实测（鹈鹕案例真机）步骤条上出现过：
+ * `✓ 更新步骤清单完成（步骤清单已更新（0/4 已完成），用户能在对话里看到。继续执行下一步，
+ *   不要在回复里重复整个清单。）`
+ * 后半句是给模型的约束，用户读到只会莫名其妙。
+ *
+ * 旧实现靠 `output.length > 60 ? "完成" : output` 判定——48 字的指令刚好漏过去，
+ * 于是"漏不漏"取决于文案长度这种偶然因素。改成**按工具构造**：每个工具只取它对用户
+ * 有意义的那部分，未知工具一律"完成"，宁可少说也不泄漏指令。
+ */
+export function humanizeToolOutput(toolName: string, output: unknown): string {
+  if (typeof output !== "string" || !output) return "完成";
+  // 失败文案的第一句对用户有意义（"保存文件失败：不支持的产物类型…"），保留但剥掉后续指令。
+  if (/失败/.test(output.slice(0, 12))) return sliceSafe(output.split(/。(?=\S|$)/)[0], 80);
+  switch (toolName) {
+    case "web_search": {
       const count = (output.match(/^\[\d+\]/gm) || []).length;
       return count > 0 ? `找到 ${count} 条结果` : "未找到结果";
     }
-    return output.length > 60 ? "完成" : output;
+    case "generate_video": {
+      const count = /已创建\s*(\d+)\s*个视频生成任务/.exec(output)?.[1];
+      return count ? `已创建 ${count} 个视频任务` : "已创建视频任务";
+    }
+    case "create_file": {
+      const name = /文件已生成并保存：([^（(]+)/.exec(output)?.[1]?.trim();
+      return name ? `已保存 ${sliceSafe(name, 40)}` : "已生成文件";
+    }
+    case "inspect_artifact": {
+      if (/^自检失败/.test(output)) return "自检失败（页面没能加载）";
+      const errors = /运行时报错（共\s*(\d+)\s*条/.exec(output)?.[1];
+      if (errors) return `自检发现 ${errors} 条报错`;
+      return /没有任何 error\/warning/.test(output) ? "自检通过，无报错" : "自检完成";
+    }
+    case "update_plan": {
+      const done = /（(\d+)\/(\d+)\s*已完成）/.exec(output);
+      return done ? `步骤 ${done[1]}/${done[2]} 已完成` : "步骤清单已更新";
+    }
+    case "open_page": {
+      // 正文长度比正文本身有用：用户只想知道"读到了没有、读了多少"。
+      const truncated = /已截断/.test(output);
+      return `已读取 ${output.length} 字正文${truncated ? "（已截断）" : ""}`;
+    }
+    case "request_user_input":
+      return /未获得用户回答/.test(output) ? "用户未回答，按默认继续" : "已收到你的回答";
+    default:
+      return "完成";
   }
-  return "完成";
 }
 
 /** 工具调用入参的人类可读摘要：状态条展示用，别把原始 JSON 糊到用户脸上。 */

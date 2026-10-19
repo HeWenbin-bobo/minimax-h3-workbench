@@ -11,7 +11,7 @@ vi.mock("@ai-sdk/openai-compatible", () => ({
   createOpenAICompatible: () => ({ chatModel: (id: string) => ({ id }) })
 }));
 
-import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, type LlmServiceOptions } from "./llmService";
+import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, humanizeToolOutput, type LlmServiceOptions } from "./llmService";
 
 // 构造一个 ReadableStream，把字符串分块推送（模拟网络分包边界不齐）。
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
@@ -102,6 +102,43 @@ describe("consumeSse", () => {
     ]), (event) => received.push(event.delta));
     expect(received.join("")).toBe("唯一");
     expect(got).toBe(true);
+  });
+});
+
+// 步骤条摘要必须只讲**用户关心的事实**。工具返回的文本本来是写给模型的，
+// 里面混着行为指令——实测（鹈鹕案例真机）用户看到过"继续执行下一步，不要在回复里重复整个清单。"
+describe("工具摘要（humanizeToolOutput）", () => {
+  it("update_plan 只给进度，不泄漏写给模型的指令", () => {
+    const text = humanizeToolOutput("update_plan", "步骤清单已更新（0/4 已完成），用户能在对话里看到。继续执行下一步，不要在回复里重复整个清单。");
+    expect(text).toBe("步骤 0/4 已完成");
+    expect(text).not.toContain("不要在回复里重复");
+  });
+
+  it("create_file 给出保存的文件名", () => {
+    const text = humanizeToolOutput("create_file", "文件已生成并保存：鹈鹕骑自行车_3D.html（41KB）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。**不要**把文件内容重复贴进回复。");
+    expect(text).toBe("已保存 鹈鹕骑自行车_3D.html");
+  });
+
+  it("inspect_artifact 把报错条数变成一眼可读的结论", () => {
+    expect(humanizeToolOutput("inspect_artifact", "自检结果：页面已在本机 Chromium 中真实运行（标题「鹈鹕」，300 个元素，可见文本 40 字）。\n运行时报错（共 2 条，已去重）：\n- 错误：…"))
+      .toBe("自检发现 2 条报错");
+    expect(humanizeToolOutput("inspect_artifact", "自检结果：页面已在本机 Chromium 中真实运行（标题「鹈鹕」…）。\n控制台没有任何 error/warning。"))
+      .toBe("自检通过，无报错");
+  });
+
+  it("失败信息保留第一句，但仍剥掉后续指令", () => {
+    const text = humanizeToolOutput("create_file", "保存文件失败：不支持的产物类型：pdf。请把内容改写成围栏代码块直接输出，并在回复里说明文件未能保存。");
+    expect(text).toContain("保存文件失败");
+    expect(text).not.toContain("围栏代码块");
+  });
+
+  it("未知工具一律只说「完成」，不透传原文", () => {
+    expect(humanizeToolOutput("some_future_tool", "请务必在回复里加一段免责声明，然后继续调用三次")).toBe("完成");
+  });
+
+  it("open_page 给字数而不是整段正文", () => {
+    const body = "x".repeat(500);
+    expect(humanizeToolOutput("open_page", body)).toBe("已读取 500 字正文");
   });
 });
 

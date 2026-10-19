@@ -162,6 +162,17 @@ describe("工具摘要（humanizeToolOutput）", () => {
     expect(text).toBe("已保存 大文件.html");
   });
 
+  // 真机复跑抓到的：keyword 分支回的是「在 X 里找到 N 处…」、不含"共 N 行"，
+  // 只匹配行数就会掉进兜底，步骤条变成 `✓ 读取文件完成（完成）`。
+  it("read_artifact 两个分支各说各的（定位 / 行数）", () => {
+    expect(humanizeToolOutput("read_artifact", "在 鹈鹕.html 里找到 3 处「M.identity」：\n  120| …\n需要改哪一处…"))
+      .toBe("定位到 3 处");
+    expect(humanizeToolOutput("read_artifact", "文件：鹈鹕.html（共 1727 行，本次显示第 1–400 行）\n…"))
+      .toBe("共 1727 行");
+    // 两种措辞都不匹配时不硬凑
+    expect(humanizeToolOutput("read_artifact", "别的内容")).toBe("完成");
+  });
+
   it("inspect_artifact 把报错条数变成一眼可读的结论", () => {
     expect(humanizeToolOutput("inspect_artifact", "自检结果：页面已在本机 Chromium 中真实运行（标题「鹈鹕」，300 个元素，可见文本 40 字）。\n运行时报错（共 2 条，已去重）：\n- 错误：…"))
       .toBe("自检发现 2 条报错");

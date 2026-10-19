@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyExactEdit, sliceWithLineNumbers } from "./artifactEdit";
+import { applyExactEdit, sliceWithLineNumbers, MAX_READ_LINES } from "./artifactEdit";
 
 // 这些用例全部来自真机观察到的形态（鹈鹕案例）：
 // 模型为改一处 `M.identity` 整份重写 40KB，改完仍是错的，且它无法核对。
@@ -100,5 +100,38 @@ describe("sliceWithLineNumbers", () => {
   it("起始行超出末尾时退到最后一行", () => {
     const out = sliceWithLineNumbers("a\nb", 100, undefined);
     expect(out).toMatchObject({ from: 2, to: 2 });
+  });
+});
+
+// 实测真机踩到：模型不带范围调用 read_artifact，拿到 1651 行全文，紧接着又读一遍。
+// 提示词写了"一次别读整个文件"，但提示词不是护栏——代码必须有默认上限。
+describe("read_artifact 的默认行数上限", () => {
+  const bigFile = Array.from({ length: 1000 }, (_, i) => `line${i + 1}`).join("\n");
+
+  it("不带范围时只返回前 MAX_READ_LINES 行，并标记被截断", () => {
+    const out = sliceWithLineNumbers(bigFile);
+    expect(out.from).toBe(1);
+    expect(out.to).toBe(MAX_READ_LINES);
+    expect(out.truncated).toBe(true);
+    expect(out.totalLines).toBe(1000);
+    expect(out.body.split("\n")).toHaveLength(MAX_READ_LINES);
+  });
+
+  it("显式给 endLine 时尊重它（可以在上限内任意取）", () => {
+    const out = sliceWithLineNumbers(bigFile, 500, 520);
+    expect(out).toMatchObject({ from: 500, to: 520, truncated: true });
+  });
+
+  it("小文件不截断", () => {
+    const out = sliceWithLineNumbers("a\nb\nc");
+    expect(out.truncated).toBe(false);
+    expect(out.to).toBe(3);
+  });
+
+  it("从中间开始读时按上限往后取，而不是一口气读到末尾", () => {
+    const out = sliceWithLineNumbers(bigFile, 900);
+    expect(out.from).toBe(900);
+    expect(out.to).toBe(1000); // 只剩 101 行，不到上限
+    expect(out.truncated).toBe(false);
   });
 });

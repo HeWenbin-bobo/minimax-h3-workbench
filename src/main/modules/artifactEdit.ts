@@ -89,22 +89,35 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
 }
 
 /**
+ * 一次读回的最大行数。**必须有默认上限**（实测真机踩到）：模型不带 startLine/endLine
+ * 读一个 1651 行的页面时，工具把**全文**塞回上下文，它紧接着又读了一遍——
+ * 两次全量读回 ≈ 几十 KB 白烧，还挤掉了后面的修改步骤。
+ * 工具描述里写了"一次别读整个文件"，但提示词不是护栏，代码才是。
+ */
+export const MAX_READ_LINES = 400;
+
+/**
  * 带行号地切一段出来（读文件工具用）。
  *
  * 为什么要行号：模型据"第 42 行"能补出唯一上下文，而按字符偏移它算不准。
  * 越界一律夹紧而不是报错——模型给个大概范围时要能拿到东西，拿不到才是死路。
  *
+ * **未指定 endLine 时最多返回 MAX_READ_LINES 行**，并在 `truncated` 里说明还剩多少行，
+ * 让模型知道该用范围继续读，而不是以为文件就这么长。
+ *
  * @param startLine 1 起算，缺省 1
- * @param endLine   含端点，缺省到文件末尾
+ * @param endLine   含端点，缺省到 startLine + MAX_READ_LINES - 1
  */
-export function sliceWithLineNumbers(text: string, startLine?: number, endLine?: number): { body: string; totalLines: number; from: number; to: number } {
+export function sliceWithLineNumbers(text: string, startLine?: number, endLine?: number): { body: string; totalLines: number; from: number; to: number; truncated: boolean } {
   const lines = text.split("\n");
   const total = lines.length;
   const from = Math.max(1, Math.min(Math.floor(startLine ?? 1) || 1, total));
-  const to = Math.max(from, Math.min(Math.floor(endLine ?? total) || total, total));
+  // 有显式 endLine 时尊重它（但也夹到文件末尾）；没给就按默认上限截断。
+  const requested = endLine === undefined ? from + MAX_READ_LINES - 1 : Math.floor(endLine) || total;
+  const to = Math.max(from, Math.min(requested, total));
   const body = lines
     .slice(from - 1, to)
     .map((line, i) => `${String(from + i).padStart(5, " ")}| ${line}`)
     .join("\n");
-  return { body, totalLines: total, from, to };
+  return { body, totalLines: total, from, to, truncated: to < total };
 }

@@ -1083,7 +1083,12 @@ function registerIpc(
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，无法按文本读取；请用预览面板查看。");
           const raw = await readFile(resolved, "utf8");
           const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
-          return `文件：${safeName}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}`;
+          // **必须说明被截断了**（实测真机）：模型不带范围读 1651 行全文，紧接着又读一遍，
+          // 白烧几十 KB 还挤掉后续修改步骤。默认上限 400 行，并告诉它还剩多少、怎么继续读。
+          const more = slice.truncated
+            ? `\n（只显示前 ${slice.to - slice.from + 1} 行；文件共 ${slice.totalLines} 行，还有 ${slice.totalLines - slice.to} 行没显示。需要更多就用 startLine/endLine 分段读。）`
+            : "";
+          return `文件：${safeName}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}`;
         },
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));

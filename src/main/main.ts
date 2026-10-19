@@ -24,7 +24,7 @@ import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequ
 import { downloadAndInstall, onDownloadProgress } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
-import { LlmService, chatAgent, type AgentQuestion, type AgentRunResult } from "./modules/llmService";
+import { LlmService, chatAgent, MAX_AGENT_STEPS, type AgentQuestion, type AgentRunResult } from "./modules/llmService";
 import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
@@ -1122,7 +1122,7 @@ function registerIpc(
         // 批量编辑：一次调用应用多处修改，**全部成功才写盘**。
         //
         // 实测动因：模型一次修 5 处 bug，单处 edit 消耗 5 步工具预算，
-        // 叠加 `stepCountIs(10)` 后任务被打断（真机那一轮最后一句就是"已达 10 步上限"）。
+        // 叠加步数上限（`MAX_AGENT_STEPS`）后任务被打断（真机那一轮最后一句就是"已达上限"）。
         // 合成一次调用后，同样的工作只占 1 步，剩下的预算能留给自检与验证。
         editArtifactBatch: async (params: { name: string; edits: Array<{ oldText: string; newText: string }> }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
@@ -1261,10 +1261,10 @@ function registerIpc(
       }
       // 撞上工具步数上限：模型还想继续干（最后一步 finishReason 仍是 tool-calls），是上限把它掐断的。
       // 不说明的话，用户看到的是一段**戛然而止**的回答，会以为软件卡了或模型答完了
-      // （实测 probe-step-limit：打满 10 步后气泡停在"正在做第 10 步。"，没有任何提示）。
-      // 用独立一段标明，并给出可操作的下一步，而不是让用户自己猜。
+      // （实测 probe-step-limit：打满上限后气泡停在"正在做第 N 步。"，没有任何提示）。
+      // **数字必须来自同一个常量**：上一版在这里写死 10，后来把预算提到 20 时文案就撒了谎。
       if (result.hitStepLimit) {
-        chunk({ seq: 1, delta: `\n\n---\n（本轮工具调用已达 10 步上限，任务可能还没做完。回复「继续」我就接着往下做；如果已经有可用的产物，也可以直接先看那个。）` });
+        chunk({ seq: 1, delta: `\n\n---\n（本轮工具调用已达 ${MAX_AGENT_STEPS} 步上限，任务可能还没做完。回复「继续」我就接着往下做；如果已经有可用的产物，也可以直接先看那个。）` });
       }
       // 服务端 usage 落账：本轮实测的输入 token 数 + 当时的消息条数，作为下次压缩判定的锚点。
       // 拿不到 usage 时不写样本——下一轮自动回落到字符估算（估算值不覆盖已有的服务端样本）。

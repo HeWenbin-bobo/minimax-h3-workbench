@@ -65,6 +65,23 @@ describe("consumeSse", () => {
     expect(received).toEqual([{ seq: 1, delta: "x" }]);
   });
 
+  // 实测缺口：上游/中转偶尔把 `content` 写成对象或数字
+  // （`{"content":{"text":"你好"}}` / `{"content":42}`）。旧实现原样透传，
+  // 渲染端把它拼进气泡字符串 → 用户读到 `[object Object]`。
+  // 非字符串一律当"这一帧没有正文"跳过（与 `content: null` 的工具调用帧同一处理）。
+  it("content 不是字符串时不发送事件（避免气泡出现 [object Object]）", async () => {
+    const received: Array<{ seq: number; delta: string }> = [];
+    await consumeSse(streamOf([
+      'data: {"choices":[{"delta":{"content":{"text":"你好"}}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":42}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":null}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"好"}}]}\n\n',
+      "data: [DONE]\n\n"
+    ]), (event) => received.push(event));
+    expect(received).toEqual([{ seq: 1, delta: "好" }]);
+    expect(received.every((event) => typeof event.delta === "string")).toBe(true);
+  });
+
   // 回归：收到 `[DONE]` 时必须**主动取消流**，不能只 `releaseLock()`。
   // `releaseLock()` 只放读锁、不断底层连接——实测（probe-sse-done，本机起一个发完
   // `[DONE]` 但不断开连接的 SSE 服务）连跑 3 轮后仍有 3 条 socket 开着、一条都没关。

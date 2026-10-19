@@ -1452,9 +1452,14 @@ export async function consumeSse(
     if (data === "[DONE]") return true;
     try {
       const parsed = JSON.parse(data) as {
-        choices?: Array<{ delta?: { content?: string } }>;
+        choices?: Array<{ delta?: { content?: unknown } }>;
       };
-      const delta = parsed.choices?.[0]?.delta?.content;
+      const raw = parsed.choices?.[0]?.delta?.content;
+      // **只接受字符串**（实测缺口）：上游/中转偶尔把 `content` 写成数字或对象
+      // （`{"content":{"text":"你好"}}`）。旧实现原样 `send` 下去，渲染端把它拼进
+      // 气泡字符串 → 用户读到 `[object Object]`，而模型那边其实有内容。
+      // 非字符串一律当"这一帧没有正文"跳过（与 `content: null` 的工具调用帧同一处理）。
+      const delta = typeof raw === "string" ? raw : "";
       if (delta) {
         received = true;
         send({ seq: (seq += 1), delta });

@@ -1150,6 +1150,10 @@ function registerIpc(
           // `inspect_artifact` 又只收 html，于是"文件已生成"对它来说是个从未看过的黑盒。
           // 用 SheetJS 反解成 CSV 再按文本读（与预览面板同一套转换，不新增依赖）。
           let raw: string;
+          // xlsx 被截断时的**真实总行数**。标题里的"共 N 行"必须用它——
+          // 否则会出现自相矛盾的回执：标题按 `raw.split("\n").length` 算成 2002，
+          // 正文末尾的说明却写着"表格共 5001 行"（实测 5000 行表格）。
+          let realRowCount: number | undefined;
           if (/\.xlsx$/i.test(resolved)) {
             const XLSX = await loadXlsx();
             try {
@@ -1175,6 +1179,7 @@ function registerIpc(
                   // 旧文案写的是"需要看后面的，用 keyword 定位"——**这是个死路**：
                   // keyword 与 startLine/endLine 都作用在 `raw` 上，也就是这前 2000 行，
                   // 后面那些行压根不在字符串里。模型照做，注定搜不到，只会怀疑是关键词写错了。
+                  realRowCount = rowCount;
                   raw = `${XLSX.utils.sheet_to_csv(capped)}\n\n（表格共 ${rowCount} 行，这里只给了前 ${MAX_ROWS} 行。注意：keyword 与 startLine/endLine 都只能在这前 ${MAX_ROWS} 行里找，看不到后面的内容。要看后面，请在回复里说明具体要哪几行/哪一列，或让用户直接在 Excel 里打开这份文件。）`;
                 } else {
                   raw = XLSX.utils.sheet_to_csv(sheet);
@@ -1226,10 +1231,14 @@ function registerIpc(
             return `${nameLead}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。`;
           }
           const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
+          // **显示用的总行数**：大表格被截到 2000 行后，`raw.split("\n")` 只有 ~2002 行，
+          // 而正文末尾的说明写着"表格共 5001 行"——同一个回执里两个数字互相矛盾（实测）。
+          // 有真实行数时一律以它为准，行号区间仍按 `raw` 的实际内容算。
+          const displayTotal = realRowCount ?? slice.totalLines;
           // **必须说明被截断了**（实测真机）：模型不带范围读 1651 行全文，紧接着又读一遍，
           // 白烧几十 KB 还挤掉后续修改步骤。默认上限 400 行，并告诉它还剩多少、怎么继续读。
           const more = slice.truncated
-            ? `\n（只显示前 ${slice.to - slice.from + 1} 行；文件共 ${slice.totalLines} 行，还有 ${slice.totalLines - slice.to} 行没显示。需要更多就用 startLine/endLine 分段读，或者用 keyword 直接定位。）`
+            ? `\n（只显示前 ${slice.to - slice.from + 1} 行；文件共 ${displayTotal} 行，还有 ${Math.max(0, displayTotal - slice.to)} 行没显示。需要更多就用 startLine/endLine 分段读，或者用 keyword 直接定位。）`
             : "";
           // **按字符截断也要说**（否则是静默丢失）：超长单行文件（压缩过的 HTML）
           // 会先撞 `MAX_READ_CHARS`，行数看起来"全给了"，实际内容被切在半路。
@@ -1252,7 +1261,7 @@ function registerIpc(
             : "";
           // **标题必须用"实际读到的那个文件"**：`nameNote` 已在上方（keyword 分支之前）
           // 算好——那里提前返回，放这里就看不到回落说明了。
-          return `${nameLead}文件：${found.name}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}${reversedNote}`;
+          return `${nameLead}文件：${found.name}（共 ${displayTotal} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}${reversedNote}`;
         }),
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));

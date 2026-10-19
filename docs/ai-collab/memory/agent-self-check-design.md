@@ -104,4 +104,42 @@ Electron 隐藏窗口（`show:false`）能 `capturePage()`；纯色页主色占�
 正解：`Target.getTargets` 找 url 以 `h3preview:` 开头的 target → `attachToTarget(flatten)`
 → 在该 session 里 `Runtime.evaluate`。拿不到就判失败，不留兜底。
 
+**13. 工具 schema 的"硬校验"会让调用被静默跳过，一次烧光整轮预算。**
+AI SDK 在 `parseToolCall` 阶段对 `inputSchema` 做 zod 校验；不通过就抛
+`InvalidToolInputError`，**整个 toolCall 记进历史但不执行**——`onToolExecutionStart/End`
+都不触发，模型**收不到任何回执**，于是反复重试同一条，20 步预算全烧光；
+界面还把原因归成"参数被上游截断"（完全误导）。
+
+2026-10-20 用 mock 探针（`_scratch/probe-schema-*.mjs`）逐个复现并修掉 10 处：
+`edits.min(2)`（1 条就整轮报废）、`edits.max(20)`（25 条同理）、
+`duration/count` 的 `min/max/int`、`url` 的 `.url()`（不带协议就死）、
+`startLine/endLine` 的 `.int().min(1)`（按 0 起算就死）、
+`kind` 的 `z.enum`（写 `excel`/`word` 就死，**这是产出物工具，等于什么都拿不到**）、
+`status` 的 `z.enum`（写 `done`/`in-progress` 就死，而它几乎每步都调）、
+`oldText` 的 `.min(1)`（单处 + 批量）、`keyword` 的 `.min(1)` 与范围不可为 null。
+
+**判据**：只要这个值**代码本来就能自动纠正**（夹紧/截断/归一/补全），就不该做成
+schema 硬校验——写进 `describe` 当建议，校验放到 `execute` 里并**回一句可纠正的说明**。
+唯一该保留的是"没有它就没法工作"的语义约束（如 `name` 非空）。
+
+**怎么防复发**：`llmService.test.ts` 里有一组契约测试，直接从 `chatAgent` 拿到的工具表里
+取 `inputSchema`，用真实 zod 解析验证"别名/越界/空值都能进"。收紧约束会立刻变红。
+
+**探针的两类自欺**（本轮又踩）：① 断言写成 `step === 3`——被跳过时 mock 也会收到第 3 个请求，
+两种情况都真，永远绿；必须断言"气泡里有没有『没有真正执行』提示"。② mock 的停止条件
+依赖工具结果的**前缀**，而超长正文的回执根本不以那句话开头，导致一直重发到 20 步。
+
+**14. 我们自己的输出格式会被模型照抄回来，然后三处工具各踩一遍。**
+`read_artifact` 返回 `    42| code`，模型把这个前缀一起抄进 `oldText`（匹配失败）、
+抄进 `newText`（**写进文件**，产物直接坏掉）、抄进 `keyword`（搜不到）。
+同一个坑分三次才修完——教训是：**凡是我们给模型看的格式装饰，都要假定它会被原样抄回**，
+并在每一个接收侧统一剥掉（`applyExactEdit` / `applyExactEdits` / `findMatchingLines`）。
+
+**15. 编辑写盘要对齐文件原始行尾，三条成功路径都要。**
+`applyExactEdit` 有三条成功路径（原样命中 / 行尾归一后命中 / 剥行号后命中）。
+只修第一条时，CRLF 文件会经由后两条被**静默改成 LF**（下一次读回时 `` 看不见，
+模型照抄的 `oldText` 就匹配不上）。修完三条才一致。
+另：产物写盘要**先写 `.tmp` 再 rename**（含 xlsx，显式传 `bookType`），
+否则写到一半失败会留下半截文件占住名字。
+
 相关：[[agent-prompt-engineering-leverage]]、[[playground-branch-status]]

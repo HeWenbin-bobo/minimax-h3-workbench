@@ -475,6 +475,31 @@ describe("按关键词定位（findMatchingLines）", () => {
     expect(findMatchingLines(src, "M.identity").strippedGutter).toBe(false);
   });
 
+  // 实测复现：模型最常把**从 read_artifact 复制的一整段**当 keyword 贴进来。
+  // 旧实现逐行 `includes`，多行片段（以及行尾多一个换行）**必然 0 命中**——
+  // 回执说"没有找到"，它只会换个片段再搜一次，20 步预算就烧在反复搜索上。
+  it("多行 keyword 按第一行定位、逐行核对后命中", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["function tick() {", "  const a = 1;", "  return a;", "}"].join(NL);
+    const out = findMatchingLines(file, "function tick() {" + NL + "  const a = 1;");
+    expect(out.total).toBe(1);
+    expect(out.matches[0].line).toBe(1);
+  });
+
+  it("多行 keyword 每行都带行号前缀时同样剥掉再搜", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["function tick() {", "  const a = 1;", "}"].join(NL);
+    const out = findMatchingLines(file, "    1| function tick() {" + NL + "    2|   const a = 1;");
+    expect(out.total).toBe(1);
+    expect(out.strippedGutter).toBe(true);
+  });
+
+  it("行尾多一个换行的单行 keyword 仍能命中", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["const a = 1;", "const b = 2;"].join(NL);
+    expect(findMatchingLines(file, "const a = 1;" + NL).total).toBe(1);
+  });
+
   // 反向自检：剥行号的判据从宽，但**剥成空串时必须不剥**。
   // `12|` 本身可能就是用户真要搜的内容（表格竖线、正则片段）；
   // 把它剥成空串会让搜索直接返回"没找到"，等于把真实搜索吃掉。

@@ -153,6 +153,22 @@ function closestLines(text: string, needle: string, limit = 3): Array<{ line: nu
 }
 
 /**
+ * 剥掉 `read_artifact` 的**行号前缀**（`    42| const a = 1;` → `const a = 1;`）。
+ *
+ * 这是我们**自己的输出格式**给模型挖的坑：模型照抄读回结果时，很自然把行号栏一起复制。
+ * oldText / newText / keyword 三条路都会踩。
+ *
+ * **判据：至少一半的行带行号前缀**。单看第一行不足以判断——产物里本来就可能出现
+ * `1| ` 这样的文本（ASCII 表格、竖线分隔的笔记）。改动过就返回新值，否则 undefined。
+ */
+export function stripGutter(value: string): string | undefined {
+  const lines = value.split("\n");
+  const withGutter = lines.filter((line) => /^\s*\d+\| ?/.test(line)).length;
+  if (withGutter === 0 || withGutter * 2 < lines.length) return undefined;
+  return lines.map((line) => line.replace(/^\s*\d+\| ?/, "")).join("\n");
+}
+
+/**
  * 按上下文精确替换一次。
  *
  * 匹配顺序：
@@ -199,21 +215,12 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
     return { ok: false, reason: "ambiguous", count: hits.length, lines: linesOf(normalizedText, hits) };
   }
 
-  // 第三次尝试：剥掉 `read_artifact` 的**行号前缀**再匹配。
-  //
+  // 第三次尝试：剥掉 `read_artifact` 的**行号前缀**再匹配（判据见 `stripGutter`）。
   // 为什么需要（实测复现）：`read_artifact` 返回的是 `    42| const a = 1;` 这种带行号的文本，
   // 而模型照着抄进 oldText 时，很自然地连着 `42| ` 一起复制（它看到的就是这段）。
   // 那不是文件里的内容，精确匹配必然失败 → 模型只能再读一遍、再猜一遍。
   // 这是我们**自己的输出格式**给它挖的坑，理应在这里替它剥掉。
-  //
-  // 只在"至少一半的行都带行号前缀"时才剥：单看第一行不足以判断——
-  // 产物里本来就可能出现 `1| ` 这样的文本（ASCII 表格、竖线分隔的笔记）。
-  const degutter = (value: string): string | undefined => {
-    const lines = value.split("\n");
-    const withGutter = lines.filter((line) => /^\s*\d+\| ?/.test(line)).length;
-    if (withGutter === 0 || withGutter * 2 < lines.length) return undefined;
-    return lines.map((line) => line.replace(/^\s*\d+\| ?/, "")).join("\n");
-  };
+  const degutter = stripGutter;
   const degutterNeedle = degutter(normalizedNeedle);
   if (degutterNeedle !== undefined && degutterNeedle !== normalizedNeedle) {
     const strippedHits = occurrences(normalizedText, degutterNeedle);
@@ -404,27 +411,44 @@ export function findMatchingLines(
   // **keyword 也可能带着读回时的行号前缀**（实测复现）：模型常把 `    42| const a = 1;`
   // 整行复制进来当关键词。那不是文件内容，`includes` 永远命中不了，回执还会说
   // "没有找到「    42| const a = 1;」"——它只会再换一个片段再搜一次。
-  // 与 oldText 同一条坑的第三处（oldText / newText 已修），这里一并剥掉。
-  // 判据同样从宽：只要开头是"空白+数字+|"，就认为是照抄了我们的行号栏。
+  // 与 oldText / newText 共用同一判据（`stripGutter`），**逐行剥**——
+  // 多行片段常常每行都带行号，只剥第一行的话后面几行照样匹配不上（实测复现）。
   // **但剥完不能是空串**：关键词本来就可能是 `12|`（表格竖线、正则片段），
   // 剥成空串会直接返回"没找到"——那是把用户真实想搜的内容吃掉。
-  const gutterStripped = needle.replace(/^\s*\d+\|\s?/, "");
-  const strippedGutter = gutterStripped !== needle && gutterStripped.length > 0;
-  if (strippedGutter) needle = gutterStripped;
+  const normalizedNeedle = needle.replace(/\r\n/g, "\n");
+  const deguttered = stripGutter(normalizedNeedle);
+  const strippedGutter = deguttered !== undefined && deguttered.trim().length > 0;
+  if (strippedGutter) needle = deguttered;
   if (!needle) return { matches: [], total: 0, body: "", charCapped: false, lineCapped: false, caseOnly: 0 };
+  // **多行片段 / 行尾多一个换行**（实测复现）：本函数原来是逐行 `includes`，
+  // 所以模型把从 read_artifact 复制的一整段（`line1\nline2`）或带尾随换行的单行
+  // 当 keyword 贴进来时，**必然 0 命中**——而它最常干的就是这个（它看到的就是整段）。
+  // 回执说"没有找到"，它只会换个片段再搜一次，把预算烧在反复搜索上。
+  // 处理：先归一换行、去掉首尾空行；多行时用**第一行**定位、再逐行核对后续是否连续命中。
+  const needleLines = needle.replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "").split("\n");
+  const anchor = needleLines[0];
+  if (!anchor) return { matches: [], total: 0, body: "", charCapped: false, lineCapped: false, caseOnly: 0 };
+  const matchAt = (start: number): boolean => {
+    // 后续行必须**紧接着**逐行出现（各行内容仍按子串比，容忍缩进/行尾差异）。
+    for (let k = 1; k < needleLines.length; k += 1) {
+      const line = lines[start + k];
+      if (line === undefined || !line.includes(needleLines[k])) return false;
+    }
+    return true;
+  };
   const hits: number[] = [];
   for (let i = 0; i < lines.length && hits.length < limit; i += 1) {
-    if (lines[i].includes(needle)) hits.push(i + 1);
+    if (lines[i].includes(anchor) && matchAt(i)) hits.push(i + 1);
   }
   // 统计总数时不受 limit 限制，便于告诉模型"还有更多"。
   let total = 0;
-  for (const line of lines) if (line.includes(needle)) total += 1;
+  for (let i = 0; i < lines.length; i += 1) if (lines[i].includes(anchor) && matchAt(i)) total += 1;
   // **只是大小写不同**也算一条有用线索（实测）：匹配是刻意区分大小写的（模型给的多半是
   // 标识符原文），但它常把 `SPEED` 写成 `speed`。此时只回"换个片段试试（区分大小写）"，
   // 它只会换一个词再搜一次。数一下忽略大小写能命中多少行，回执就能直接说"只是大小写不同"。
   let caseOnly = 0;
   if (total === 0) {
-    const lower = needle.toLowerCase();
+    const lower = anchor.toLowerCase();
     for (const line of lines) if (line.toLowerCase().includes(lower)) caseOnly += 1;
   }
   const blocks: string[] = [];
@@ -444,7 +468,9 @@ export function findMatchingLines(
       // 直接裸拼等于把整行塞回上下文；而按行首截又会把 needle 本身切掉
       // （它在行尾时模型看到的正好是"没有命中"的一段）。
       if (lines[n - 1].length > EXCERPT_CHARS) lineCapped = true;
-      blocks.push(`${String(n).padStart(5, " ")}| ${excerptLine(lines[n - 1], n === hit ? needle : undefined)}`);
+      // 居中截用 **anchor**（多行 keyword 的整串里含换行，`indexOf` 在单行上必然 -1，
+      // 窗口会退回行首、把命中的那段切在视野外）。
+      blocks.push(`${String(n).padStart(5, " ")}| ${excerptLine(lines[n - 1], n === hit ? anchor : undefined)}`);
     }
   }
   const joined = blocks.join("\n");

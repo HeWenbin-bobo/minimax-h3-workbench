@@ -1166,9 +1166,12 @@ function registerIpc(
                     ...sheet,
                     "!ref": XLSX.utils.encode_range({ s: range.s, e: { r: range.s.r + MAX_ROWS - 1, c: range.e.c } })
                   };
-                  // 截断说明走**单独一行**并明确标出：模型看到它就知道该按 keyword 定位或分段，
-                  // 而不是以为表格只有 2000 行。
-                  raw = `${XLSX.utils.sheet_to_csv(capped)}\n\n（表格共 ${rowCount} 行，这里只给了前 ${MAX_ROWS} 行。需要看后面的，用 keyword 定位，或告诉我你要哪一段。）`;
+                  // 截断说明走**单独一行**并明确标出，但要**说对能怎么办**。
+                  //
+                  // 旧文案写的是"需要看后面的，用 keyword 定位"——**这是个死路**：
+                  // keyword 与 startLine/endLine 都作用在 `raw` 上，也就是这前 2000 行，
+                  // 后面那些行压根不在字符串里。模型照做，注定搜不到，只会怀疑是关键词写错了。
+                  raw = `${XLSX.utils.sheet_to_csv(capped)}\n\n（表格共 ${rowCount} 行，这里只给了前 ${MAX_ROWS} 行。注意：keyword 与 startLine/endLine 都只能在这前 ${MAX_ROWS} 行里找，看不到后面的内容。要看后面，请在回复里说明具体要哪几行/哪一列，或让用户直接在 Excel 里打开这份文件。）`;
                 } else {
                   raw = XLSX.utils.sheet_to_csv(sheet);
                 }

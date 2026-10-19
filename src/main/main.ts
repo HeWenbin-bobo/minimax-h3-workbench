@@ -1684,20 +1684,36 @@ ${tableNote}` : ""}`;
     }
     if ([".txt", ".md", ".json", ".csv", ".srt", ".vtt", ".log"].includes(extension)) {
       if (info.size > 2 * 1024 * 1024) throw new Error("文本附件超过 2MB 上限，请只粘贴相关片段。");
-      // **必须容忍非 UTF-8 编码**（实测）：Windows 记事本、Excel「另存为 CSV」在中文系统上
-      // 默认写 **GBK/GB18030**，按 UTF-8 读会得到一整片 `���Ĳ���`——
-      // 用户看不出原因（文件在自己电脑上明明正常），模型拿到的也是乱码，
-      // 只会答非所问，两边都不知道发生了什么。
+      // **必须容忍非 UTF-8 编码**（实测，两次都踩到）：
       //
-      // 顺序：先严格 UTF-8（`fatal: true` 会抛而不是静默替换成 U+FFFD），
-      // 失败再按 GB18030 解（它向下兼容 GBK/GB2312，是 Windows 中文环境的实际默认）。
+      // ① **GBK/GB18030**：Windows 记事本、Excel「另存为 CSV」在中文系统上默认写它，
+      //    按 UTF-8 读会得到一整片 `���Ĳ���`——用户看不出原因（文件在自己电脑上明明正常），
+      //    模型拿到的也是乱码，只会答非所问。
+      // ② **UTF-16LE / UTF-16BE（带 BOM）**：记事本「另存为 → 编码：Unicode」就是这个格式，
+      //    而它是**中文 Windows 用户的另一个默认选择**。它的字节里含 0xFF/0xFE 与大量 0x00，
+      //    恰好也能被 GB18030 解出来（不抛错），于是得到 `��-N噀Km諎` 这种乱码——
+      //    比完全解不开更糟：用户以为附件发上去了，模型看到的却是一堆噪声。
+      //
+      // 顺序：**先看 BOM**（最确定的信号）→ 严格 UTF-8（`fatal: true` 会抛而不是静默替换）
+      // → GB18030（向下兼容 GBK/GB2312，是 Windows 中文环境的实际默认）。
       const bytes = await readFile(filePath);
       let raw: string;
-      try {
-        raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      } catch {
-        raw = new TextDecoder("gb18030").decode(bytes);
+      if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+        raw = new TextDecoder("utf-16le").decode(bytes.subarray(2));
+      } else if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+        raw = new TextDecoder("utf-16be").decode(bytes.subarray(2));
+      } else {
+        try {
+          // `ignoreBOM: false`（默认）会把 UTF-8 BOM 剥掉——留着它，正文第一个字符
+          // 就是不可见的 U+FEFF，模型复制片段时会把那个隐形字符一起带回去。
+          raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch {
+          raw = new TextDecoder("gb18030").decode(bytes);
+        }
       }
+      // BOM 兜底：部分工具写的是「UTF-8 BOM + GBK 正文」这类混合，上面的分支剥不掉。
+      // 统一在入口去掉一个开头的 U+FEFF（它只有"编码标记"这一个含义，正文不该带）。
+      if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
       // 截断必须**如实上报**：原实现静默 `.slice(0, 100_000)`，用户以为整份文件都发给了模型，
       // 模型也只看到前一段——文件更长时两边都不知道（违反「出错/取舍必须让人看见」）。
       // 同样用 sliceSafe：这段正文会发回模型，不能留孤立代理项。

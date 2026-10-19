@@ -394,9 +394,18 @@ export function findMatchingLines(
   keyword: string,
   limit = 20,
   context = 2
-): { matches: Array<{ line: number; text: string }>; total: number; body: string; charCapped: boolean; lineCapped: boolean; caseOnly: number } {
-  const needle = String(keyword ?? "");
+): { matches: Array<{ line: number; text: string }>; total: number; body: string; charCapped: boolean; lineCapped: boolean; caseOnly: number; strippedGutter?: boolean } {
+  let needle = String(keyword ?? "");
   const lines = text.split("\n");
+  if (!needle) return { matches: [], total: 0, body: "", charCapped: false, lineCapped: false, caseOnly: 0 };
+  // **keyword 也可能带着读回时的行号前缀**（实测复现）：模型常把 `    42| const a = 1;`
+  // 整行复制进来当关键词。那不是文件内容，`includes` 永远命中不了，回执还会说
+  // "没有找到「    42| const a = 1;」"——它只会再换一个片段再搜一次。
+  // 与 oldText 同一条坑的第三处（oldText / newText 已修），这里一并剥掉。
+  // 判据同样从宽：只要开头是"空白+数字+|"，就认为是照抄了我们的行号栏。
+  const gutterStripped = needle.replace(/^\s*\d+\|\s?/, "");
+  const strippedGutter = gutterStripped !== needle;
+  if (strippedGutter) needle = gutterStripped;
   if (!needle) return { matches: [], total: 0, body: "", charCapped: false, lineCapped: false, caseOnly: 0 };
   const hits: number[] = [];
   for (let i = 0; i < lines.length && hits.length < limit; i += 1) {
@@ -435,9 +444,9 @@ export function findMatchingLines(
   }
   const joined = blocks.join("\n");
   if (joined.length > MAX_READ_CHARS) {
-    return { matches, total, body: sliceSafe(joined, MAX_READ_CHARS), charCapped: true, lineCapped, caseOnly };
+    return { matches, total, body: sliceSafe(joined, MAX_READ_CHARS), charCapped: true, lineCapped, caseOnly, strippedGutter };
   }
-  return { matches, total, body: joined, charCapped: false, lineCapped, caseOnly };
+  return { matches, total, body: joined, charCapped: false, lineCapped, caseOnly, strippedGutter };
 }
 
 /**

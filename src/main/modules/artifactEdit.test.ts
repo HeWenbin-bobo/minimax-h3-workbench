@@ -446,6 +446,22 @@ describe("按关键词定位（findMatchingLines）", () => {
     expect(findMatchingLines(src, "M.identity").caseOnly).toBe(0);
   });
 
+  // 实测复现：模型把读回的一整行（含 `    2| ` 行号栏）整段当 keyword 抄进来。
+  // 那不是文件内容，`includes` 永远命中不了——它只会再换一个片段再搜一次。
+  // 这是 oldText / newText 那条坑的**第三处**（两处已修）。
+  it("keyword 带着行号前缀时自动剥掉再搜，并标出 strippedGutter", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["const a = 1;", "const b = 2;"].join(NL);
+    const out = findMatchingLines(file, "    2| const b = 2;");
+    expect(out.total).toBe(1);
+    expect(out.matches[0].line).toBe(2);
+    expect(out.strippedGutter).toBe(true);
+  });
+
+  it("干净 keyword 不误标 strippedGutter", () => {
+    expect(findMatchingLines(src, "M.identity").strippedGutter).toBe(false);
+  });
+
   it("空关键词返回空结果（不匹配每一行）", () => {
     const out = findMatchingLines(src, "");
     expect(out.total).toBe(0);

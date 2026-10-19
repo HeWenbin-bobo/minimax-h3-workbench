@@ -1199,8 +1199,17 @@ function registerIpc(
             // 命中行本身可能极长（压缩过的 HTML 一行几十万字符），`findMatchingLines`
             // 已按行截断并再兜一道字符上限——必须告诉模型"你看到的是节选"，
             // 否则它会以为原文就是这么短，照抄 oldText 时必然匹配不上。
+            //
+            // **分情况给下一步**：整个文件就是一行时（压缩 HTML 的常见形态），
+            // 用 startLine/endLine 读第 1 行同样会撞 `MAX_READ_CHARS` 被截在行首——
+            // 照样拿不到中间那段。那种情况下唯一可靠的办法是给**更短、更独特的 oldText**。
+            const oneLineFile = !raw.includes("\n");
             const capped = hits.lineCapped || hits.charCapped
-              ? "\n（上面的命中行过长了，已做**节选**：行内首尾的「…」表示省略。要精确的 oldText，请用 startLine/endLine 读那一段原文；keyword 只用来定位，不要直接把节选当原文。）"
+              ? `\n（上面的命中行过长了，已做**节选**：行内首尾的「…」表示省略，**不要直接把节选当 oldText**。${
+                  oneLineFile
+                    ? "这个文件整个就是一行（压缩过的 HTML），startLine/endLine 也读不回整行——请直接用你刚才看到的这一小段（去掉首尾「…」）作为 oldText，必要时再带上紧邻的字符让它唯一。"
+                    : "要精确的 oldText，请用 startLine/endLine 读那一段原文；keyword 只用来定位。"
+                }）`
               : "";
             return `${nameNote}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。`;
           }

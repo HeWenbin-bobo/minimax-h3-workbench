@@ -208,12 +208,19 @@ app.whenReady().then(async () => {
   const artifactRoot = () => path.join(app.getPath("userData"), "artifacts");
   protocol.handle("h3preview", async (request) => {
     const requestedPath = new URL(request.url).searchParams.get("path");
-    if (!requestedPath || !path.isAbsolute(requestedPath)) return new Response("Invalid preview path", { status: 400 });
+    // 错误响应体**会被 iframe 原样渲染给用户看**（预览面板打不开时，用户看到的就是这段文字）。
+    // 所以一律用中文、并说清下一步——英文技术串（"Preview file not found"）对用户等于没说。
+    const explain = (message: string, status: number) =>
+      new Response(`<!DOCTYPE html><meta charset="utf-8"><body style="font:14px/1.7 system-ui;padding:24px;color:#444">${message}</body>`, {
+        status,
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+      });
+    if (!requestedPath || !path.isAbsolute(requestedPath)) return explain("预览地址无效：缺少产物路径。请从对话里的文件卡片重新点「预览」。", 400);
     // 符号链接安全的白名单校验：realpath 后比对，软链指向外部一律拒绝。
     const resolved = await resolveWithinRoot(artifactRoot(), requestedPath);
-    if (!resolved) return new Response("Path outside artifacts directory", { status: 403 });
+    if (!resolved) return explain("这个文件不在产物目录内，已拒绝预览。请从对话里的文件卡片重新打开。", 403);
     // 只服务 HTML：预览 iframe 仅用于 html 产物，限制扩展名把暴露面压到最小。
-    if (!/\.html?$/i.test(resolved)) return new Response("Only HTML preview is served", { status: 403 });
+    if (!/\.html?$/i.test(resolved)) return explain("只有网页（.html）产物能在预览面板里打开。表格与文档请直接在卡片上查看。", 403);
     try {
       const body = await readFile(resolved, "utf8");
       // CSP 由**响应头**下发（权威，内容无法构造影响），不注入 <meta>。
@@ -232,7 +239,7 @@ app.whenReady().then(async () => {
         }
       });
     } catch {
-      return new Response("Preview file not found", { status: 404 });
+      return explain("预览文件读不出来：可能已被删除，或刚好在写入中。请在文件卡片上重新点「预览」；如果一直失败，点卡片上的 📁 用系统默认程序打开。", 404);
     }
   });
 

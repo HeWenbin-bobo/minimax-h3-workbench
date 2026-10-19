@@ -208,6 +208,44 @@ describe("产物自检报告（formatProbeReport）", () => {
     expect(text).toContain("布局 1920×1080");
   });
 
+  // 真机验证（probe-motion）：动画页 motion=1、静止页 motion=0。
+  // 模型此前分不清"循环没启动"和"页面本来就静止"，只能反复改代码试（连改 5 次）。
+  it("纯色 + 两帧完全没变 → 直说渲染循环很可能没在跑", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "空", consoleErrors: [],
+      canvases: [{ width: 800, height: 600, clientWidth: 800, clientHeight: 600, webgl: true }],
+      textLength: 0, elementCount: 6,
+      pixel: { dominant: 1, brightness: 30, sampled: 1000 },
+      motion: 0
+    });
+    expect(text).toContain("几乎完全相同");
+    expect(text).toContain("根本没有在跑");
+    expect(text).toContain("requestAnimationFrame");
+  });
+
+  it("纯色但两帧在变 → 说明循环在跑，指向尺寸/裁剪问题", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "空", consoleErrors: [],
+      canvases: [{ width: 800, height: 600, clientWidth: 800, clientHeight: 600, webgl: true }],
+      textLength: 0, elementCount: 6,
+      pixel: { dominant: 1, brightness: 30, sampled: 1000 },
+      motion: 0.42
+    });
+    expect(text).toContain("确实在运行");
+    expect(text).not.toContain("根本没有在跑");
+  });
+
+  it("画面不是纯色时不报画面变化（省掉这条噪声）", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "ok", consoleErrors: [],
+      canvases: [{ width: 800, height: 600, clientWidth: 800, clientHeight: 600, webgl: true }],
+      textLength: 0, elementCount: 6,
+      pixel: { dominant: 0.4, brightness: 90, sampled: 1000 },
+      motion: 0
+    });
+    expect(text).not.toContain("画面变化");
+  });
+
   it("单元素页面不会被纯色判据误伤（只有 html/body 时不算'没画出来'）", () => {
     const text = formatProbeReport({
       loaded: true, title: "x", consoleErrors: [], canvases: [], textLength: 0, elementCount: 1,

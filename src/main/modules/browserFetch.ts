@@ -276,6 +276,18 @@ export interface HtmlProbeResult {
    * 拿不到截图时为 undefined（不影响其余结论）。
    */
   pixel?: { dominant: number; brightness: number; sampled: number };
+  /**
+   * 两帧之间的**变化比例**（0–1）。0 表示两次截图完全一样。
+   *
+   * **为什么需要**（实测真机）：模型连续 5 次改都判定"画面是空的"，
+   * 但它无法区分两种完全不同的情况：
+   * ① 渲染循环没跑起来 → 画面永远静止；
+   * ② 页面本来就是静止的（静态图、首帧还没动）。
+   * 抓两帧比一比就能定性：空白 + 零变化 = 几乎确定是循环没转。
+   *
+   * 拿不到截图时为 undefined。
+   */
+  motion?: number;
 }
 
 /** 单条日志的截断长度：着色器编译错误可能一次吐几千字符，全量回灌只会把上下文烧掉。 */
@@ -305,6 +317,12 @@ export function formatConsoleLine(level: unknown, message: unknown, lineNumber?:
 
 /** 加载后额外等待的时长：让 requestAnimationFrame / 首帧初始化跑完，否则 canvas 采样必然为空。 */
 const PROBE_SETTLE_MS = 1_200;
+
+/**
+ * 两次截图之间隔多久。太短会被单帧抖动骗到，太长会让自检明显变慢。
+ * 500ms ≈ 30 帧（60fps），足够让"循环在转"的运动显现，也不会让整次自检多等一秒以上。
+ */
+const MOTION_GAP_MS = 500;
 
 /**
  * **产物自检**：用应用自带的 Chromium 真的把刚生成的 HTML 跑一遍，把控制台报错交回给模型。
@@ -380,7 +398,18 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
     };
     // 截图采样：失败不能连坐整次自检（拿不到只是少一条证据，不该让工具报错）。
     const pixel = await samplePixels(win);
-    return { loaded: true, consoleErrors: logs, ...snapshot, ...(pixel ? { pixel } : {}) };
+    // 两帧比对：空白 + 零变化 ≈ 渲染循环压根没转（与"本来就是静止画面"区分开）。
+    // 只在**画面是纯色**时多付这一帧的代价——正常页面不需要这条证据。
+    let motion: number | undefined;
+    if (pixel && pixel.dominant >= 0.97) {
+      await new Promise((resolve) => setTimeout(resolve, MOTION_GAP_MS));
+      motion = await sampleMotion(win, pixel);
+    }
+    return {
+      loaded: true, consoleErrors: logs, ...snapshot,
+      ...(pixel ? { pixel } : {}),
+      ...(motion === undefined ? {} : { motion })
+    };
   } finally {
     if (!win.isDestroyed()) win.destroy();
   }
@@ -393,30 +422,49 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
  * 只会让自检多花几十毫秒却得不到更多信息。
  * 主色按每个通道取高 3 位分桶，避免抗锯齿产生的微小明暗差把同一种颜色拆成几百桶。
  */
-async function samplePixels(win: BrowserWindow): Promise<{ dominant: number; brightness: number; sampled: number } | undefined> {
+async function samplePixels(win: BrowserWindow): Promise<{ dominant: number; brightness: number; sampled: number; signature: number[] } | undefined> {
   try {
     const image = await win.webContents.capturePage();
     if (image.isEmpty()) return undefined;
     const bitmap = image.toBitmap(); // BGRA
     const buckets = new Map<number, number>();
+    // 逐采样点的颜色桶序列：既是"主色占比"的统计来源，也是两帧比对的指纹。
+    const signature: number[] = [];
     let sum = 0;
-    let sampled = 0;
     for (let i = 0; i + 3 < bitmap.length; i += 4 * 37) {
       const b = bitmap[i];
       const g = bitmap[i + 1];
       const r = bitmap[i + 2];
       const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
       buckets.set(key, (buckets.get(key) ?? 0) + 1);
+      signature.push(key);
       sum += (r + g + b) / 3;
-      sampled += 1;
     }
+    const sampled = signature.length;
     if (sampled === 0) return undefined;
     let top = 0;
     for (const count of buckets.values()) if (count > top) top = count;
-    return { dominant: top / sampled, brightness: sum / sampled, sampled };
+    return { dominant: top / sampled, brightness: sum / sampled, sampled, signature };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * 再抓一帧，与第一帧的签名比对，返回"变了的采样点比例"（0–1）。
+ *
+ * 用途：区分「渲染循环没转」和「页面本来就是静止画面」——
+ * 空白 + 零变化 = 几乎确定循环没跑起来，模型据此直接查初始化，不用继续猜。
+ */
+async function sampleMotion(win: BrowserWindow, first: { signature: number[] }): Promise<number | undefined> {
+  const second = await samplePixels(win);
+  if (!second) return undefined;
+  // 画布尺寸可能在这一瞬间变化（resize），长度对不上就比前 N 个，避免误判成"全变了"。
+  const n = Math.min(first.signature.length, second.signature.length);
+  if (n === 0) return undefined;
+  let changed = 0;
+  for (let i = 0; i < n; i += 1) if (first.signature[i] !== second.signature[i]) changed += 1;
+  return changed / n;
 }
 
 /**
@@ -487,6 +535,14 @@ export function formatProbeReport(result: HtmlProbeResult): string {
   }
   if (flatScreen) {
     lines.push(`画面采样：整屏约有 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).dominant * 100)}% 是同一种颜色（平均亮度 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).brightness)}）。**这通常意味着页面上什么都没画出来**——画面被某个纯色元素盖满、画布尺寸为 0、或渲染循环根本没跑起来。请检查布局与首帧渲染。`);
+    // 两帧比对：把"循环有没有在转"这条定性结论直接给出来。
+    // 模型分不清"循环没启动"和"页面本来就静止"，只能反复改代码试（真机连改 5 次）。
+    if (typeof result.motion === "number") {
+      const percent = Math.round(result.motion * 100);
+      lines.push(result.motion < 0.01
+        ? `画面变化：间隔 ${MOTION_GAP_MS}ms 的两帧**几乎完全相同**（变化 ${percent}%）。渲染循环很可能**根本没有在跑**——请检查 requestAnimationFrame 是否启动、初始化是否在绘制前就抛错/提前 return。`
+        : `画面变化：间隔 ${MOTION_GAP_MS}ms 的两帧有 ${percent}% 的像素不同——渲染循环**确实在运行**。那么空白更可能是画到了看不见的地方（尺寸/裁剪/相机矩阵），而不是没在画。`);
+    }
   }
   if (result.consoleErrors.length > 0) {
     lines.push(`运行时报错（共 ${result.consoleErrors.length} 条，已去重）：`);

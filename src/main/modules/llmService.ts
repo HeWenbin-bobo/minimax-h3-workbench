@@ -991,16 +991,20 @@ export async function chatAgent(
     //
     // 只在**恰好跨过阈值**的那一步注入一次（返回的覆盖会 carry forward），
     // 每步都注入会让提示层层累积。
+    // 只在**恰好跨过阈值**的那一步注入一次（返回的覆盖会 carry forward），
+    // 每步都注入会让提示层层累积。
+    //
+    // 措辞必须**始终成立**：这条消息会一路带到本轮结束。写死"只剩 5 步"的话，
+    // 到最后一步它仍在说"剩约 5 步"——过时的数字比没有更误导。故用"已不足 N 步"。
     prepareStep: ({ stepNumber, messages: stepMessages }) => {
       const threshold = Math.max(1, Math.floor(MAX_AGENT_STEPS / 4));
-      const remaining = MAX_AGENT_STEPS - stepNumber;
-      if (remaining !== threshold) return {};
+      if (MAX_AGENT_STEPS - stepNumber !== threshold) return {};
       return {
         messages: [
           ...stepMessages,
           {
             role: "user" as const,
-            content: `# 剩余预算\n本轮的 ${MAX_AGENT_STEPS} 步工具预算只剩约 ${remaining} 步。请**立刻收敛**：优先把已有的东西交付出来（该出文件就出文件），不要再展开新的搜索或调研。如果确实没做完，就在回复里说明还差什么。`
+            content: `# 剩余预算\n本轮的 ${MAX_AGENT_STEPS} 步工具预算**已不足 ${threshold + 1} 步**。请**立刻收敛**：优先把已有的东西交付出来（该出文件就出文件），不要再展开新的搜索或调研。如果确实没做完，就在回复里说明还差什么。`
           }
         ]
       };

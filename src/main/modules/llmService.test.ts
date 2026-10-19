@@ -156,6 +156,28 @@ describe("工具成败判定（isToolFailure）", () => {
     expect(isToolFailure(null)).toBe(false);
     expect(isToolFailure({ ok: false })).toBe(false);
   });
+
+  // 本会话自引入：给 read/edit 加了名字回落说明后，未命中的 `没有找到`
+  // 落在**第二行**，而判定只看第一句 → 步骤条打勾。
+  // 修复是跳过开头那段括号说明后再判。
+  it("带名字回落说明时，仍未命中要判成未成功", () => {
+    const NL = String.fromCharCode(10);
+    const missed = `（你点名的「a.html」已被更新的版本取代，实际读的是「a (2).html」）${NL}在 a (2).html（共 2118 行）里没有找到「M.identity」。换片段试试。`;
+    expect(isToolFailure(missed)).toBe(true);
+  });
+
+  it("带名字回落说明但读取成功时不算失败", () => {
+    const NL = String.fromCharCode(10);
+    const ok = `（你写的「报告」没带扩展名，已按实际类型读「报告.html」）${NL}文件：报告.html（共 8 行，本次显示第 1–8 行）`;
+    expect(isToolFailure(ok)).toBe(false);
+  });
+
+  // 跳过说明行不能变成"整段都扫"：正文里出现"失败"仍不该误判。
+  it("跳过说明行后仍只看第一句（正文里的「失败」不算）", () => {
+    const NL = String.fromCharCode(10);
+    const body = `（说明行）${NL}已读取 500 字正文。页面内容：加载失败时请重试。`;
+    expect(isToolFailure(body)).toBe(false);
+  });
 });
 
 describe("工具摘要（humanizeToolOutput）", () => {

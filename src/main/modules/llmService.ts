@@ -446,6 +446,12 @@ export const MAX_AGENT_STEPS = 20;
  */
 export function isToolFailure(output: unknown): boolean {
   if (typeof output !== "string") return false;
+  // **先跳过开头的"名字回落"说明行**。
+  // read/edit 系列在名字对不上时会先回一行 `（你点名的「a.html」…实际读的是「a (2).html」）`，
+  // 真正的结果在**下一行**。只取第一句的话，keyword 未命中的 `没有找到` 会被这行说明挡住，
+  // 步骤条于是打勾（本会话自引入，实测复现）。
+  // 只跳"位于开头、以换行结尾的括号说明"，不会吃掉正文里同形的括号。
+  const body = output.replace(/^(?:（[^）]*）\s*\n)+/, "");
   // 只看**第一小句**（到第一个冒号/句号/换行为止）。
   // 用"前 N 个字符"不够：实测 `已读取 500 字正文。页面内容：加载失败时请重试。`
   // 在前 24 字里就出现了"失败"，会被误判成工具失败——而它是一段正常的页面正文。
@@ -453,7 +459,7 @@ export function isToolFailure(output: unknown): boolean {
   // **第一小句本身也要有长度上限**：`read_artifact(keyword)` 未命中时回的是
   // "在 很长的文件名.html（共 2118 行）里没有找到「…」。…"，句号在很后面；
   // 若先按 40 字截再切句，长文件名会把判定标记挤出去（实测 40 字刚好切在「没有找到」前面）。
-  const firstSentence = output.split(/[。\n]/, 1)[0] ?? "";
+  const firstSentence = body.split(/[。\n]/, 1)[0] ?? "";
   const head = firstSentence.split(/[：:]/, 1)[0] ?? "";
   // `没有找到` 是 read_artifact(keyword) 的"没命中"，不是失败调用，但对用户是
   // 「这次没找到」——打勾会让人以为读到了内容（实测渲染成 `✓ 读取文件完成（共 2118 行）`）。

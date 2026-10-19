@@ -1860,8 +1860,12 @@ ${tableNote}` : ""}`;
     // 再兜一层：resolve 后必须仍在 artifacts 根之下（规则若被改动，这里也不会越界）。
     const relative = path.relative(root, path.resolve(target));
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
-    await rm(target, { recursive: true, force: true }).catch(() => undefined);
-    return true;
+    // **必须排在写队列里**（实测竞态）：`saveArtifactFile` 也在队列里建目录，
+    // 不串行的话"删目录 → 落盘又建回来"会留下孤儿目录（记录已删、界面打不开、磁盘占着）。
+    return artifactWriteQueue.run(async () => {
+      await rm(target, { recursive: true, force: true }).catch(() => undefined);
+      return true;
+    });
   });
 }
 
@@ -1910,7 +1914,17 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   const safeName = `${base || "artifact"}${ext}`;
   // 目录名规则与清理共用同一函数（见 artifactDir.ts 的注释）。
   const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(sessionId));
-  await mkdir(dir, { recursive: true });
+  /**
+   * **`mkdir` 必须放进写队列**（实测竞态）：它在队列**之前**执行，而
+   * `artifact:purgeSession` 删目录**不经过队列**。两者交错时：
+   * 删目录 → `mkdir` 又把目录建回来 → 落盘写进一个"会话已经被删掉"的目录，
+   * 于是留下一个**没人认领的孤儿目录**（记录不在，界面打不开，磁盘一直在）。
+   * 把「建目录 + 取路径 + 落盘」整段串起来，删除也进同一条队列即可根治。
+   */
+  const createDir = async () => {
+    await mkdir(dir, { recursive: true });
+    return { dir, realDir: await realpath(dir).catch(() => dir) };
+  };
   /**
    * **落盘后统一用 realpath 回报路径**（实测，跨平台真实缺陷）：
    *
@@ -1925,7 +1939,6 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
    * 探针 `_scratch/probe-artifact-path-form.mjs` 用 junction 稳定复现：
    * 改动后卡片仍是「1 KB」（应为 20 KB）。
    */
-  const realDir = await realpath(dir).catch(() => dir);
   // 同名不覆盖：同一会话里连着生成两份"报告.md"时，后者会把前者顶掉，
   // 于是**两张卡片指向同一个文件**、都显示第二版内容（实测 probe-dup-artifact）。
   // 这里探测重名并加 " (2)" / " (3)" 后缀，保证每次落盘都是独立文件。
@@ -1935,7 +1948,10 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   // 前者被静默覆盖，两张卡片显示同一份内容（与 probe-dup-artifact 的现象一样，
   // 只是成因不同）。串行化范围只需覆盖"取路径 + 落盘"这一小段。
   return artifactWriteQueue.run(async () => {
-    const filePath = await uniqueArtifactPath(dir, safeName);
+    // **建目录也在队列里**（见上面 `createDir` 的注释）：否则与删除会话交错，
+    // 会留下"记录已删、目录又活过来"的孤儿产物目录。
+    const { dir: actualDir, realDir } = await createDir();
+    const filePath = await uniqueArtifactPath(actualDir, safeName);
     // 返回的 name 必须取**实际落盘文件名**（可能带 " (2)" 序号）。
     // 用 safeName 会让卡片显示"报告.md"、磁盘上却是"报告 (2).md"——用户按卡片名去找
     // 文件会找不到（实测 probe-dup-xlsx）。

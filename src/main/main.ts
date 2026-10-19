@@ -34,7 +34,7 @@ import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
-import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates } from "./modules/artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames } from "./modules/artifactDir";
 import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers, MAX_READ_CHARS } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
@@ -952,7 +952,11 @@ function registerIpc(
             const info = await stat(path.join(artifactRoot, name)).catch(() => undefined);
             return { name, mtime: info?.mtimeMs ?? 0 };
           }));
-          return withTime.sort((a, b) => b.mtime - a.mtime).map((entry) => entry.name);
+          // **必须折叠同名多版本**：渲染端只展示最新一版，清单却全量列出来——
+          // 模型每修一次就多一个 `报告 (2)` `(3)`…，20 条限额被同一份文件占满后，
+          // 别的文件（比如那份 .md）直接被挤出清单，模型就"没有"它了。
+          // 折叠口径与渲染端 `foldArtifactVersions` 一致（同主名 + 同扩展名 = 同一份）。
+          return foldArtifactNames(withTime.sort((a, b) => b.mtime - a.mtime).map((entry) => entry.name));
         })
         .catch(() => [] as string[]);
       const worldDiff = diffWorldState(

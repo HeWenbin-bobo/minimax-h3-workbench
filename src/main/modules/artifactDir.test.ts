@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates } from "./artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames } from "./artifactDir";
 
 // 背景：`sessionId` 来自渲染端（可构造），而目录名同时用于落盘与 `artifact:purgeSession`。
 // 旧实现只把危险字符替换成 `_`，会产生**目录名碰撞**：
@@ -97,5 +97,36 @@ describe("artifactNameCandidates（无扩展名补全）", () => {
 
   it("名字中间的点不算扩展名结束（v1.2 报告 仍会补全）", () => {
     expect(artifactNameCandidates("v1.2 报告").length).toBeGreaterThan(1);
+  });
+});
+
+// 注入给模型的"本会话已产出的文件"清单只保留前 20 条。
+// 若同一份文件的每个历史版本都占一条，改得越多、限额被占得越满，
+// 别的文件反而被挤出清单——模型手里就"没有"它了。
+describe("foldArtifactNames（清单折叠同名多版本）", () => {
+  it("保留最先出现的那一个（输入已按 mtime 倒序 = 最新版在前）", () => {
+    expect(foldArtifactNames(["报告 (3).html", "报告 (2).html", "报告.html"]))
+      .toEqual(["报告 (3).html"]);
+  });
+
+  it("不同主名 / 不同扩展名各留一条", () => {
+    expect(foldArtifactNames(["报告 (2).html", "报告.md", "图表.html"]))
+      .toEqual(["报告 (2).html", "报告.md", "图表.html"]);
+  });
+
+  it("扩展名大小写不敏感（Windows 同一文件）", () => {
+    expect(foldArtifactNames(["A.HTML", "A (2).html"]).length).toBe(1);
+  });
+
+  it("中间括号属于主名，不当版本后缀折叠", () => {
+    const got = foldArtifactNames(["图表 (草稿) (2).html", "图表 (草稿).html"]);
+    expect(got).toEqual(["图表 (草稿) (2).html"]);
+  });
+
+  it("20 个旧版本不会挤掉别的文件", () => {
+    const versions = Array.from({ length: 25 }, (_, i) => (i === 0 ? "报告.html" : `报告 (${i + 1}).html`));
+    const got = foldArtifactNames([...versions, "笔记.md"]);
+    expect(got).toHaveLength(2);
+    expect(got).toContain("笔记.md");
   });
 });

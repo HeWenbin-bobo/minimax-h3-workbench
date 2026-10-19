@@ -90,3 +90,27 @@ export function artifactNameCandidates(requestedName: string): string[] {
 
 /** 与 `saveArtifactFile` 的 kind 白名单保持一致（新增 kind 时两边都要改）。 */
 export const KNOWN_ARTIFACT_EXTS = [".html", ".md", ".xlsx", ".csv", ".tsv"] as const;
+
+/**
+ * 把同名多版本**折叠成一份**，用于注入给模型的"本会话已产出的文件"清单。
+ *
+ * 为什么需要（实测缺口）：渲染端 `foldArtifactVersions` 早就只展示最新一版，
+ * 但注入清单直接 `readdir` 全量——模型每修一次 bug 就多一个 `报告 (2).html`、
+ * `报告 (3).html`……而清单只保留前 20 条（按修改时间倒序）。
+ * 于是**改得多反而更糟**：同一份文件的 20 个旧版本把限额占满，别的文件
+ * （比如那份 .md）被挤出去，模型手里就"没有"它了，接着就是"找不到产物"或重复生成。
+ *
+ * @param names 已按**修改时间倒序**排列的文件名。顺序即优先级：
+ *              每组保留最先出现的那一个（= 最新版），与渲染端的"只显示最新"同口径。
+ */
+export function foldArtifactNames(names: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const name of names) {
+    const key = `${versionStem(name).toLowerCase()}|${path.extname(name).toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}

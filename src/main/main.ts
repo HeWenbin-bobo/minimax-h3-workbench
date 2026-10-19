@@ -1154,6 +1154,10 @@ function registerIpc(
           // 否则会出现自相矛盾的回执：标题按 `raw.split("\n").length` 算成 2002，
           // 正文末尾的说明却写着"表格共 5001 行"（实测 5000 行表格）。
           let realRowCount: number | undefined;
+          // 表格被截断时**真正载入的行数**（即 MAX_ROWS）。不能拿 `slice.totalLines - 1` 代替：
+          // `raw` 末尾还拼了一段说明，算出来会多一行（实测 5000 行表格 → "只有前 2001 行能读"，
+          // 而正文里明说只给了 2000 行，两个数字又打架）。
+          let readableRows: number | undefined;
           if (/\.xlsx$/i.test(resolved)) {
             const XLSX = await loadXlsx();
             try {
@@ -1180,6 +1184,7 @@ function registerIpc(
                   // keyword 与 startLine/endLine 都作用在 `raw` 上，也就是这前 2000 行，
                   // 后面那些行压根不在字符串里。模型照做，注定搜不到，只会怀疑是关键词写错了。
                   realRowCount = rowCount;
+                  readableRows = MAX_ROWS;
                   raw = `${XLSX.utils.sheet_to_csv(capped)}\n\n（表格共 ${rowCount} 行，这里只给了前 ${MAX_ROWS} 行。注意：keyword 与 startLine/endLine 都只能在这前 ${MAX_ROWS} 行里找，看不到后面的内容。要看后面，请在回复里说明具体要哪几行/哪一列，或让用户直接在 Excel 里打开这份文件。）`;
                 } else {
                   raw = XLSX.utils.sheet_to_csv(sheet);
@@ -1246,7 +1251,7 @@ function registerIpc(
           // 用 startLine/endLine 分段读"，是让模型去读一段不存在的内容——它照做只会拿到夹紧后的末尾。
           const more = slice.truncated
             ? realRowCount !== undefined
-              ? `\n（本次显示第 ${slice.from}–${slice.to} 行。这个表格共 ${realRowCount} 行，但**只有前 ${slice.totalLines - 1} 行能读**——后面的行没有载入，startLine/endLine 与 keyword 都够不到。要看后面请在回复里说明要哪几行/哪一列，或让用户直接用 Excel 打开；继续读前面的，用 startLine/endLine 分段。）`
+              ? `\n（本次显示第 ${slice.from}–${slice.to} 行。这个表格共 ${realRowCount} 行，但**只有前 ${readableRows ?? realRowCount} 行能读**——后面的行没有载入，startLine/endLine 与 keyword 都够不到。要看后面请在回复里说明要哪几行/哪一列，或让用户直接用 Excel 打开；继续读前面的，用 startLine/endLine 分段。）`
               : `\n（只显示前 ${slice.to - slice.from + 1} 行；文件共 ${displayTotal} 行，还有 ${Math.max(0, displayTotal - slice.to)} 行没显示。需要更多就用 startLine/endLine 分段读，或者用 keyword 直接定位。）`
             : "";
           // **按字符截断也要说**（否则是静默丢失）：超长单行文件（压缩过的 HTML）

@@ -35,6 +35,7 @@ import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
 import { artifactSessionDirName, pickLatestVersion } from "./modules/artifactDir";
+import { applyExactEdit, sliceWithLineNumbers } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
@@ -1066,6 +1067,50 @@ function registerIpc(
             ? `本次检查的文件：${actualName}${stamp}。\n\n`
             : `本次检查的文件：${actualName}${stamp}。\n（你给的「${safeName}」在本会话里不存在，上面是同名的**最新版本**。如果那不是你想验证的那份，请用准确文件名再调用一次。）\n\n`;
           return header + report;
+        },
+        // read_artifact / edit_artifact：改之前先读，改的时候只改那一处。
+        //
+        // 真机证据（鹈鹕案例）：模型为改一行 `M.identity`→`M.ident` 整份重写 40KB，
+        // 结果新文件里**仍然留着那一处**；随后它断言"我重写后的文件里并没有这个写法"，
+        // 把锅推给自检工具。根因是它**读不回**自己的文件，只能凭记忆改。
+        // 这两个工具对齐 Codex `apply_patch`：给行号让人看得见，要求精确且唯一才写。
+        readArtifact: async (params: { name: string; startLine?: number; endLine?: number }) => {
+          const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+          const safeName = path.basename(String(params.name || "").trim());
+          const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
+          if (!resolved) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          // xlsx 是二进制，读成文本没有意义——明确告知而不是吐乱码。
+          if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，无法按文本读取；请用预览面板查看。");
+          const raw = await readFile(resolved, "utf8");
+          const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
+          return `文件：${safeName}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}`;
+        },
+        editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
+          const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+          const safeName = path.basename(String(params.name || "").trim());
+          const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
+          if (!resolved) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
+          // 读改写在同一个串行队列里：AI SDK 会在一个 step 里并行执行多个 tool call，
+          // 两个 edit 同时读同一份文件时后写的会覆盖前一个改动（与 create_file 同名覆盖同类）。
+          return artifactWriteQueue.run(async (): Promise<string> => {
+            const before = await readFile(resolved, "utf8");
+            const outcome = applyExactEdit(before, params.oldText, params.newText);
+            if (!outcome.ok) {
+              // 失败要说清**为什么**、**在哪**，并给下一步动作——只说"失败"模型会盲目重试。
+              if (outcome.reason === "empty-old") throw new Error("oldText 不能为空。");
+              if (outcome.reason === "not-found") {
+                throw new Error("在文件里找不到 oldText。内容必须逐字符一致（含缩进与空格）——请先用 read_artifact 读回原文，复制准确的片段再试。");
+              }
+              const where = outcome.lines.slice(0, 6).join("、");
+              throw new Error(`oldText 在文件里出现了 ${outcome.count} 次（第 ${where} 行）。为了不改错位置，我拒绝执行。请把 oldText 连同上下各一行一起贴进去，让它只匹配一处。`);
+            }
+            await writeFile(resolved, outcome.text, "utf8");
+            const after = await stat(resolved);
+            // 让模型知道改完共几行 / 多大——据此判断是不是真的只动了那一处。
+            const totalLines = outcome.text.split("\n").length;
+            return `已修改 ${safeName}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
+          });
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。
         updatePlan: async (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => {

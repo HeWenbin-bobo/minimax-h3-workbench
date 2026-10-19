@@ -363,6 +363,21 @@ export interface AgentToolCallbacks {
    * 只接受文件名（会话内解析），不接受任意路径。
    */
   inspectArtifact: (params: { name: string }) => Promise<string>;
+  /**
+   * 产物读取工具（read_artifact）：把已落盘的产物按行读回来（带行号）。
+   *
+   * 实测动机（鹈鹕案例真机）：模型改完一处 bug 后无法核对"我到底改到没有"，
+   * 只能凭记忆断言；后来甚至怀疑自检工具加载了缓存。给它读回能力，它才能真正自证。
+   * 只接受文件名（会话内解析），不接受任意路径。
+   */
+  readArtifact: (params: { name: string; startLine?: number; endLine?: number }) => Promise<string>;
+  /**
+   * 产物局部编辑工具（edit_artifact）：按上下文精确替换一处，写回**同一个文件**。
+   *
+   * 对齐 Codex `apply_patch` 的两条硬约束：精确匹配、必须唯一。
+   * 动机同 readArtifact——整份重写 40KB 只为改 3 个字符，且模型无法确认改成没有。
+   */
+  editArtifact: (params: { name: string; oldText: string; newText: string }) => Promise<string>;
   /** 步骤清单工具（update_plan）：把进度推给渲染端，返回给模型的确认文本。 */
   updatePlan: (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => Promise<string>;
   /**
@@ -428,6 +443,15 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       const name = /文件已生成并保存：(.+?)（\d+(?:\.\d+)?(?:KB|MB|字节)）/.exec(output)?.[1]?.trim();
       return name ? `已保存 ${sliceSafe(name, 40)}` : "已生成文件";
     }
+    case "read_artifact": {
+      // 只说"读了多少行"：正文是给模型看的，贴进步骤条会把气泡撑爆。
+      const range = /共\s*(\d+)\s*行/.exec(output)?.[1];
+      return range ? `读取了文件（共 ${range} 行）` : "已读取文件";
+    }
+    case "edit_artifact": {
+      const line = /第\s*(\d+)\s*行/.exec(output)?.[1];
+      return line ? `已修改（第 ${line} 行）` : "已修改文件";
+    }
     case "inspect_artifact": {
       if (/^自检失败/.test(output)) return "自检失败（页面没能加载）";
       // 空画面必须排在"无报错"**之前**判：这一分支的正文写的是
@@ -464,6 +488,9 @@ function humanizeToolInput(toolName: string, input: unknown): string {
     const record = input as Record<string, unknown>;
     if (toolName === "web_search" && typeof record.query === "string") return sliceSafe(record.query, 120);
     if (toolName === "inspect_artifact" && typeof record.name === "string") return sliceSafe(record.name, 120);
+    if ((toolName === "read_artifact" || toolName === "edit_artifact") && typeof record.name === "string") {
+      return sliceSafe(record.name, 120);
+    }
     if (toolName === "generate_video") {
       const prompt = typeof record.prompt === "string" ? sliceSafe(record.prompt, 80) : "";
       const duration = typeof record.duration === "number" ? `${record.duration} 秒` : "";
@@ -648,6 +675,30 @@ export async function chatAgent(
           }
         }
       }),
+      // read_artifact：只读，**计划模式保留**（与 open_page 同理）——写计划前得看得见现状。
+      // 「写 → 自检 → 读回 → 精确改 → 再自检」这条闭环里，它是"读回"那一环。
+      read_artifact: tool({
+        description: `按行读回你在本会话里生成的产物文件（带行号）。改代码之前先读，别凭记忆改。
+
+何时使用：① 准备修改一个已生成的文件（尤其超过几十行）之前，先读相关片段确认现状；
+② 自检报错后，用它定位报错对应的那一行；③ 想确认上一次 edit_artifact 是否真的改到了。
+
+何时不用：还没生成过文件；或者你只是想看看文件大小/是否存在——那直接看 create_file 的返回即可。
+
+提示：一次别读整个 40KB 文件。先不带范围读开头几行确认结构，再用 startLine/endLine 精确取你要改的那一段。`,
+        inputSchema: z.object({
+          name: z.string().min(1).describe("产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。"),
+          startLine: z.number().int().min(1).describe("起始行（1 起算，含）。省略则从第 1 行开始。").optional(),
+          endLine: z.number().int().min(1).describe("结束行（含）。省略则读到文件末尾。一次建议不超过 400 行。").optional()
+        }),
+        execute: async (params) => {
+          try {
+            return await callbacks.readArtifact(params);
+          } catch (error) {
+            return `读取产物失败：${describeError(error, "未知错误")}。可以先确认文件名（带扩展名）是否与 create_file 生成的一致。`;
+          }
+        }
+      }),
       // create_file：文件产物真工具。此前只靠提示词约定"写围栏代码块"，模型会自我怀疑"我没有文件写入工具"
       // 而道歉推脱（实测复现）——模型对工具调用的信任远高于对文字约定的信任，产物交付必须工具化。
       ...(planMode ? {} : {
@@ -705,6 +756,44 @@ export async function chatAgent(
             return await callbacks.inspectArtifact({ name });
           } catch (error) {
             return `自检失败：${describeError(error, "未知错误")}。这通常说明文件没能加载起来（路径不对或文件已删除）。可以继续用 create_file 重新生成一份完整体，再试一次自检。`;
+          }
+        }
+      }),
+      // edit_artifact：**改之前先读，改的时候只改那一处**。
+      //
+      // 真机证据（鹈鹕案例）：模型为改一行 `M.identity`→`M.ident`，把 40KB 文件整份重写，
+      // 结果新文件里**仍然留着那一处**（原文件 2 处、"修好版"还有 1 处），
+      // 而它随后断言"我重写后的文件里并没有这个写法"，把锅推给了自检工具。
+      // 三个能力缺口叠在一起：
+      // ① 读不回自己的文件 → 无法核对改没改到；
+      // ② 只能整份重写 → 输出 40KB 换 3 个字符，重排中还容易引入新 bug；
+      // ③ 没有"改动是否唯一"的保护 → 改错地方也不会有人提醒。
+      // 这一对工具对齐 Codex 的 `apply_patch`：先给行号让人看得见，再要求**精确且唯一**地替换。
+      // （read_artifact 是只读的，放在 open_page 旁、计划模式保留。）
+      edit_artifact: tool({
+        description: `精确替换产物文件里的**一处**内容，写回同一个文件（不会另存新版本）。
+
+何时使用：修 bug、改数值、调措辞——**只要不是整份重写**，就用它而不是再调一次 create_file。
+典型场景：自检报出某一行有错，你读回那一段，然后用 edit_artifact 把这一个标识符/一行改掉。
+
+用法要求（不满足会被拒绝，且会告诉你原因）：
+- \`oldText\` 必须与文件里的内容**逐字符一致**（含缩进）。建议连同上下各一行一起贴进去，保证唯一。
+- 它在文件里必须**只出现一次**。出现多次会被拒绝并返回所有命中的行号——那时请把 oldText 扩到能唯一定位为止。
+- 找不到会被拒绝：先用 read_artifact 读到原文，不要凭记忆猜。
+
+何时不用：要改的地方超过全文一半、或要整体重构时，重新 create_file 一次写完整更省事。
+
+改完建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`,
+        inputSchema: z.object({
+          name: z.string().min(1).describe("要修改的产物文件名，带扩展名。必须是本会话里已存在的文件。"),
+          oldText: z.string().min(1).describe("被替换的原文，必须与文件中逐字符一致且全文件唯一。建议带上上下各一行以保证唯一。"),
+          newText: z.string().describe("替换成的新内容。允许为空字符串（表示删除这段）。")
+        }),
+        execute: async (params) => {
+          try {
+            return await callbacks.editArtifact(params);
+          } catch (error) {
+            return `修改文件失败：${describeError(error, "未知错误")}。可以用 read_artifact 读回原文后再试，或改用 create_file 整份重写。`;
           }
         }
       })
@@ -860,8 +949,10 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
       generateVideo: async () => "（探测）",
       openPage: async () => "（探测）",
       createFile: async () => "（探测）",
-      // 探测不需要真的跑浏览器：给个无害的返回值即可。
+      // 探测不需要真的跑浏览器 / 读写产物：给个无害的返回值即可。
       inspectArtifact: async () => "（探测）",
+      readArtifact: async () => "（探测）",
+      editArtifact: async () => "（探测）",
       // 探测不需要真的弹选择题/改清单：给个无害的返回值即可。
       updatePlan: async () => "（探测）",
       requestUserInput: async () => "（探测）"

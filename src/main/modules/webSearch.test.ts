@@ -143,6 +143,26 @@ describe("searchWeb", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("blocked", { status: 403 })));
     await expect(searchWeb("查询", {})).rejects.toThrow(/免 key 搜索未取到结果[\s\S]*配置搜索 API/);
   });
+
+  // 实测缺口：旧实现是 `return formatResults(await searchViaApi(...))`——只要用户配过搜索 API，
+  // 它一旦失败（500 / 超时 / 额度用尽 / key 失效），整次搜索就直接抛错，
+  // **完全不回落**到明明可用的浏览器渲染链路。用户看到「搜索请求失败：500」以为网络坏了，
+  // 而应用其实有备用通道。API 只该是"优先尝试"。
+  it("搜索 API 请求失败时，回落到浏览器渲染", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    const text = await searchWeb("查询", {
+      apiBaseUrl: "https://search.test",
+      apiKey: "k",
+      renderHtml: async () => bingHtml
+    });
+    expect(text).toContain("科技新闻_央视网 (cctv.com)");
+  });
+
+  it("搜索 API 失败且无其它通道时，错误里说明是 API 失败", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    await expect(searchWeb("查询", { apiBaseUrl: "https://search.test", apiKey: "k" }))
+      .rejects.toThrow(/搜索 API/);
+  });
 });
 
 // 回归：Bing 实际输出常用**复合 class**（b_algo b_algoBorder）或单引号。

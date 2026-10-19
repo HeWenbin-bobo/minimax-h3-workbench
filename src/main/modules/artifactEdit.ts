@@ -329,10 +329,10 @@ export function findMatchingLines(
   keyword: string,
   limit = 20,
   context = 2
-): { matches: Array<{ line: number; text: string }>; total: number; body: string; charCapped: boolean; lineCapped: boolean } {
+): { matches: Array<{ line: number; text: string }>; total: number; body: string; charCapped: boolean; lineCapped: boolean; caseOnly: number } {
   const needle = String(keyword ?? "");
   const lines = text.split("\n");
-  if (!needle) return { matches: [], total: 0, body: "", charCapped: false, lineCapped: false };
+  if (!needle) return { matches: [], total: 0, body: "", charCapped: false, lineCapped: false, caseOnly: 0 };
   const hits: number[] = [];
   for (let i = 0; i < lines.length && hits.length < limit; i += 1) {
     if (lines[i].includes(needle)) hits.push(i + 1);
@@ -340,6 +340,14 @@ export function findMatchingLines(
   // 统计总数时不受 limit 限制，便于告诉模型"还有更多"。
   let total = 0;
   for (const line of lines) if (line.includes(needle)) total += 1;
+  // **只是大小写不同**也算一条有用线索（实测）：匹配是刻意区分大小写的（模型给的多半是
+  // 标识符原文），但它常把 `SPEED` 写成 `speed`。此时只回"换个片段试试（区分大小写）"，
+  // 它只会换一个词再搜一次。数一下忽略大小写能命中多少行，回执就能直接说"只是大小写不同"。
+  let caseOnly = 0;
+  if (total === 0) {
+    const lower = needle.toLowerCase();
+    for (const line of lines) if (line.toLowerCase().includes(lower)) caseOnly += 1;
+  }
   const blocks: string[] = [];
   const matches: Array<{ line: number; text: string }> = [];
   const shown = new Set<number>();
@@ -362,9 +370,9 @@ export function findMatchingLines(
   }
   const joined = blocks.join("\n");
   if (joined.length > MAX_READ_CHARS) {
-    return { matches, total, body: sliceSafe(joined, MAX_READ_CHARS), charCapped: true, lineCapped };
+    return { matches, total, body: sliceSafe(joined, MAX_READ_CHARS), charCapped: true, lineCapped, caseOnly };
   }
-  return { matches, total, body: joined, charCapped: false, lineCapped };
+  return { matches, total, body: joined, charCapped: false, lineCapped, caseOnly };
 }
 
 /**

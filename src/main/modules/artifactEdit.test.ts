@@ -347,6 +347,20 @@ describe("按关键词定位（findMatchingLines）", () => {
     expect(findMatchingLines(src, "m.identity").total).toBe(0);
   });
 
+  // 实测：模型常把 `SPEED` 写成 `speed`。匹配刻意区分大小写（它给的多半是标识符原文），
+  // 但**必须数一下"忽略大小写能命中几行"**——只说"换个片段试试"，它只会换个词再搜一次。
+  it("大小写不同没命中时，报出忽略大小写能命中多少行", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["const SPEED = 3;", "if (Speed > 1) { run(); }"].join(NL);
+    const out = findMatchingLines(file, "speed");
+    expect(out.total).toBe(0);
+    expect(out.caseOnly).toBe(2);
+  });
+
+  it("能精确命中时 caseOnly 保持 0（不做多余扫描的结论）", () => {
+    expect(findMatchingLines(src, "M.identity").caseOnly).toBe(0);
+  });
+
   it("空关键词返回空结果（不匹配每一行）", () => {
     const out = findMatchingLines(src, "");
     expect(out.total).toBe(0);

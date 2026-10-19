@@ -1189,7 +1189,12 @@ function registerIpc(
             // 下面回执就会退回用请求名（`safeName`），模型看到的名字与实际读的文件对不上。
             const hits = findMatchingLines(raw, keyword);
             if (hits.total === 0) {
-              return `${nameLead}在 ${found.name}（共 ${raw.split("\n").length} 行）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。`;
+              // **只是大小写不同**时直接说破（实测：模型常把 `SPEED` 写成 `speed`）。
+              // 只说"换个更短或更准确的片段试试（区分大小写）"，它只会换个词再搜一次。
+              const caseHint = hits.caseOnly > 0
+                ? `\n（忽略大小写时有 ${hits.caseOnly} 行能命中——你要找的应该是它，只是大小写不同。请按文件里的实际写法再搜一次。）`
+                : "";
+              return `${nameLead}在 ${found.name}（共 ${raw.split("\n").length} 行）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}`;
             }
             const more = hits.total > hits.matches.length ? `\n（共 ${hits.total} 处命中，只显示前 ${hits.matches.length} 处。）` : "";
             // 命中行本身可能极长（压缩过的 HTML 一行几十万字符），`findMatchingLines`

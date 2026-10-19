@@ -487,9 +487,14 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       return name ? `已保存 ${sliceSafe(name, 40)}` : "已生成文件";
     }
     case "read_artifact": {
-      // 只说"读了多少行"：正文是给模型看的，贴进步骤条会把气泡撑爆。
+      // 只说"读了多少"：正文是给模型看的，贴进步骤条会把气泡撑爆。
       // **不再重复动词**：渲染端已经拼了 `✓ 读取文件完成（…）`，
       // 摘要再写"读取了文件"就成了"读取文件完成（读取了文件（共 2118 行））"（真机看到的）。
+      //
+      // 两个分支的措辞不同，必须分别匹配（实测真机）：keyword 版回的是
+      // "在 X 里找到 N 处「…」"、不含"共 N 行"，只匹配行数就会掉进兜底显示成「完成」。
+      const found = /找到\s*(\d+)\s*处/.exec(output)?.[1];
+      if (found) return `定位到 ${found} 处`;
       const range = /共\s*(\d+)\s*行/.exec(output)?.[1];
       return range ? `共 ${range} 行` : "完成";
     }

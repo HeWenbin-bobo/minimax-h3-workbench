@@ -10,3 +10,4 @@
 - [RB 后端实测](minimax-h3-real-backend-testing.md) — 瞬映 RB 云生成的真实连通性与超时特性
 - [安装包体积预算](minimax-h3-size-budget.md) — 评估新依赖时的体积基线
 - [RB 后端进行中](rb-backend-wip.md) — RB 适配器的未完成事项
+- [智能体自检自己写的网页](agent-self-check-design.md) — 必须报文件身份 / 采样像素堵白屏假通过 / 同一判定写两处会漏一处（鹈鹕案例真机）

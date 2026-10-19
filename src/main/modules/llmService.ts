@@ -951,7 +951,11 @@ export async function chatAgent(
 md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifact 复核即可。`,
         inputSchema: z.object({
           name: z.string().min(1).describe("要修改的产物文件名，带扩展名。必须是本会话里已存在的文件。"),
-          oldText: z.string().min(1).describe("被替换的原文，必须与文件中逐字符一致且全文件唯一。建议带上上下各一行以保证唯一。"),
+          // **不要 `.min(1)`**（实测同类坑第七处）：模型给空 oldText 时，
+          // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，调用被**静默跳过**——
+          // 而 `main.ts` 里那段"oldText 不能为空。"的提示**永远执行不到**，
+          // 模型只会反复重试空串。改成普通字符串，空值交给工具层回一句可纠正的说明。
+          oldText: z.string().describe("被替换的原文，必须与文件中逐字符一致且全文件唯一。建议带上上下各一行以保证唯一。不能为空。"),
           newText: z.string().describe("替换成的新内容。允许为空字符串（表示删除这段）。")
         }),
         execute: async (params) => {

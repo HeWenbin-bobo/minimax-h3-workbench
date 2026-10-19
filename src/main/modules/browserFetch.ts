@@ -245,8 +245,22 @@ export interface HtmlProbeResult {
   title: string;
   /** 控制台 error/warning（含未捕获异常、CSP 拦截、WebGL 报错）。已去重并截断。 */
   consoleErrors: string[];
-  /** 画布实际状态：尺寸 + 是否真的拿到了 WebGL 上下文。 */
-  canvases: Array<{ width: number; height: number; webgl: boolean }>;
+  /**
+   * 画布实际状态：**缓冲区**尺寸（`width/height` 属性）、**布局**尺寸（CSS 像素）
+   * 与是否真的拿到了 WebGL 上下文。
+   *
+   * 为什么两个尺寸都要（实测真机）：模型连续 5 次修改都提示"画面是空的"，
+   * 它在回复里自己怀疑「canvas 尺寸为 0 导致 clientWidth=0」，但**无从验证**——
+   * 之前只报 `c.width/c.height`（缓冲区，通常有值），看不到 CSS 布局为 0 这种情况。
+   * 而"缓冲区正常、布局为 0"正是 WebGL 页面零报错全白的头号成因（画布没有可见面积）。
+   */
+  canvases: Array<{
+    width: number;
+    height: number;
+    clientWidth: number;
+    clientHeight: number;
+    webgl: boolean;
+  }>;
   /** 渲染后的可见文本长度（0 通常意味着脚本没跑起来或页面是纯 canvas）。 */
   textLength: number;
   /** 元素总数。与 textLength 一起用于判断"页面是不是空的"。 */
@@ -356,7 +370,7 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
     await new Promise((resolve) => setTimeout(resolve, PROBE_SETTLE_MS));
     const snapshot = (await win.webContents.executeJavaScript(SNAPSHOT_SCRIPT, true)) as {
       title: string; textLength: number; elementCount: number;
-      canvases: Array<{ width: number; height: number; webgl: boolean }>;
+      canvases: Array<{ width: number; height: number; clientWidth: number; clientHeight: number; webgl: boolean }>;
     };
     // 截图采样：失败不能连坐整次自检（拿不到只是少一条证据，不该让工具报错）。
     const pixel = await samplePixels(win);
@@ -406,8 +420,15 @@ async function samplePixels(win: BrowserWindow): Promise<{ dominant: number; bri
 const SNAPSHOT_SCRIPT = `(() => {
   const safe = (fn, fallback) => { try { return fn(); } catch { return fallback; } };
   const canvases = safe(() => Array.from(document.querySelectorAll("canvas")).slice(0, 8).map((c) => ({
+    // 缓冲区尺寸（绘制分辨率）——通常由 width/height 属性决定，几乎总是有值。
     width: c.width,
     height: c.height,
+    // **布局尺寸（CSS 像素）**：这两个才是"用户到底看不看得见"的关键。
+    // 缓冲区 800×600 但 clientWidth=0 时，画布完全不占面积 → 屏幕上一片空白，
+    // 而且**没有任何报错**。实测真机里模型连续 5 次改都改不掉这个空白，
+    // 它自己怀疑"clientWidth=0"，但当时自检没报这个数字，它无从验证。
+    clientWidth: safe(() => Math.round(c.getBoundingClientRect().width), 0),
+    clientHeight: safe(() => Math.round(c.getBoundingClientRect().height), 0),
     // 已经拿到 2d 上下文的画布再要 webgl 会返回 null —— 那不是错误，只是类型不同。
     webgl: safe(() => {
       if (c.getContext("2d")) return false;
@@ -435,7 +456,14 @@ export function formatProbeReport(result: HtmlProbeResult): string {
   }
   const lines: string[] = [`自检结果：页面已在本机 Chromium 中真实运行（标题「${result.title || "无"}」，${result.elementCount} 个元素，可见文本 ${result.textLength} 字）。`];
   if (result.canvases.length > 0) {
-    const described = result.canvases.map((c, i) => `#${i + 1} ${c.width}×${c.height}${c.webgl ? "（WebGL 上下文正常）" : "（未取到 WebGL/2D 上下文）"}`).join("，");
+    const described = result.canvases.map((c, i) => {
+      // **布局尺寸必须单独报**：缓冲区 800×600、`clientWidth=0` 时画布不占面积，
+      // 屏幕一片空白且零报错——实测真机里模型卡在这个现象上改不动的正是这一类。
+      const layout = c.clientWidth === 0 || c.clientHeight === 0
+        ? `**布局尺寸为 0（clientWidth=${c.clientWidth}, clientHeight=${c.clientHeight}）——画布不占面积，屏幕上必然看不见**`
+        : `布局 ${c.clientWidth}×${c.clientHeight}`;
+      return `#${i + 1} 缓冲区 ${c.width}×${c.height}，${layout}${c.webgl ? "（WebGL 上下文正常）" : "（未取到 WebGL/2D 上下文）"}`;
+    }).join("，");
     lines.push(`画布：${described}。`);
   } else if (result.textLength === 0) {
     lines.push("页面既没有画布、也没有可见文本——脚本很可能压根没跑起来。");

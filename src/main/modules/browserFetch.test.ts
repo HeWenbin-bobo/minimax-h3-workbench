@@ -123,7 +123,7 @@ describe("产物自检报告（formatProbeReport）", () => {
   it("无报错时明确区分「运行状态」与「画面效果」——不能让它宣称看过截图", () => {
     const text = formatProbeReport({
       loaded: true, title: "鹈鹕骑自行车", consoleErrors: [],
-      canvases: [{ width: 1280, height: 800, webgl: true }], textLength: 40, elementCount: 300
+      canvases: [{ width: 1280, height: 800, clientWidth: 1280, clientHeight: 800, webgl: true }], textLength: 40, elementCount: 300
     });
     expect(text).toContain("WebGL 上下文正常");
     expect(text).toContain("不要声称看过画面效果");
@@ -141,7 +141,7 @@ describe("产物自检报告（formatProbeReport）", () => {
   it("整屏纯色且零报错时，明确说是空画面而不是通过", () => {
     const text = formatProbeReport({
       loaded: true, title: "空白", consoleErrors: [],
-      canvases: [{ width: 800, height: 600, webgl: true }], textLength: 0, elementCount: 6,
+      canvases: [{ width: 800, height: 600, clientWidth: 800, clientHeight: 600, webgl: true }], textLength: 0, elementCount: 6,
       pixel: { dominant: 1, brightness: 255, sampled: 56_765 }
     });
     expect(text).toContain("什么都没画出来");
@@ -152,7 +152,7 @@ describe("产物自检报告（formatProbeReport）", () => {
   it("画面有内容且零报错时才允许说'已运行且未报错'", () => {
     const text = formatProbeReport({
       loaded: true, title: "有内容", consoleErrors: [],
-      canvases: [{ width: 800, height: 600, webgl: true }], textLength: 0, elementCount: 6,
+      canvases: [{ width: 800, height: 600, clientWidth: 800, clientHeight: 600, webgl: true }], textLength: 0, elementCount: 6,
       pixel: { dominant: 0.83, brightness: 218, sampled: 56_765 }
     });
     expect(text).not.toContain("什么都没画出来");
@@ -162,10 +162,36 @@ describe("产物自检报告（formatProbeReport）", () => {
   it("拿不到截图时不误判（pixel 缺省照常给结论）", () => {
     const text = formatProbeReport({
       loaded: true, title: "x", consoleErrors: [],
-      canvases: [{ width: 10, height: 10, webgl: true }], textLength: 5, elementCount: 4
+      canvases: [{ width: 10, height: 10, clientWidth: 10, clientHeight: 10, webgl: true }], textLength: 5, elementCount: 4
     });
     expect(text).not.toContain("什么都没画出来");
     expect(text).toContain("页面已实际运行且未报错");
+  });
+
+  // 真机证据：模型连续 5 次修改都提示"画面是空的"，它在回复里自己怀疑
+  // 「canvas 尺寸为 0 导致 clientWidth=0」，但当时自检只报缓冲区尺寸，它无从验证。
+  // 现在必须**明确报出布局尺寸为 0**，并把结论说清楚。
+  it("缓冲区有尺寸但布局为 0 时，明确指出来", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "全空", consoleErrors: [],
+      canvases: [{ width: 1920, height: 1080, clientWidth: 0, clientHeight: 0, webgl: true }],
+      textLength: 0, elementCount: 8,
+      pixel: { dominant: 1, brightness: 12, sampled: 1000 }
+    });
+    expect(text).toContain("布局尺寸为 0");
+    expect(text).toContain("画布不占面积");
+    expect(text).toContain("clientWidth=0");
+  });
+
+  it("布局尺寸正常时只报数字，不加警告", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "ok", consoleErrors: [],
+      canvases: [{ width: 1920, height: 1080, clientWidth: 1920, clientHeight: 1080, webgl: true }],
+      textLength: 0, elementCount: 8,
+      pixel: { dominant: 0.5, brightness: 90, sampled: 1000 }
+    });
+    expect(text).not.toContain("画布不占面积");
+    expect(text).toContain("布局 1920×1080");
   });
 
   it("单元素页面不会被纯色判据误伤（只有 html/body 时不算'没画出来'）", () => {

@@ -135,4 +135,44 @@ describe("产物自检报告（formatProbeReport）", () => {
     });
     expect(text).toContain("脚本很可能压根没跑起来");
   });
+
+  // 假通过防线：零控制台报错**不等于**画出来了。真机实测空白页/纯色清屏页
+  // 主色占比都是 100%，旧版自检会说"页面已实际运行且未报错"。
+  it("整屏纯色且零报错时，明确说是空画面而不是通过", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "空白", consoleErrors: [],
+      canvases: [{ width: 800, height: 600, webgl: true }], textLength: 0, elementCount: 6,
+      pixel: { dominant: 1, brightness: 255, sampled: 56_765 }
+    });
+    expect(text).toContain("什么都没画出来");
+    expect(text).toContain("不要");
+    expect(text).not.toContain("页面已实际运行且未报错");
+  });
+
+  it("画面有内容且零报错时才允许说'已运行且未报错'", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "有内容", consoleErrors: [],
+      canvases: [{ width: 800, height: 600, webgl: true }], textLength: 0, elementCount: 6,
+      pixel: { dominant: 0.83, brightness: 218, sampled: 56_765 }
+    });
+    expect(text).not.toContain("什么都没画出来");
+    expect(text).toContain("页面已实际运行且未报错");
+  });
+
+  it("拿不到截图时不误判（pixel 缺省照常给结论）", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "x", consoleErrors: [],
+      canvases: [{ width: 10, height: 10, webgl: true }], textLength: 5, elementCount: 4
+    });
+    expect(text).not.toContain("什么都没画出来");
+    expect(text).toContain("页面已实际运行且未报错");
+  });
+
+  it("单元素页面不会被纯色判据误伤（只有 html/body 时不算'没画出来'）", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "x", consoleErrors: [], canvases: [], textLength: 0, elementCount: 1,
+      pixel: { dominant: 1, brightness: 255, sampled: 100 }
+    });
+    expect(text).not.toContain("什么都没画出来");
+  });
 });

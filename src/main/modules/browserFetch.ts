@@ -251,6 +251,17 @@ export interface HtmlProbeResult {
   textLength: number;
   /** 元素总数。与 textLength 一起用于判断"页面是不是空的"。 */
   elementCount: number;
+  /**
+   * 画面采样：把窗口截一张图，统计"主色占比"与平均亮度。
+   *
+   * **为什么需要**：只报"控制台没报错"会**假通过**——一个 WebGL 页面完全可以
+   * 一条错都不报、但什么都没画出来（清屏成背景色、画布尺寸为 0、整个场景被裁掉）。
+   * 这时说"自检通过"比不说更糟：模型会据此告诉用户"已验证"，用户打开却是白屏。
+   * 实测（probe-capture）：纯色页主色占比 100%、空白画布页 97.7%，能稳定区分。
+   *
+   * 拿不到截图时为 undefined（不影响其余结论）。
+   */
+  pixel?: { dominant: number; brightness: number; sampled: number };
 }
 
 /** 单条日志的截断长度：着色器编译错误可能一次吐几千字符，全量回灌只会把上下文烧掉。 */
@@ -347,9 +358,44 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
       title: string; textLength: number; elementCount: number;
       canvases: Array<{ width: number; height: number; webgl: boolean }>;
     };
-    return { loaded: true, consoleErrors: logs, ...snapshot };
+    // 截图采样：失败不能连坐整次自检（拿不到只是少一条证据，不该让工具报错）。
+    const pixel = await samplePixels(win);
+    return { loaded: true, consoleErrors: logs, ...snapshot, ...(pixel ? { pixel } : {}) };
   } finally {
     if (!win.isDestroyed()) win.destroy();
+  }
+}
+
+/**
+ * 截一张图，统计主色占比与平均亮度——用来发现"没报错但什么都没画"。
+ *
+ * 稀疏采样（每 37 个像素取一个）足够判断"整屏是不是一个颜色"，全量扫 100 万像素
+ * 只会让自检多花几十毫秒却得不到更多信息。
+ * 主色按每个通道取高 3 位分桶，避免抗锯齿产生的微小明暗差把同一种颜色拆成几百桶。
+ */
+async function samplePixels(win: BrowserWindow): Promise<{ dominant: number; brightness: number; sampled: number } | undefined> {
+  try {
+    const image = await win.webContents.capturePage();
+    if (image.isEmpty()) return undefined;
+    const bitmap = image.toBitmap(); // BGRA
+    const buckets = new Map<number, number>();
+    let sum = 0;
+    let sampled = 0;
+    for (let i = 0; i + 3 < bitmap.length; i += 4 * 37) {
+      const b = bitmap[i];
+      const g = bitmap[i + 1];
+      const r = bitmap[i + 2];
+      const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
+      buckets.set(key, (buckets.get(key) ?? 0) + 1);
+      sum += (r + g + b) / 3;
+      sampled += 1;
+    }
+    if (sampled === 0) return undefined;
+    let top = 0;
+    for (const count of buckets.values()) if (count > top) top = count;
+    return { dominant: top / sampled, brightness: sum / sampled, sampled };
+  } catch {
+    return undefined;
   }
 }
 
@@ -394,12 +440,20 @@ export function formatProbeReport(result: HtmlProbeResult): string {
   } else if (result.textLength === 0) {
     lines.push("页面既没有画布、也没有可见文本——脚本很可能压根没跑起来。");
   }
+  // 整屏接近一种颜色 = 大概率什么都没画出来（清屏成背景色 / 画布尺寸为 0 / 场景被裁掉）。
+  // 这一条必须**先于**"控制台没报错"说出来，否则模型会把"无报错"当成"画面正常"。
+  const flatScreen = result.pixel && result.pixel.dominant >= 0.97 && result.elementCount > 1;
+  if (flatScreen) {
+    lines.push(`画面采样：整屏约有 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).dominant * 100)}% 是同一种颜色（平均亮度 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).brightness)}）。**这通常意味着页面上什么都没画出来**——画面被某个纯色元素盖满、画布尺寸为 0、或渲染循环根本没跑起来。请检查布局与首帧渲染。`);
+  }
   if (result.consoleErrors.length > 0) {
     lines.push(`运行时报错（共 ${result.consoleErrors.length} 条，已去重）：`);
     for (const entry of result.consoleErrors) lines.push(`- ${entry}`);
     lines.push("请针对这些报错修改后重新生成，并在回复里说明修了什么。");
+  } else if (flatScreen) {
+    lines.push("控制台没有 error/warning，但上面的画面采样说明屏幕是空的——**不要**据此告诉用户页面正常。");
   } else {
-    lines.push("控制台没有任何 error/warning。可以据此如实告诉用户页面已实际运行且未报错；但不要声称看过画面效果——你拿到的是运行状态，不是截图。");
+    lines.push("控制台没有任何 error/warning，画面也不是纯色。可以据此如实告诉用户页面已实际运行且未报错；但不要声称看过画面效果——你拿到的是运行状态，不是截图。");
   }
   return lines.join("\n");
 }

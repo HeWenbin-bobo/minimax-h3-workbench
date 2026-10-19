@@ -475,6 +475,17 @@ describe("按关键词定位（findMatchingLines）", () => {
     expect(findMatchingLines(src, "M.identity").strippedGutter).toBe(false);
   });
 
+  // 反向自检：剥行号的判据从宽，但**剥成空串时必须不剥**。
+  // `12|` 本身可能就是用户真要搜的内容（表格竖线、正则片段）；
+  // 把它剥成空串会让搜索直接返回"没找到"，等于把真实搜索吃掉。
+  it("keyword 只有「数字|」时不做剥离（否则会剥成空串）", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["| 12| 值 |", "a 12| b"].join(NL);
+    const out = findMatchingLines(file, "12|");
+    expect(out.total).toBe(2);
+    expect(out.strippedGutter).toBe(false);
+  });
+
   it("空关键词返回空结果（不匹配每一行）", () => {
     const out = findMatchingLines(src, "");
     expect(out.total).toBe(0);

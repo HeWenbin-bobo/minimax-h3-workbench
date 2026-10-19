@@ -406,8 +406,10 @@ export function findMatchingLines(
   // "没有找到「    42| const a = 1;」"——它只会再换一个片段再搜一次。
   // 与 oldText 同一条坑的第三处（oldText / newText 已修），这里一并剥掉。
   // 判据同样从宽：只要开头是"空白+数字+|"，就认为是照抄了我们的行号栏。
+  // **但剥完不能是空串**：关键词本来就可能是 `12|`（表格竖线、正则片段），
+  // 剥成空串会直接返回"没找到"——那是把用户真实想搜的内容吃掉。
   const gutterStripped = needle.replace(/^\s*\d+\|\s?/, "");
-  const strippedGutter = gutterStripped !== needle;
+  const strippedGutter = gutterStripped !== needle && gutterStripped.length > 0;
   if (strippedGutter) needle = gutterStripped;
   if (!needle) return { matches: [], total: 0, body: "", charCapped: false, lineCapped: false, caseOnly: 0 };
   const hits: number[] = [];

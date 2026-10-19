@@ -1091,7 +1091,13 @@ function registerIpc(
         // 结果新文件里**仍然留着那一处**；随后它断言"我重写后的文件里并没有这个写法"，
         // 把锅推给自检工具。根因是它**读不回**自己的文件，只能凭记忆改。
         // 这两个工具对齐 Codex `apply_patch`：给行号让人看得见，要求精确且唯一才写。
-        readArtifact: async (params: { name: string; startLine?: number; endLine?: number; keyword?: string }) => {
+        // **读也要排进写队列**（实测竞态，probe-read-write-race）：AI SDK 在同一个 step 里
+        // 会**并行执行多个 tool call**，而 read 原本在写队列之外。模型一次调用
+        // "edit_artifact + read_artifact" 时的真实顺序是：
+        //     修改文件（入队） → 读取文件（不入队，立即执行） → 读取完成（旧内容） → 修改完成
+        // 于是模型读到的是**改动前**的文件，接着会基于旧内容做下一步决策。
+        // 读取本身很快，串进同一个队列的代价可以忽略。
+        readArtifact: async (params: { name: string; startLine?: number; endLine?: number; keyword?: string }) => artifactWriteQueue.run(async () => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
           const found = await resolveArtifactForTool(dir, safeName);
@@ -1167,7 +1173,7 @@ function registerIpc(
               ? `（本会话里没有「${safeName}」，已读同主名的最新版本「${found.name}」）\n`
               : "";
           return `${nameNote}文件：${found.name}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}`;
-        },
+        }),
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());

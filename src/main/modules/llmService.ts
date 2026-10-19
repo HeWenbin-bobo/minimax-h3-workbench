@@ -1032,12 +1032,34 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           explanation: z.string().describe("一句话说明这次更新的原因（如'已完成搜索，开始整理数据'）。仅当状态变化需要解释时才写。").optional(),
           plan: z.array(z.object({
             step: z.string().describe("步骤描述，写清要做什么，如'搜索 2025 年国产显卡价格'。"),
-            status: z.enum(["pending", "in_progress", "completed"]).describe("步骤状态。pending=未开始，in_progress=进行中（全清单最多一项），completed=已完成。")
+            // **不要用 z.enum**（同一类坑第八处）：模型常写 `done` / `in-progress` / `doing`，
+            // 枚举一拒，AI SDK 在 `parseToolCall` 阶段抛错、**整个调用被静默跳过**——
+            // 而 update_plan 几乎每步都调，等于把整轮的进度可视化全部废掉，
+            // 还白白烧步数。改在 execute 里归一（见下）。
+            status: z.string().describe("步骤状态：pending（未开始）/ in_progress（进行中，全清单最多一项）/ completed（已完成）。")
           })).min(1).describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。")
         }),
         execute: async (params) => {
+          // status 归一：把模型的口语化写法映射到三个规范值。
+          // 认不出来的一律按 pending（宁可显示"未开始"，也不能让整次清单更新被拒）。
+          const normalizeStatus = (raw: unknown): "pending" | "in_progress" | "completed" => {
+            const text = String(raw ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+            if (["completed", "complete", "done", "finished", "已完", "已完成"].includes(text)) return "completed";
+            if (["in_progress", "inprogress", "doing", "running", "active", "进行中", "进行"].includes(text)) return "in_progress";
+            return "pending";
+          };
+          // **最多一项 in_progress**：模型常说"全都进行中"，渲染端的语义是"最多一个"。
+          // 多出来的降级为 pending（不丢步骤，只修状态）。
+          let sawInProgress = false;
+          const plan = params.plan.map((entry) => {
+            const status = normalizeStatus(entry.status);
+            if (status !== "in_progress") return { ...entry, status };
+            if (sawInProgress) return { ...entry, status: "pending" as const };
+            sawInProgress = true;
+            return { ...entry, status };
+          });
           try {
-            return await callbacks.updatePlan(params);
+            return await callbacks.updatePlan({ ...params, plan });
           } catch (error) {
             return `步骤清单更新失败：${describeError(error, "未知错误")}（不影响任务继续，请直接用文字说明进度）`;
           }

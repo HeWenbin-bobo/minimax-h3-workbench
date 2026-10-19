@@ -370,7 +370,7 @@ export interface AgentToolCallbacks {
    * 只能凭记忆断言；后来甚至怀疑自检工具加载了缓存。给它读回能力，它才能真正自证。
    * 只接受文件名（会话内解析），不接受任意路径。
    */
-  readArtifact: (params: { name: string; startLine?: number; endLine?: number }) => Promise<string>;
+  readArtifact: (params: { name: string; startLine?: number; endLine?: number; keyword?: string }) => Promise<string>;
   /**
    * 产物局部编辑工具（edit_artifact）：按上下文精确替换一处，写回**同一个文件**。
    *
@@ -741,9 +741,11 @@ export async function chatAgent(
 
 何时不用：还没生成过文件；或者你只是想看看文件大小/是否存在——那直接看 create_file 的返回即可。
 
-提示：一次别读整个 40KB 文件。先不带范围读开头几行确认结构，再用 startLine/endLine 精确取你要改的那一段。`,
+提示：一次别读整个 40KB 文件。**知道要找什么（函数名、报错里的标识符）时优先用 keyword**——
+一步定位到命中行及上下文；只有想通读结构时才用 startLine/endLine 分段读。`,
         inputSchema: z.object({
           name: z.string().min(1).describe("产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。"),
+          keyword: z.string().min(1).describe("要定位的字面文本（区分大小写），如报错里出现的标识符、函数名。给了它就不用再分段读全文。").optional(),
           startLine: z.number().int().min(1).describe("起始行（1 起算，含）。省略则从第 1 行开始。").optional(),
           endLine: z.number().int().min(1).describe("结束行（含）。省略则读到文件末尾。一次建议不超过 400 行。").optional()
         }),

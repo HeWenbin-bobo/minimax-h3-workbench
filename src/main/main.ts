@@ -35,7 +35,7 @@ import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
 import { artifactSessionDirName, pickLatestVersion } from "./modules/artifactDir";
-import { applyExactEdit, applyExactEdits, sliceWithLineNumbers } from "./modules/artifactEdit";
+import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
@@ -1076,7 +1076,7 @@ function registerIpc(
         // 结果新文件里**仍然留着那一处**；随后它断言"我重写后的文件里并没有这个写法"，
         // 把锅推给自检工具。根因是它**读不回**自己的文件，只能凭记忆改。
         // 这两个工具对齐 Codex `apply_patch`：给行号让人看得见，要求精确且唯一才写。
-        readArtifact: async (params: { name: string; startLine?: number; endLine?: number }) => {
+        readArtifact: async (params: { name: string; startLine?: number; endLine?: number; keyword?: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
           const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
@@ -1084,11 +1084,22 @@ function registerIpc(
           // xlsx 是二进制，读成文本没有意义——明确告知而不是吐乱码。
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，无法按文本读取；请用预览面板查看。");
           const raw = await readFile(resolved, "utf8");
+          // **按关键词定位优先**（实测真机）：模型要找某个函数却不知道在哪，
+          // 于是把 2118 行的文件按 400 行一段连读 5 次，光找位置就吃掉 5 步。
+          const keyword = String(params.keyword ?? "");
+          if (keyword) {
+            const found = findMatchingLines(raw, keyword);
+            if (found.total === 0) {
+              return `在 ${safeName}（共 ${raw.split("\n").length} 行）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。`;
+            }
+            const more = found.total > found.matches.length ? `\n（共 ${found.total} 处命中，只显示前 ${found.matches.length} 处。）` : "";
+            return `在 ${safeName} 里找到 ${found.total} 处「${keyword}」：\n${found.body}${more}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。`;
+          }
           const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
           // **必须说明被截断了**（实测真机）：模型不带范围读 1651 行全文，紧接着又读一遍，
           // 白烧几十 KB 还挤掉后续修改步骤。默认上限 400 行，并告诉它还剩多少、怎么继续读。
           const more = slice.truncated
-            ? `\n（只显示前 ${slice.to - slice.from + 1} 行；文件共 ${slice.totalLines} 行，还有 ${slice.totalLines - slice.to} 行没显示。需要更多就用 startLine/endLine 分段读。）`
+            ? `\n（只显示前 ${slice.to - slice.from + 1} 行；文件共 ${slice.totalLines} 行，还有 ${slice.totalLines - slice.to} 行没显示。需要更多就用 startLine/endLine 分段读，或者用 keyword 直接定位。）`
             : "";
           return `文件：${safeName}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}`;
         },

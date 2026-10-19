@@ -196,3 +196,49 @@ export function sliceWithLineNumbers(text: string, startLine?: number, endLine?:
     .join("\n");
   return { body, totalLines: total, from, to, truncated: to < total };
 }
+
+/**
+ * 按关键词在文件里定位，返回命中行（行号 + 原文）与前后文。
+ *
+ * 为什么需要（实测真机）：模型要改某个函数，但不知道它在哪里，于是把 2118 行的文件
+ * 按 400 行一段**连读 5 次**（步骤条上 5 行"读取文件完成（共 2118 行）"），
+ * 光找位置就吃掉 5 步。给它"搜一下"的能力，一步就能定位。
+ *
+ * 匹配是**字面量**（大小写敏感），不做正则：模型给的多半是标识符原文，
+ * 正则元字符反而会让它写出匹配不到的模式。
+ *
+ * @param limit 最多返回几条命中
+ * @param context 每条命中额外带前后各几行
+ */
+export function findMatchingLines(
+  text: string,
+  keyword: string,
+  limit = 20,
+  context = 2
+): { matches: Array<{ line: number; text: string }>; total: number; body: string } {
+  const needle = String(keyword ?? "");
+  const lines = text.split("\n");
+  if (!needle) return { matches: [], total: 0, body: "" };
+  const hits: number[] = [];
+  for (let i = 0; i < lines.length && hits.length < limit; i += 1) {
+    if (lines[i].includes(needle)) hits.push(i + 1);
+  }
+  // 统计总数时不受 limit 限制，便于告诉模型"还有更多"。
+  let total = 0;
+  for (const line of lines) if (line.includes(needle)) total += 1;
+  const blocks: string[] = [];
+  const matches: Array<{ line: number; text: string }> = [];
+  const shown = new Set<number>();
+  for (const hit of hits) {
+    matches.push({ line: hit, text: lines[hit - 1].trim() });
+    const from = Math.max(1, hit - context);
+    const to = Math.min(lines.length, hit + context);
+    for (let n = from; n <= to; n += 1) {
+      if (shown.has(n)) continue;
+      shown.add(n);
+      blocks.push(`${String(n).padStart(5, " ")}| ${lines[n - 1]}`);
+    }
+    blocks.push("      …");
+  }
+  return { matches, total, body: blocks.join("\n") };
+}

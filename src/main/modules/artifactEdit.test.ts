@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyExactEdit, applyExactEdits, sliceWithLineNumbers, MAX_READ_LINES } from "./artifactEdit";
+import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers, MAX_READ_LINES } from "./artifactEdit";
 
 // 这些用例全部来自真机观察到的形态（鹈鹕案例）：
 // 模型为改一处 `M.identity` 整份重写 40KB，改完仍是错的，且它无法核对。
@@ -234,5 +234,58 @@ describe("找不到原文时给出最接近的行", () => {
       expect(out.reason).toBe("not-found");
       expect(out.hints?.[0].text).toContain("M.identity");
     }
+  });
+});
+
+// 实测真机：模型要找某个函数在哪，却没有搜索能力，把 2118 行的文件按 400 行一段
+// 连读 5 次（步骤条上 5 行"读取文件完成（共 2118 行）"），光找位置就吃掉 5 步。
+// 给它"按关键词定位"，一步就能拿到命中行 + 上下文。
+describe("按关键词定位（findMatchingLines）", () => {
+  const NL = String.fromCharCode(10);
+  const src = [
+    "function a() {",        // 1
+    "  return 1;",           // 2
+    "}",                     // 3
+    "function b() {",        // 4
+    "  return M.identity;",  // 5
+    "}"                      // 6
+  ].join(NL);
+
+  it("命中时返回行号与上下文", () => {
+    const out = findMatchingLines(src, "M.identity");
+    expect(out.total).toBe(1);
+    expect(out.matches[0].line).toBe(5);
+    expect(out.body).toContain("M.identity");
+    // 上下文应包含相邻行
+    expect(out.body).toContain("function b()");
+  });
+
+  it("没有命中时返回 0 条（调用方据此提示换个片段）", () => {
+    const out = findMatchingLines(src, "notThere");
+    expect(out.total).toBe(0);
+    expect(out.matches).toEqual([]);
+  });
+
+  it("多处命中时全部列出", () => {
+    const out = findMatchingLines(src, "function");
+    expect(out.total).toBe(2);
+    expect(out.matches.map((m) => m.line)).toEqual([1, 4]);
+  });
+
+  it("区分大小写（模型该给准确标识符）", () => {
+    expect(findMatchingLines(src, "m.identity").total).toBe(0);
+  });
+
+  it("空关键词返回空结果（不匹配每一行）", () => {
+    const out = findMatchingLines(src, "");
+    expect(out.total).toBe(0);
+    expect(out.body).toBe("");
+  });
+
+  it("受 limit 限制但 total 仍报真实总数", () => {
+    const many = Array.from({ length: 30 }, (_, i) => `hit ${i}`).join(NL);
+    const out = findMatchingLines(many, "hit", 5);
+    expect(out.matches).toHaveLength(5);
+    expect(out.total).toBe(30);
   });
 });

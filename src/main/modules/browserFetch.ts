@@ -17,6 +17,18 @@ const PARTITION = "persist:h3-browser-fetch";
 const DEFAULT_TIMEOUT_MS = 25_000;
 
 /**
+ * text 模式在 `dom-ready` 之后再等多久就收工。
+ *
+ * 为什么不全等 `did-finish-load`：那要等**所有子资源**（广告、统计、追踪像素、大图），
+ * 任何一个挂住就白等到 45 秒超时。实测（文档案例真机）：6 次 `open_page` 有 2 次
+ * 卡满 45 秒——而我们要的只是 `body.innerText`。
+ *
+ * 1.5 秒是给"客户端渲染出正文"留的窗口：多数页面的首屏内容在 DOMContentLoaded 后
+ * 一两秒内就位；再长的页面本来也该用 web_search 或换个更轻的来源。
+ */
+const TEXT_MODE_SETTLE_MS = 1_500;
+
+/**
  * 隐藏窗口加载的是**任意外部页面**（`open_page` 的 URL 由模型给出，`web_search` 抓的是公开搜索结果页），
  * 必须按不可信内容处理。
  *
@@ -159,9 +171,13 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text",
   try {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`浏览器渲染超时（${timeoutMs / 1000} 秒）`)), timeoutMs);
+      /** text 模式的软截止计时器（dom-ready 之后启动）。 */
+      let softTimer: NodeJS.Timeout | undefined;
       const done = (error?: Error) => {
         clearTimeout(timer);
+        if (softTimer) clearTimeout(softTimer);
         win.webContents.removeListener("did-finish-load", onLoad);
+        win.webContents.removeListener("dom-ready", onDomReady);
         win.webContents.removeListener("did-fail-load", onFail);
         win.webContents.removeListener("will-redirect", onRedirect);
         win.webContents.removeListener("will-navigate", onNavigate);
@@ -169,6 +185,20 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text",
         error ? reject(error) : resolve();
       };
       const onLoad = () => done();
+      /**
+       * **text 模式不等全部子资源**（实测：文档案例 6 次 open_page 有 2 次卡满 45 秒超时）。
+       *
+       * `did-finish-load` 要等主框架**连同所有子资源**（广告、统计、图片、追踪像素）完成；
+       * 其中任何一个挂住，整次抓取就白等到超时——而我们只要 `body.innerText`。
+       * 所以 dom-ready 之后再静置一小段时间（给 JS 渲染留机会），先到先得。
+       *
+       * `html` 模式**保持等 did-finish-load**：搜索解析（parseBing/parseSogou）依赖完整 DOM 结构，
+       * 提前取会拿到没渲染完的结果页。
+       */
+      const onDomReady = () => {
+        if (mode !== "text") return;
+        softTimer = setTimeout(() => done(), TEXT_MODE_SETTLE_MS);
+      };
       // 只认**主框架**失败。子框架（iframe）加载失败不该连坐整页——真实网页（搜索结果页、
       // 开放平台文档）几乎都内嵌第三方 iframe（广告/统计/播放器），它们失败是常态。
       // 旧实现不看 isMainFrame，任何一个子框架报错就 reject 整个 renderHtml：
@@ -210,6 +240,8 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text",
       const onNavigate = (details: Electron.Event<Electron.WebContentsWillNavigateEventParams>) =>
         guardNavigation(details, details.url, details.isMainFrame);
       win.webContents.once("did-finish-load", onLoad);
+      // text 模式的软截止：dom-ready 后静置一小段就收工，不等全部子资源（见 TEXT_MODE_SETTLE_MS）。
+      win.webContents.on("dom-ready", onDomReady);
       win.webContents.on("did-fail-load", onFail);
       win.webContents.on("will-redirect", onRedirect);
       win.webContents.on("will-navigate", onNavigate);

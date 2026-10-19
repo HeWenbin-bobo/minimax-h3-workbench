@@ -106,6 +106,19 @@ describe("applyExactEdit", () => {
     if (out.ok) expect(out.strippedGutter).toBeUndefined();
   });
 
+  // 第三处同类漏改：剥行号那条分支也基于归一化后的（全 LF）文本，
+  // 原样返回会把整个 CRLF 文件静默改成 LF。
+  it("剥行号那条分支也保持文件的原始行尾", () => {
+    const NL = String.fromCharCode(10);
+    const CR = String.fromCharCode(13);
+    const out = applyExactEdit(`a${CR}${NL}b${CR}${NL}c`, `  2| b`, "B");
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.text).toBe(`a${CR}${NL}B${CR}${NL}c`);
+      expect(/[^\r]\n/.test(out.text)).toBe(false);
+    }
+  });
+
   // 实测复现：模型把**新内容也照抄成带行号的样子**（`newText = "    1| const a = 9;"`）。
   // 只剥 oldText 的话，那串 `    1| ` 会被**写进文件本身**——产物直接坏掉，
   // 而且下一轮读回时模型看到的就是这段脏内容。

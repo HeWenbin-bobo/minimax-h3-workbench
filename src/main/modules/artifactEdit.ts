@@ -226,9 +226,12 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
       // 判据与 oldText 同一套（degutter 会先要求"至少一半的行带行号"），
       // 单纯在正文里写 `1| ` 的产物不会被误剥。
       const cleanReplacement = degutter(normalizeEol(replacement)) ?? normalizeEol(replacement);
+      // **行尾也要还原成文件的原始风格**（第三处同类漏改）：这条分支同样基于
+      // `normalizedText`（全 LF），原样返回会把整个 CRLF 文件静默改成 LF。
+      const merged = normalizedText.slice(0, at) + cleanReplacement + normalizedText.slice(at + degutterNeedle.length);
       return {
         ok: true,
-        text: normalizedText.slice(0, at) + cleanReplacement + normalizedText.slice(at + degutterNeedle.length),
+        text: matchEolOf(text, merged),
         line: lineOf(normalizedText, at),
         strippedGutter: true
       };

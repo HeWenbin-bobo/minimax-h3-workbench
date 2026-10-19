@@ -359,7 +359,6 @@ export function findMatchingLines(
       if (lines[n - 1].length > EXCERPT_CHARS) lineCapped = true;
       blocks.push(`${String(n).padStart(5, " ")}| ${excerptLine(lines[n - 1], n === hit ? needle : undefined)}`);
     }
-    blocks.push("      …");
   }
   const joined = blocks.join("\n");
   if (joined.length > MAX_READ_CHARS) {

@@ -1283,8 +1283,9 @@ function registerIpc(
             const nextStep = /\.html?$/i.test(found.name)
               ? "建议立刻 inspect_artifact 自检一次，确认没有引入新报错。"
               : "改完可直接告诉用户，或用 read_artifact 复核。";
-            // 模型把**读回结果的行号前缀**一起抄进 oldText 时，这里替它剥掉了。
-            // 必须说出来：否则它下次还会照抄（并且不知道自己抄错了，只是"这次居然成功了"）。
+            // 模型把**读回结果的行号前缀**一起抄进 oldText 时，
+            // 这里替它剥掉了。必须说出来：否则它下次还会照抄
+            // （并且不知道自己抄错了，只是"这次居然成功了"）。
             const gutterNote = outcome.strippedGutter
               ? "\n（注意：你给的 oldText 带着 read_artifact 的行号前缀（`  42| `），我已自动剥掉后再匹配。以后写 oldText 时不要带行号那一栏。）"
               : "";

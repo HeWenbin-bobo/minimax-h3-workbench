@@ -1774,13 +1774,31 @@ async function resolveArtifactForTool(
   dir: string,
   requestedName: string
 ): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" } | undefined> {
-  const exact = await resolveWithinRoot(dir, path.join(dir, requestedName));
-  const latest = await latestSiblingArtifact(dir, requestedName);
-  // 最新版优先于精确命中：改旧版等于改给幽灵看（界面根本不展示它）。
-  if (latest && (!exact || latest.path !== exact)) {
-    return { name: latest.name, path: latest.path, fellBack: exact ? "stale" : "missing" };
+  // **不带扩展名也要能解析**（实测契约不一致）：`create_file` 的参数说明是
+  // "文件名，不含扩展名（如'科技新闻'）"，而 read/edit 的说明是"带扩展名"。
+  // 模型按前者的写法调用后者时（read_artifact("科技新闻")），精确匹配与同主名回落
+  // 都按空扩展名比对 → 必然返回 undefined → 报"本会话里找不到产物"。
+  // 一份文件明明在，却被说成不存在，模型只会去重新 create_file 生成重复产物。
+  //
+  // 做法：请求名没有扩展名时，按已知产物扩展名依次补全再试。
+  const knownExts = [".html", ".md", ".xlsx", ".csv", ".tsv"];
+  const candidates = path.extname(requestedName)
+    ? [requestedName]
+    : [requestedName, ...knownExts.map((ext) => `${requestedName}${ext}`)];
+
+  let staleMatch: { name: string; path: string } | undefined;
+  for (const candidate of candidates) {
+    const exact = await resolveWithinRoot(dir, path.join(dir, candidate));
+    const latest = await latestSiblingArtifact(dir, candidate);
+    // 最新版优先于精确命中：改旧版等于改给幽灵看（界面根本不展示它）。
+    if (latest && (!exact || latest.path !== exact)) {
+      if (!staleMatch) staleMatch = { name: latest.name, path: latest.path };
+      continue;
+    }
+    if (exact) return { name: candidate, path: exact, fellBack: candidate === requestedName ? false : "missing" };
   }
-  if (exact) return { name: requestedName, path: exact, fellBack: false };
+  // 只有在**没有任何精确命中**时才回落到"同主名最新版"。
+  if (staleMatch) return { ...staleMatch, fellBack: "stale" };
   return undefined;
 }
 

@@ -1154,7 +1154,15 @@ function registerIpc(
           const charNote = slice.charCapped
             ? `\n（这一段总长超限，已按 ${MAX_READ_CHARS} 字符截断——单行很长的文件常见。请用 keyword 精确定位，或缩小 startLine/endLine 范围。）`
             : "";
-          return `文件：${safeName}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}`;
+          // **标题必须用"实际读到的那个文件"**（与 edit_artifact 的回落说明对齐）：
+          // 模型点名旧名字时，解析会回落到同名最新版；仍用请求名做标题，它会以为
+          // 读到的就是自己点的那份（内容却对不上，接着就会怀疑工具或文件损坏）。
+          const nameNote = found.fellBack === "stale"
+            ? `（你点名的「${safeName}」已被更新的版本取代，实际读的是「${found.name}」）\n`
+            : found.fellBack === "missing"
+              ? `（本会话里没有「${safeName}」，已读同主名的最新版本「${found.name}」）\n`
+              : "";
+          return `${nameNote}文件：${found.name}（共 ${slice.totalLines} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}`;
         },
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));

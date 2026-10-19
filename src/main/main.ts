@@ -933,9 +933,20 @@ function registerIpc(
       // **把本会话已产出的文件名注入环境事实**（实测缺口）：history 只传
       // `{ role, content }`，工具结果不跨轮保留——用户第二轮说"把刚才那个改一下"时，
       // 模型手里没有任何文件名，只能猜（这一轮一半的补丁都在替它兜这个底）。
-      // 只读目录、只取文件名；读不到就当空清单，不能因此让整轮失败。
-      const artifactFiles = await readdir(path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session)))
-        .then((entries) => entries.filter((name) => /\.(html?|md|xlsx)$/i.test(name)).sort())
+      //
+      // **必须按修改时间倒序**：下游只保留前 20 条（worldState 的 slice），
+      // 字母序截断会把刚生成的文件挤掉——而"刚生成的那个"恰恰是模型最常引用的。
+      // 读不到目录就当空清单，不能让整轮失败。
+      const artifactRoot = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+      const artifactFiles = await readdir(artifactRoot)
+        .then(async (entries) => {
+          const wanted = entries.filter((name) => /\.(html?|md|xlsx)$/i.test(name));
+          const withTime = await Promise.all(wanted.map(async (name) => {
+            const info = await stat(path.join(artifactRoot, name)).catch(() => undefined);
+            return { name, mtime: info?.mtimeMs ?? 0 };
+          }));
+          return withTime.sort((a, b) => b.mtime - a.mtime).map((entry) => entry.name);
+        })
         .catch(() => [] as string[]);
       const worldDiff = diffWorldState(
         buildSections({

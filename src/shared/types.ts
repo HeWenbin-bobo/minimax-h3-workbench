@@ -423,6 +423,12 @@ export interface LlmArtifactEvent {
   size: number;
   /** 渲染端据此选卡片图标与预览方式。 */
   kind: "html" | "sheet" | "doc";
+  /**
+   * `true` 表示这是**对已有产物的更新**（edit_artifact 写回同一个文件），
+   * 渲染端应当就地刷新那张卡片与已打开的预览，而不是再追加一张新卡片。
+   * 缺省 = 新增产物（兼容旧事件）。
+   */
+  updated?: boolean;
   sessionId?: string;
 }
 

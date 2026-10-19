@@ -903,6 +903,14 @@ function registerIpc(
       let agentArtifactCount = 0; // 本轮已落盘产物数：用于收尾文案（见下面 1243 行附近）
       const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
       const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
+      // 编辑产物后推一条"更新"事件：渲染端就地刷新卡片大小与已打开的预览。
+      // 为什么需要（实测缺口）：此前只有 create_file 会推事件，于是模型改完文件后，
+      // 卡片上的大小停在旧值、**已打开的预览面板也不会重载**——用户对着旧画面
+      // 判断"还是坏的"，而模型那边已经改好了。两边看到的是两个不同的文件。
+      const notifyArtifactUpdated = (absolutePath: string, name: string, size: number) => {
+        const kind: LlmArtifactEvent["kind"] = /\.html?$/i.test(name) ? "html" : /\.xlsx$/i.test(name) ? "sheet" : "doc";
+        sendLlmArtifact({ name, path: absolutePath, size, kind, updated: true, sessionId: session });
+      };
       // world state：每轮都注入**完整**的环境事实（时间/联网/产物/余量）。
       //
       // **必须作为 user 消息片段注入，不能拼进 system prompt**（真实 key A/B 实测，见
@@ -1153,6 +1161,10 @@ function registerIpc(
             const after = await stat(resolved);
             // 让模型知道改完共几行 / 多大——据此判断是不是真的只动了那一处。
             const totalLines = outcome.text.split("\n").length;
+            // **必须推一次"更新"事件**（实测缺口）：此前只有 create_file 会推，
+            // 于是卡片上的大小停在旧值，已打开的预览面板也不会重载——
+            // 用户对着旧画面判断"还是坏的"，模型却说改好了。
+            notifyArtifactUpdated(resolved, safeName, after.size);
             return `已修改 ${safeName}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
           });
         },
@@ -1188,6 +1200,7 @@ function registerIpc(
             const after = await stat(resolved);
             const totalLines = outcome.text.split("\n").length;
             const at = outcome.lines.join("、");
+            notifyArtifactUpdated(resolved, safeName, after.size);
             return `已应用 ${params.edits.length} 处修改（第 ${at} 行；文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
           });
         },

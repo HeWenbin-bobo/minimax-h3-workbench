@@ -1518,10 +1518,28 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const offArtifact = window.h3.onLlmArtifact((event) => {
       const targetId = event.sessionId;
       if (!targetId) return;
-      setSessions((all) => patchLast(all, targetId, (msg) => ({
-        ...msg,
-        artifacts: [...(msg.artifacts ?? []), { name: event.name, path: event.path, size: event.size, kind: event.kind }]
-      })));
+      setSessions((all) => patchLast(all, targetId, (msg) => {
+        const existing = msg.artifacts ?? [];
+        // **编辑写回是"更新"不是"新增"**（实测缺口）：模型用 edit_artifact 改完文件后，
+        // 若仍按新增处理，气泡里会多出一张同名卡片、旧卡片继续显示旧大小。
+        // 按 path 就地替换，卡片数与文件数保持一致。
+        if (event.updated) {
+          return {
+            ...msg,
+            artifacts: existing.map((a) => a.path === event.path
+              ? { ...a, name: event.name, size: event.size, kind: event.kind }
+              : a)
+          };
+        }
+        return { ...msg, artifacts: [...existing, { name: event.name, path: event.path, size: event.size, kind: event.kind }] };
+      }));
+      // 已打开的预览面板同步换一份引用：html 走 URL 加载，path 不变就**不会重载**，
+      // 用户会继续看到改动前的旧画面（真机上会误判"还是坏的"）。
+      if (event.updated) {
+        setPreview((current) => current && current.path === event.path
+          ? { ...current, name: event.name, size: event.size, revision: (current.revision ?? 0) + 1 }
+          : current);
+      }
     });
     return () => { offChunk(); offDone(); offTasks(); offTool(); offCompaction(); offPlan(); offQuestion(); offArtifact(); };
   }, []);
@@ -2154,7 +2172,21 @@ export function extractArtifact(content: string): { kind: ArtifactKind; content:
   return undefined;
 }
 
-interface ArtifactInfo { name: string; path: string; size: number; kind: ArtifactKind; content: string }
+interface ArtifactInfo {
+  name: string;
+  path: string;
+  size: number;
+  kind: ArtifactKind;
+  content: string;
+  /**
+   * 修订号：文件被 edit_artifact 改写过一次就换一个值。
+   *
+   * 为什么不能只靠 path：预览 iframe 走 `h3preview:` **按 URL 加载**，
+   * path 没变就不会重新请求，用户会一直看到改动前的旧画面
+   * （真机上这会让人误判"模型没改好"）。把它放进 iframe 的 key 与读取依赖里。
+   */
+  revision?: number;
+}
 
 /**
  * 同名产物的多个版本折叠成「最新一版 + 旧版本」。
@@ -2306,7 +2338,8 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
     // 依赖里带 nonce：点「↻ 重新加载」时要**真的重新读盘**。
     // 此前 nonce 只用于重挂载 DOM，表格/文档读到的是 state 里的旧内容——按钮点了像没反应
     // （只有 html 分支因为 iframe 重新加载才真的刷新）。
-  }, [artifact.path, needsContent, nonce]);
+    // **revision**：文件被 edit_artifact 改写后，path 不变但内容变了，必须重读。
+  }, [artifact.path, artifact.revision, needsContent, nonce]);
   const content = artifact.content || diskContent || "";
   const dragRef = useRef<{ startX: number; startWidth: number } | undefined>(undefined);
   // 拖拽中的最新宽度：松手时用它落盘（不依赖闭包里过期的 width）。
@@ -2379,7 +2412,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
         预览页的内联脚本会被拦掉（游戏跑不起来）。sandbox 保持 allow-scripts：不透明源，
         拿不到宿主 DOM 与 window.h3.* 的 IPC 面。 */}
     {artifact.kind === "html" && <iframe
-      key={nonce}
+      key={`${nonce}:${artifact.revision ?? 0}`}
       ref={frameRef}
       className="pg-preview-frame"
       sandbox="allow-scripts"

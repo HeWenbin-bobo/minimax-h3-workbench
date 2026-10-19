@@ -1088,9 +1088,23 @@ function registerIpc(
           const safeName = path.basename(String(params.name || "").trim());
           const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
           if (!resolved) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
-          // xlsx 是二进制，读成文本没有意义——明确告知而不是吐乱码。
-          if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，无法按文本读取；请用预览面板查看。");
-          const raw = await readFile(resolved, "utf8");
+          // xlsx 是二进制，但**不能因此拒绝**（实测真机，表格案例）：模型好不容易
+          // 生成出 xlsx，却完全无法核验内容——`read_artifact` 抛"二进制"、
+          // `inspect_artifact` 又只收 html，于是"文件已生成"对它来说是个从未看过的黑盒。
+          // 用 SheetJS 反解成 CSV 再按文本读（与预览面板同一套转换，不新增依赖）。
+          let raw: string;
+          if (/\.xlsx$/i.test(resolved)) {
+            const XLSX = await loadXlsx();
+            try {
+              const book = XLSX.readFile(resolved);
+              const first = book.SheetNames[0];
+              raw = first ? XLSX.utils.sheet_to_csv(book.Sheets[first]) : "";
+            } catch (error) {
+              throw new Error(`表格文件已损坏或格式不受支持，无法读取（${error instanceof Error ? error.message : "未知错误"}）。`);
+            }
+          } else {
+            raw = await readFile(resolved, "utf8");
+          }
           // **按关键词定位优先**（实测真机）：模型要找某个函数却不知道在哪，
           // 于是把 2118 行的文件按 400 行一段连读 5 次，光找位置就吃掉 5 步。
           const keyword = String(params.keyword ?? "");

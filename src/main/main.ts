@@ -1224,8 +1224,11 @@ function registerIpc(
                 : "";
               // 行数同样以真实行数为准（大表格被截到 2000 行时，
               // `raw.split("\n").length` 只有 ~2002，与正文里的"表格共 5001 行"打架）。
+              // "只载入了前 N 行"也用 `readableRows`（= MAX_ROWS），
+              // 不能拿 `raw.split("\n").length - 1` 反推——`raw` 末尾还拼着说明段，会多算一行。
               const keywordTotal = realRowCount ?? raw.split("\n").length;
-              return `${nameLead}在 ${found.name}（共 ${keywordTotal} 行${realRowCount !== undefined ? `，只载入了前 ${raw.split("\n").length - 1} 行` : ""}）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}${keywordGutterNote}`;
+              const readableNote = realRowCount !== undefined && readableRows !== undefined ? `，只载入了前 ${readableRows} 行` : "";
+              return `${nameLead}在 ${found.name}（共 ${keywordTotal} 行${readableNote}）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}${keywordGutterNote}`;
             }
             const more = hits.total > hits.matches.length ? `\n（共 ${hits.total} 处命中，只显示前 ${hits.matches.length} 处。）` : "";
             // 命中行本身可能极长（压缩过的 HTML 一行几十万字符），`findMatchingLines`

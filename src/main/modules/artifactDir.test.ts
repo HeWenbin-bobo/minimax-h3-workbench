@@ -78,6 +78,19 @@ describe("artifactNameCandidates（无扩展名补全）", () => {
     expect(artifactNameCandidates("报告.md")).toEqual(["报告.md"]);
   });
 
+  // 实测死路：`create_file(kind:"csv", name:"data.csv")` 落盘会被强制改成 `data.xlsx`
+  // （工具层把 kind 改写为 xlsx，saveArtifactFile 再把名字里的 .csv 剥掉）。
+  // 模型随后 read_artifact("data.csv") 若只试 .csv，找的是一个**从来不存在**的文件，
+  // 而 data.xlsx 就躺在目录里——它只会收到"找不到产物"，然后重新生成一份重复的。
+  it("csv/tsv 顺带试 .xlsx（落盘时已被改写成 xlsx）", () => {
+    expect(artifactNameCandidates("data.csv")).toEqual(["data.csv", "data.xlsx"]);
+    expect(artifactNameCandidates("data.tsv")).toEqual(["data.tsv", "data.xlsx"]);
+  });
+
+  it("已经是 .xlsx 的名字不再多试（避免无谓 stat）", () => {
+    expect(artifactNameCandidates("data.xlsx")).toEqual(["data.xlsx"]);
+  });
+
   it("没有扩展名时按已知类型依次补全", () => {
     const got = artifactNameCandidates("科技新闻");
     expect(got[0]).toBe("科技新闻");

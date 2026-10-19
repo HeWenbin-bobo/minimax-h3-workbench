@@ -76,6 +76,12 @@ export function pickLatestVersion(entries: readonly string[], fileName: string):
  *
  * 规则：**有扩展名就只试它**（尊重模型明确指定的类型）；
  * 没有扩展名才按已知产物类型依次补全。
+ *
+ * **例外：csv/tsv 要顺带试 .xlsx**（实测死路）。`create_file` 把表格统一落成 `.xlsx`
+ * （`kind===csv` 在工具层就被改写成 `xlsx`，`saveArtifactFile` 还会把名字里的 `.csv` 剥掉），
+ * 于是模型说"做个 data.csv"、`read_artifact("data.csv")` 时，按"有扩展名只试它"去找
+ * `data.csv` ——**这个文件从来不存在**，可 `data.xlsx` 就躺在目录里。
+ * 模型收到的是一句"本会话里找不到产物"，只能重新生成一份重复的。
  */
 export function artifactNameCandidates(requestedName: string): string[] {
   const name = String(requestedName ?? "").trim();
@@ -84,9 +90,17 @@ export function artifactNameCandidates(requestedName: string): string[] {
   // `path.extname("v1.2 报告")` 返回 `".2 报告"`——名字里有点但并没有产物扩展名，
   // 那种情况仍然必须补全（单测「v1.2 报告」抓到的）。
   const ext = path.extname(name).toLowerCase();
-  if ((KNOWN_ARTIFACT_EXTS as readonly string[]).includes(ext)) return [name];
+  if ((KNOWN_ARTIFACT_EXTS as readonly string[]).includes(ext)) {
+    if (SHEET_ALIAS_EXTS.includes(ext as (typeof SHEET_ALIAS_EXTS)[number])) {
+      return [name, `${name.slice(0, name.length - ext.length)}.xlsx`];
+    }
+    return [name];
+  }
   return [name, ...KNOWN_ARTIFACT_EXTS.map((known) => `${name}${known}`)];
 }
+
+/** 在磁盘上永远成对出现的表格扩展名：请求其中任何一个，都要顺带找另一个。 */
+const SHEET_ALIAS_EXTS = [".csv", ".tsv"] as const;
 
 /** 与 `saveArtifactFile` 的 kind 白名单保持一致（新增 kind 时两边都要改）。 */
 export const KNOWN_ARTIFACT_EXTS = [".html", ".md", ".xlsx", ".csv", ".tsv"] as const;

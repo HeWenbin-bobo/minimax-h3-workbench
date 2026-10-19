@@ -542,7 +542,10 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
     const s = (await schemas()).generate_video;
     for (const value of [
       { prompt: "p", duration: 20, count: 9 },
-      { prompt: "p", duration: 6.5, count: 2 }
+      { prompt: "p", duration: 6.5, count: 2 },
+      // **字符串数字也要收**（实测同一类坑第十二处）：部分模型把数字写成 `"6"`，
+      // `z.number()` 会直接拒 → 整个调用被静默跳过。
+      { prompt: "p", duration: "6", count: "2" }
     ]) {
       const parsed = s.safeParse(value);
       expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);

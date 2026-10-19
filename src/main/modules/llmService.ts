@@ -1014,11 +1014,24 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           //
           // 而且这条约束本来就没有依据：`applyExactEdits` 对 1 条编辑照常工作，
           // "2 条以上才值得批量"是给模型的**建议**，不该做成硬校验。
-          })).min(1).max(20).describe("1–20 条修改。按数组顺序依次应用。")
+          // **上限也不要写成 `.max(20)`**（实测同类坑第十处）：模型一次给 25 条时同样会在
+          // `parseToolCall` 阶段被拒、整个调用被静默跳过。改在 execute 里截断（保留前 20 条）
+          // 并把"只应用了前 N 条"如实告知——少改几处总比整轮报废好。
+          })).describe("修改列表，建议 1–20 条（超过 20 条只应用前 20 条）。按数组顺序依次应用。").min(0)
         }),
         execute: async (params) => {
+          // 空数组：直接回一句可纠正的说明（而不是让 SDK 拒掉整个调用）。
+          if (params.edits.length === 0) {
+            return "没有可应用的修改：edits 是空数组。请把要改的内容写成至少一条 {oldText, newText}。";
+          }
+          const edits = params.edits.slice(0, 20);
           try {
-            return await callbacks.editArtifactBatch(params);
+            const result = await callbacks.editArtifactBatch({ ...params, edits });
+            // 截断要明说：否则模型以为 25 条都改了，后面自检会对着"没改的部分"困惑。
+            if (params.edits.length > edits.length) {
+              return `${result}\n（你给了 ${params.edits.length} 条修改，本次只应用了前 ${edits.length} 条。剩下的请再调用一次。）`;
+            }
+            return result;
           } catch (error) {
             return `批量修改失败：${describeError(error, "未知错误")}（文件未被改动）。可以先用 read_artifact 读回原文核对后再试。`;
           }

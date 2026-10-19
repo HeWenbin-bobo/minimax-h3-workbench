@@ -900,6 +900,7 @@ function registerIpc(
       // 或重新 getSecret()——那样读到的是"此刻"的值，会与轮开始时用的不一致。
       let agentSent = 0;
       let agentTaskCount = 0; // 本轮已建任务数：非 0 时不得整轮重试（否则会重复建任务）
+      let agentArtifactCount = 0; // 本轮已落盘产物数：用于收尾文案（见下面 1243 行附近）
       const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
       const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
       // world state：每轮都注入**完整**的环境事实（时间/联网/产物/余量）。
@@ -1021,6 +1022,7 @@ function registerIpc(
           const renderKind: "html" | "sheet" | "doc" =
             /\.html?$/i.test(saved.name) ? "html" : /\.xlsx$/i.test(saved.name) ? "sheet" : "doc";
           sendLlmArtifact({ name: saved.name, path: saved.path, size: saved.size, kind: renderKind, sessionId: session });
+          agentArtifactCount += 1;
           return `文件已生成并保存：${saved.name}（${saved.size >= 1024 * 1024 ? `${(saved.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(saved.size / 1024))}KB`}）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。**不要**把文件内容重复贴进回复——卡片已经承载了它。请用一两句话说明文件内容概要即可。`;
         },
         // inspect_artifact：把刚生成的网页**真的跑一遍**。
@@ -1241,8 +1243,21 @@ function registerIpc(
         return;
       }
       if (agentSent === 0 && result.toolCalls > 0) {
-        // 工具调成功了（任务卡片已经推给渲染端）但模型没再输出收尾文本：不能留空气泡让用户看到"（空回复）"。
-        chunk({ seq: 1, delta: "已按你的要求创建视频生成任务，结果卡片在下方实时显示，也可到「生成工作台」查看。" });
+        // 模型只调了工具、没输出收尾文本：不能留空气泡让用户看到"（空回复）"。
+        //
+        // **文案必须按"本轮实际发生了什么"来说**（实测真机踩到）：原来无条件写
+        // "已按你的要求创建视频生成任务，结果卡片在下方实时显示"，而那一轮模型
+        // 全程只在改 HTML（create_file / edit_artifact_batch），**一个视频任务都没建**——
+        // 用户被告知去下方看根本不存在的卡片。收尾文案说错事，比空着更糟。
+        const outcomes: string[] = [];
+        if (agentTaskCount > 0) outcomes.push(`${agentTaskCount} 个视频生成任务`);
+        if (agentArtifactCount > 0) outcomes.push(`${agentArtifactCount} 个文件`);
+        chunk({
+          seq: 1,
+          delta: outcomes.length > 0
+            ? `本轮已产出 ${outcomes.join("、")}，卡片在下方显示。`
+            : "本轮工具调用已结束，没有产生可展示的产物。"
+        });
       }
       // 撞上工具步数上限：模型还想继续干（最后一步 finishReason 仍是 tool-calls），是上限把它掐断的。
       // 不说明的话，用户看到的是一段**戛然而止**的回答，会以为软件卡了或模型答完了

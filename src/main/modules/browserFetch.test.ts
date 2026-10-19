@@ -179,6 +179,34 @@ describe("产物自检报告（formatProbeReport）", () => {
     expect(text).toContain("1 条错误、1 条警告");
   });
 
+  // 实测矛盾：数组被 MAX_LOGS(12) 截断，而同一句里的"共 N 条"用真实总数。
+  // 40 条里确实有报错、只是前 12 条恰好全是警告时，旧文案写
+  // 「运行时警告（没有 error，只有 warning；去重后共 40 条…）」——
+  // 模型据此告诉用户"只是警告，不影响运行"，而没列出来的那批里就有报错。
+  it("截断且前几条都是警告时，不能断言「没有 error」", () => {
+    const text = formatProbeReport({
+      loaded: true,
+      title: "warn-heavy",
+      consoleErrors: Array.from({ length: 12 }, (_, i) => `警告（第 ${i + 1} 行）：deprecated`),
+      consoleErrorTotal: 40,
+      canvases: [], textLength: 10, elementCount: 20
+    });
+    expect(text).not.toContain("没有 error");
+    expect(text).toContain("可能有报错");
+    // 也不能顺势给出"不必重写页面"的许可——没看到的那批还没展开。
+    expect(text).not.toContain("不必为了它们重写页面");
+  });
+
+  // 反向自检：**没截断**时仍要敢下"只有警告"的结论，不能一律变含糊。
+  it("没有截断且只有警告时，仍明确说「不必重写页面」", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "w", consoleErrors: ["警告：deprecated"],
+      canvases: [], textLength: 10, elementCount: 20
+    });
+    expect(text).toContain("没有 error");
+    expect(text).toContain("不必为了它们重写页面");
+  });
+
   it("无报错时明确区分「运行状态」与「画面效果」——不能让它宣称看过截图", () => {
     const text = formatProbeReport({
       loaded: true, title: "鹈鹕骑自行车", consoleErrors: [],

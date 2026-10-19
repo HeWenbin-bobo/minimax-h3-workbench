@@ -740,24 +740,38 @@ export function formatProbeReport(result: HtmlProbeResult): string {
     // **区分"报错"与"警告"**（实测）：控制台只有一条 `警告（第 3 行）：deprecated API` 时，
     // 报告写"运行时报错（共 1 条）"、摘要写"自检发现 1 条报错"——模型会去改一条
     // 根本不阻断运行的警告，还可能在回复里告诉用户"修好了一个报错"。
+    //
+    // **但统计只能代表"列出来的这 12 条"**（实测矛盾）：数组被 `MAX_LOGS` 截过，
+    // 而同一句里的"共 N 条"用的是**真实总数**。40 条里确实有报错、只是前 12 条恰好
+    // 全是警告时，旧文案会写「运行时警告（没有 error，只有 warning；去重后共 40 条…）」——
+    // 模型据此告诉用户"只是警告，不影响运行"，而后面那些没列出来的里就有报错。
+    // 所以一旦发生截断且没看到 error，就不能断言"没有 error"。
+    const truncated = total > shown;
     const errorCount = result.consoleErrors.filter((line) => line.startsWith("错误")).length;
     const warnCount = result.consoleErrors.filter((line) => line.startsWith("警告")).length;
     // **括号只能有一层**：摘要正则是"运行时X（…共 N 条"，嵌套括号会让它匹配不到，
     // 摘要于是退回兜底（实测：`运行时警告（没有 error…）（共 1 条）` → 摘要显示"自检完成"）。
     // 前缀必须自带开括号（`运行时报错（`），下面统一接 `共 N 条`——否则会拼出「（；共」。
     const label = errorCount > 0 && warnCount > 0
-      ? `运行时问题（${errorCount} 条错误、${warnCount} 条警告；`
+      ? `运行时问题（前 ${shown} 条里有 ${errorCount} 条错误、${warnCount} 条警告；`
       : errorCount > 0
         ? "运行时报错（"
-        : "运行时警告（没有 error，只有 warning；";
-    const head = total > shown
+        : truncated
+          // 截断了且前 N 条全是警告：**不能替没看到的部分下结论**。
+          // 「还有没有 error」写成"无法确定"，模型才会去修根因、看剩余的那一批。
+          ? `运行时警告（前 ${shown} 条都是 warning，但还有 ${total - shown} 条没列出来，其中**可能有报错**；`
+          : "运行时警告（没有 error，只有 warning；";
+    const head = truncated
       ? `${label}去重后共 ${total} 条，下面只列出前 ${shown} 条——同一类问题往往成片出现，修掉根因后重新自检看剩余）：`
       : `${label}共 ${total} 条，已去重）：`;
     lines.push(head);
     for (const entry of result.consoleErrors) lines.push(`- ${entry}`);
+    // 同理：截断时不能说"这些只是警告、不必重写"——没列出来的那批可能有真报错。
     lines.push(errorCount > 0
       ? "请针对这些报错修改后重新生成，并在回复里说明修了什么。"
-      : "这些只是警告、通常不影响运行：**不必为了它们重写页面**，如实告诉用户存在哪些警告即可。");
+      : truncated
+        ? "没看到 error 只代表**列出来的这些**；其余条目尚未展开，请先修掉根因（同一类问题往往成片出现）再重新自检，不要据此宣布页面正常。"
+        : "这些只是警告、通常不影响运行：**不必为了它们重写页面**，如实告诉用户存在哪些警告即可。");
   } else if (flatScreen) {
     lines.push("控制台没有 error/warning，但上面的画面采样说明屏幕是空的——**不要**据此告诉用户页面正常。");
   } else if (result.canvases.length === 0 && result.textLength === 0) {

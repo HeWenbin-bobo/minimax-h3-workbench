@@ -558,6 +558,10 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       // 故这里只取"运行时X（…共 N 条"这一段，用 [^）]* 限制在同一层括号内。
       const errors = /运行时(?:报错|警告|问题)（[^）]*?共\s*(\d+)\s*条/.exec(output)?.[1];
       if (errors) {
+        // **截断且前几条全是警告时不能替其余部分下结论**（与报告正文同一处坑）：
+        // 报告正文已改写成"其中可能有报错"，摘要若仍写"40 条警告（无报错）"，
+        // 用户和模型看到的结论又回到"只是警告"——等于把刚修好的矛盾搬到摘要层。
+        if (/可能有报错/.test(output)) return `自检发现 ${errors} 条控制台问题（前几条是警告，其余可能含报错）`;
         // 只有警告时不该说"发现 N 条报错"——模型会去改一条不阻断运行的警告。
         return /运行时警告/.test(output) ? `自检发现 ${errors} 条警告（无报错）` : `自检发现 ${errors} 条报错`;
       }

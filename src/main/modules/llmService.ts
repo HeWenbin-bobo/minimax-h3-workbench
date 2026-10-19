@@ -582,6 +582,17 @@ export interface AgentRunResult {
    * 是步数上限把它掐断的（自然收尾会是 `stop`）。
    */
   hitStepLimit: boolean;
+  /**
+   * 本轮有多少次工具调用**根本没有被执行**（参数 JSON 解析失败/被硬截断）。
+   *
+   * 实测（probe-truncated-toolcall）：上游连续返回断成半截的参数时，SDK 只把
+   * toolCall 记进历史、**不执行**它——`onToolExecutionStart/End` 都不触发，
+   * 于是界面上"工具步骤"一片空白、20 步预算全部耗尽，
+   * 用户最后只看到一句"本轮工具调用已结束，没有产生可展示的产物"。
+   * 模型那边则以为"内容太长被截断"，反复重写、越写越短。
+   * 调用方据此给出可行动提示（而不是让用户对着空白猜）。
+   */
+  skippedToolCalls: number;
   usage?: { inputTokens: number };
 }
 
@@ -1051,12 +1062,27 @@ export async function chatAgent(
     }
   }
   let lastFinishReason: string | undefined;
+  /** 被 SDK **跳过**的工具调用数：调用了，但参数解析失败 → 根本没执行。 */
+  let skippedToolCalls = 0;
   try {
     // ai v7 的 steps 是 PromiseLike<Array<StepResult>>——await 后按步累计工具调用数。
     const steps = await stream.steps;
     for (const step of steps) {
       toolCalls += step.toolCalls.length;
       lastFinishReason = step.finishReason;
+      // **参数 JSON 断在半截时，SDK 只记录 toolCall、不执行它**（没有 toolResult），
+      // 于是 onToolExecutionStart/End 都不触发。实测（probe-truncated-toolcall）：
+      // 上游连续 20 步都返回截断参数 → 界面**工具步骤一片空白**、20 步全部耗尽，
+      // 用户只看到"本轮工具调用已结束，没有产生可展示的产物"。
+      // 模型那边则以为"内容太长被截断"，反复重写、越写越短（CLAUDE.md 记过这个坑）。
+      //
+      // **`toolResults` 可能整个缺失**（部分 provider 组合不产出它）——那时按"都执行了"算，
+      // 只在**有明确证据**（toolResults 存在但少于 toolCalls）时才报"被跳过"，
+      // 不能因为字段不存在就误报一批"没有真正执行"（单测已抓到过这个错）。
+      const results = (step as { toolResults?: unknown[] }).toolResults;
+      if (Array.isArray(results)) {
+        skippedToolCalls += Math.max(0, step.toolCalls.length - results.length);
+      }
     }
   } catch {
     // steps 不可用时按 0 计（部分 provider 组合不产 steps）。
@@ -1078,7 +1104,7 @@ export async function chatAgent(
   } catch {
     // usage 不可用不影响本轮结果。
   }
-  return { textLength, toolCalls, hitStepLimit: lastFinishReason === "tool-calls", usage };
+  return { textLength, toolCalls, hitStepLimit: lastFinishReason === "tool-calls", skippedToolCalls, usage };
 }
 
 /**

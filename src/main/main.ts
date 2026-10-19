@@ -1323,6 +1323,18 @@ function registerIpc(
       if (result.hitStepLimit) {
         chunk({ seq: 1, delta: `\n\n---\n（本轮工具调用已达 ${MAX_AGENT_STEPS} 步上限，任务可能还没做完。回复「继续」我就接着往下做；如果已经有可用的产物，也可以直接先看那个。）` });
       }
+      // **工具调用被整批跳过**（参数 JSON 解析失败 / 被上游硬截断）：
+      // 实测（probe-truncated-toolcall）——上游连续 20 步都返回断成半截的参数，
+      // SDK 只把 toolCall 记进历史、**不执行**，所以 onToolExecutionStart/End 都不触发。
+      // 结果是：工具步骤一片空白、20 步耗尽，用户只看到"没有产生可展示的产物"，
+      // 完全不知道发生了什么；模型那边则以为"内容太长"，反复重写、越写越短。
+      // 必须明说，并给出**可行动**的下一步（CLAUDE.md：出错必须让人看见）。
+      if (result.skippedToolCalls > 0) {
+        chunk({
+          seq: 1,
+          delta: `\n\n---\n（本轮有 ${result.skippedToolCalls} 次工具调用**没有真正执行**——模型生成的调用参数不完整，通常是单次输出被上游截断。建议：把任务拆小一点（比如先要一个小样式的页面，再逐步加功能），或换一个输出上限更高的模型重试。）`
+        });
+      }
       // 服务端 usage 落账：本轮实测的输入 token 数 + 当时的消息条数，作为下次压缩判定的锚点。
       // 拿不到 usage 时不写样本——下一轮自动回落到字符估算（估算值不覆盖已有的服务端样本）。
       if (result.usage) {

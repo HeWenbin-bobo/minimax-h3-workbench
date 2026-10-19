@@ -780,8 +780,8 @@ export async function chatAgent(
           // 建议范围写在 describe 里，让模型看到；越界值由代码兜住而不是让整轮失败。
           // 连 `.int()` 也不加：模型给 6.5 秒同样会被 `parseToolCall` 拒掉并静默跳过，
           // 而下游 `Math.round` 本来就会处理小数。
-          duration: z.number().describe("时长秒数，建议 4–15（越界会被自动夹到合法值）。用户没说就按 6。"),
-          count: z.number().describe("生成数量，建议 1–4（越界会被自动夹到合法值）。用户没说就按 1。")
+          duration: z.coerce.number().describe("时长秒数，建议 4–15（越界会被自动夹到合法值）。用户没说就按 6。"),
+          count: z.coerce.number().describe("生成数量，建议 1–4（越界会被自动夹到合法值）。用户没说就按 1。")
         }),
         // 与其他工具一致：失败要变成**给模型的说明**，而不是抛出。
         // `orchestrator.submit` 会做参数校验并抛中文错误（未保存卡密、RB 预设只收 4/6/8 秒、
@@ -856,8 +856,8 @@ export async function chatAgent(
           // 整个调用被**静默跳过**（收不到回执 → 反复重试 → 步数烧光）。
           // 而 `sliceWithLineNumbers` 本来就会夹紧（0 → 1、小数 → 向下取整、越界 → 文件末尾），
           // 所以这里只需要"能收 null 的数字"；"1 起算"写进 describe 即可。
-          startLine: z.number().nullish().describe("起始行（1 起算，含；越界会被夹紧）。省略则从第 1 行开始。"),
-          endLine: z.number().nullish().describe("结束行（含；越界会被夹紧）。省略则读到文件末尾。一次建议不超过 400 行。")
+          startLine: z.coerce.number().nullish().describe("起始行（1 起算，含；越界会被夹紧）。省略则从第 1 行开始。"),
+          endLine: z.coerce.number().nullish().describe("结束行（含；越界会被夹紧）。省略则读到文件末尾。一次建议不超过 400 行。")
         }),
         execute: async (params) => {
           try {

@@ -154,9 +154,29 @@ describe("产物自检报告（formatProbeReport）", () => {
     const text = formatProbeReport({
       loaded: true, title: "x", consoleErrors: ["错误：a", "错误：b"],
       canvases: [], textLength: 10, elementCount: 20
-    });
-    expect(text).toContain("共 2 条，已去重");
+    });    expect(text).toContain("共 2 条，已去重");
     expect(text).not.toContain("只列出前");
+  });
+
+  // 实测：控制台只有一条 `警告（第 3 行）：deprecated API` 时，
+  // 报告写"运行时报错（共 1 条）"、摘要写"自检发现 1 条报错"——
+  // 模型会去改一条根本不阻断运行的警告，还会告诉用户"修好了一个报错"。
+  it("只有警告时说「警告」，不说成报错", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "w", consoleErrors: ["警告（第 3 行）：deprecated API"],
+      canvases: [], textLength: 10, elementCount: 20
+    });
+    expect(text).toContain("运行时警告");
+    expect(text).not.toContain("运行时报错");
+    expect(text).toContain("不必为了它们重写页面");
+  });
+
+  it("错误与警告混在一起时分开计数", () => {
+    const text = formatProbeReport({
+      loaded: true, title: "mix", consoleErrors: ["错误：boom", "警告：meh"],
+      canvases: [], textLength: 10, elementCount: 20
+    });
+    expect(text).toContain("1 条错误、1 条警告");
   });
 
   it("无报错时明确区分「运行状态」与「画面效果」——不能让它宣称看过截图", () => {

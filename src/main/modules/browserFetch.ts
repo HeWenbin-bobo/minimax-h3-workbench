@@ -618,12 +618,27 @@ export function formatProbeReport(result: HtmlProbeResult): string {
     // 改完这 12 条就宣布通过——用户打开还是报错。
     const total = Math.max(result.consoleErrorTotal ?? result.consoleErrors.length, result.consoleErrors.length);
     const shown = result.consoleErrors.length;
+    // **区分"报错"与"警告"**（实测）：控制台只有一条 `警告（第 3 行）：deprecated API` 时，
+    // 报告写"运行时报错（共 1 条）"、摘要写"自检发现 1 条报错"——模型会去改一条
+    // 根本不阻断运行的警告，还可能在回复里告诉用户"修好了一个报错"。
+    const errorCount = result.consoleErrors.filter((line) => line.startsWith("错误")).length;
+    const warnCount = result.consoleErrors.filter((line) => line.startsWith("警告")).length;
+    // **括号只能有一层**：摘要正则是"运行时X（…共 N 条"，嵌套括号会让它匹配不到，
+    // 摘要于是退回兜底（实测：`运行时警告（没有 error…）（共 1 条）` → 摘要显示"自检完成"）。
+    // 前缀必须自带开括号（`运行时报错（`），下面统一接 `共 N 条`——否则会拼出「（；共」。
+    const label = errorCount > 0 && warnCount > 0
+      ? `运行时问题（${errorCount} 条错误、${warnCount} 条警告；`
+      : errorCount > 0
+        ? "运行时报错（"
+        : "运行时警告（没有 error，只有 warning；";
     const head = total > shown
-      ? `运行时报错（去重后共 ${total} 条，下面只列出前 ${shown} 条——同一类错误往往成片出现，修掉根因后重新自检看剩余）：`
-      : `运行时报错（共 ${total} 条，已去重）：`;
+      ? `${label}去重后共 ${total} 条，下面只列出前 ${shown} 条——同一类问题往往成片出现，修掉根因后重新自检看剩余）：`
+      : `${label}共 ${total} 条，已去重）：`;
     lines.push(head);
     for (const entry of result.consoleErrors) lines.push(`- ${entry}`);
-    lines.push("请针对这些报错修改后重新生成，并在回复里说明修了什么。");
+    lines.push(errorCount > 0
+      ? "请针对这些报错修改后重新生成，并在回复里说明修了什么。"
+      : "这些只是警告、通常不影响运行：**不必为了它们重写页面**，如实告诉用户存在哪些警告即可。");
   } else if (flatScreen) {
     lines.push("控制台没有 error/warning，但上面的画面采样说明屏幕是空的——**不要**据此告诉用户页面正常。");
   } else if (result.canvases.length === 0 && result.textLength === 0) {

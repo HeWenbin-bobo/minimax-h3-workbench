@@ -347,6 +347,26 @@ function extractApiErrorMessage(body: string): string {
 
 // ---------- 智能体模式（Vercel AI SDK 工具循环，Codex/Claude Code 形态） ----------
 
+/**
+ * 把模型给的"数字"收敛成有限数。**不能只靠 `z.coerce.number()`**（实测缺口）：
+ * `Number("8 秒")` / `Number("8s")` / `Number("六秒")` 全是 `NaN`，
+ * 而 zod 的 `number()` 会直接拒掉 `NaN` → `parseToolCall` 抛 `InvalidToolInputError`
+ * → 整个调用被**静默跳过**（收不到回执 → 反复重试 → 20 步烧光）。
+ * 探针实测：`duration: "8 秒"` 让 generate_video 连续 20 次没执行。
+ *
+ * 这些值下游本来就会夹取（`clampDurationForBackend` 先 `Math.round` 再夹 4–15；
+ * `sliceWithLineNumbers` 也会夹紧），所以这里"能读出来就用，读不出才当没给"。
+ */
+function toFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  // 取第一个数字（含小数）：`"8 秒"` → 8、`"约 6.5s"` → 6.5、`"2 路"` → 2。
+  const match = /-?\d+(?:\.\d+)?/.exec(value);
+  if (!match) return undefined;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export interface AgentToolCallbacks {
   /** 联网搜索工具：返回参考段落（未配置搜索 API 时抛错）。 */
   webSearch: (query: string) => Promise<string>;
@@ -780,8 +800,12 @@ export async function chatAgent(
           // 建议范围写在 describe 里，让模型看到；越界值由代码兜住而不是让整轮失败。
           // 连 `.int()` 也不加：模型给 6.5 秒同样会被 `parseToolCall` 拒掉并静默跳过，
           // 而下游 `Math.round` 本来就会处理小数。
-          duration: z.coerce.number().describe("时长秒数，建议 4–15（越界会被自动夹到合法值）。用户没说就按 6。"),
-          count: z.coerce.number().describe("生成数量，建议 1–4（越界会被自动夹到合法值）。用户没说就按 1。")
+          // **不要写成 `z.coerce.number()`**（实测同一类坑第十三处）：`Number("8 秒")` 是 NaN，
+          // zod 直接拒掉 NaN → 整个调用被静默跳过。探针实测 `duration: "8 秒"` 让
+          // generate_video 连续 20 次没执行、20 步预算烧光。下游 `clampDurationForBackend`
+          // 本来就会 Math.round + 夹取，所以这里只要能收下字符串，值交给 `toFiniteNumber` 归一。
+          duration: z.union([z.number(), z.string()]).describe("时长秒数，建议 4–15（越界会被自动夹到合法值）。用户没说就按 6。"),
+          count: z.union([z.number(), z.string()]).describe("生成数量，建议 1–4（越界会被自动夹到合法值）。用户没说就按 1。")
         }),
         // 与其他工具一致：失败要变成**给模型的说明**，而不是抛出。
         // `orchestrator.submit` 会做参数校验并抛中文错误（未保存卡密、RB 预设只收 4/6/8 秒、
@@ -790,7 +814,15 @@ export async function chatAgent(
         // 看到的还是一句"智能体模式请求失败"。返回文本则模型能据实告诉用户该去补什么。
         execute: async (params) => {
           try {
-            return await callbacks.generateVideo(params);
+            // 字符串数字（`"8 秒"` / `"2 路"`）在这里归一；读不出就按"没给"，
+            // 由下游 `clampDurationForBackend` 用自己的默认值（6 秒 / 1 路）。
+            const duration = toFiniteNumber(params.duration);
+            const count = toFiniteNumber(params.count);
+            return await callbacks.generateVideo({
+              prompt: params.prompt,
+              duration: duration ?? 6,
+              count: count ?? 1
+            });
           } catch (error) {
             return `创建视频任务失败：${describeError(error, "未知错误")}。请如实告诉用户失败原因和需要先补什么（例如到「连接设置」保存对应后端的密钥/卡密），不要假装任务已创建，也不要重复调用本工具重试。`;
           }
@@ -861,8 +893,11 @@ export async function chatAgent(
           // 整个调用被**静默跳过**（收不到回执 → 反复重试 → 步数烧光）。
           // 而 `sliceWithLineNumbers` 本来就会夹紧（0 → 1、小数 → 向下取整、越界 → 文件末尾），
           // 所以这里只需要"能收 null 的数字"；"1 起算"写进 describe 即可。
-          startLine: z.coerce.number().nullish().describe("起始行（1 起算，含；越界会被夹紧）。省略则从第 1 行开始。"),
-          endLine: z.coerce.number().nullish().describe("结束行（含；越界会被夹紧）。省略则读到文件末尾。一次建议不超过 400 行。")
+          // **不要 `z.coerce.number()`**（与 duration 同一处实测缺口）：`"第 3 行"` / `"3-5"`
+          // 会让 Number() 得到 NaN，zod 拒掉 NaN → 整个调用静默跳过。
+          // 收字符串 + `toFiniteNumber` 归一（`sliceWithLineNumbers` 本来就会夹紧）。
+          startLine: z.union([z.number(), z.string()]).nullish().describe("起始行（1 起算，含；越界会被夹紧）。省略则从第 1 行开始。"),
+          endLine: z.union([z.number(), z.string()]).nullish().describe("结束行（含；越界会被夹紧）。省略则读到文件末尾。一次建议不超过 400 行。")
         }),
         execute: async (params) => {
           // 空文件名：**回一句可纠正的说明**，不要让整轮失效（见 schema 处说明）。
@@ -876,8 +911,9 @@ export async function chatAgent(
             return await callbacks.readArtifact({
               name: params.name,
               keyword,
-              startLine: typeof params.startLine === "number" ? params.startLine : undefined,
-              endLine: typeof params.endLine === "number" ? params.endLine : undefined
+              // 行号同理：`"第 3 行"` / `"3-100"` 也要能读成一个数（见 schema 处说明）。
+              startLine: toFiniteNumber(params.startLine),
+              endLine: toFiniteNumber(params.endLine)
             });
           } catch (error) {
             return `读取产物失败：${describeError(error, "未知错误")}。可以先确认文件名（带扩展名）是否与 create_file 生成的一致。`;

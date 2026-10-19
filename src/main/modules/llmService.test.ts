@@ -545,7 +545,23 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
       { prompt: "p", duration: 6.5, count: 2 },
       // **字符串数字也要收**（实测同一类坑第十二处）：部分模型把数字写成 `"6"`，
       // `z.number()` 会直接拒 → 整个调用被静默跳过。
-      { prompt: "p", duration: "6", count: "2" }
+      { prompt: "p", duration: "6", count: "2" },
+      // **带单位的字符串更常见**（实测第十三处）：`"8 秒"` / `"2 路"` 用
+      // `z.coerce.number()` 会得到 NaN，zod 拒掉 NaN → generate_video 连续 20 次没执行。
+      { prompt: "p", duration: "8 秒", count: "2 路" },
+      { prompt: "p", duration: "约 6.5s", count: "1" }
+    ]) {
+      const parsed = s.safeParse(value);
+      expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
+
+  it("read_artifact：行号写成带单位/范围的中文也收（值由代码归一）", async () => {
+    const s = (await schemas()).read_artifact;
+    for (const value of [
+      { name: "a.html", startLine: "第 3 行" },
+      { name: "a.html", startLine: "3-100", endLine: "120" },
+      { name: "a.html", startLine: 0, endLine: 9999 }
     ]) {
       const parsed = s.safeParse(value);
       expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);

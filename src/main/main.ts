@@ -1208,6 +1208,13 @@ function registerIpc(
           const nameNote = describeArtifactFallback(found.fellBack, safeName, found.name, "read");
           const nameLead = nameNote ? `${nameNote}\n` : "";
           if (keyword) {
+            // **范围参数会被忽略，必须说出来**（实测缺口）：`keyword` 分支是全文搜索、
+            // 提前 return，所以同时给了 `startLine/endLine` 时那两个参数**完全没起作用**。
+            // 不说的话模型会以为"我在第 100–200 行里搜的"，然后对着范围外的命中困惑
+            // （它甚至会据此判断"这个函数不在这段里"）。
+            const ignoredRange = params.startLine !== undefined || params.endLine !== undefined
+              ? "\n（注意：你同时给了 keyword 和行号范围。**范围被忽略了**——keyword 是全文搜索。只按范围读请不要给 keyword。）"
+              : "";
             // **不能叫 `found`**：外层 `found` 是"解析出的实际文件"，同名会遮蔽它，
             // 下面回执就会退回用请求名（`safeName`），模型看到的名字与实际读的文件对不上。
             const hits = findMatchingLines(raw, keyword);
@@ -1228,7 +1235,7 @@ function registerIpc(
               // 不能拿 `raw.split("\n").length - 1` 反推——`raw` 末尾还拼着说明段，会多算一行。
               const keywordTotal = realRowCount ?? raw.split("\n").length;
               const readableNote = realRowCount !== undefined && readableRows !== undefined ? `，只载入了前 ${readableRows} 行` : "";
-              return `${nameLead}在 ${found.name}（共 ${keywordTotal} 行${readableNote}）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}${keywordGutterNote}`;
+              return `${nameLead}在 ${found.name}（共 ${keywordTotal} 行${readableNote}）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}${keywordGutterNote}${ignoredRange}`;
             }
             const more = hits.total > hits.matches.length ? `\n（共 ${hits.total} 处命中，只显示前 ${hits.matches.length} 处。）` : "";
             // 命中行本身可能极长（压缩过的 HTML 一行几十万字符），`findMatchingLines`
@@ -1246,7 +1253,7 @@ function registerIpc(
                     : "要精确的 oldText，请用 startLine/endLine 读那一段原文；keyword 只用来定位。"
                 }）`
               : "";
-            return `${nameLead}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。${keywordGutterNote}`;
+            return `${nameLead}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。${keywordGutterNote}${ignoredRange}`;
           }
           const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
           // **显示用的总行数**：大表格被截到 2000 行后，`raw.split("\n")` 只有 ~2002 行，

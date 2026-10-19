@@ -1253,7 +1253,14 @@ function registerIpc(
                     : "要精确的 oldText，请用 startLine/endLine 读那一段原文；keyword 只用来定位。"
                 }）`
               : "";
-            return `${nameLead}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。${keywordGutterNote}${ignoredRange}`;
+            // **大表格只载入了前 2000 行时，命中结果也要说明这一点**（实测缺口）：
+            // 未命中的分支已经写了"只载入了前 N 行"，命中分支却没有——
+            // 而模型的真实风险恰恰在命中这边：它找到 1 处就以为"全文只有这一点"，
+            // 后面的 3000 行根本没参与搜索。
+            const partialNote = realRowCount !== undefined && readableRows !== undefined
+              ? `\n（注意：这个表格共 ${realRowCount} 行，但搜索只在**前 ${readableRows} 行**里进行。${realRowCount > readableRows ? "后面的行没有载入，可能还有别的命中。" : ""}）`
+              : "";
+            return `${nameLead}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}${partialNote}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。${keywordGutterNote}${ignoredRange}`;
           }
           const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
           // **显示用的总行数**：大表格被截到 2000 行后，`raw.split("\n")` 只有 ~2002 行，

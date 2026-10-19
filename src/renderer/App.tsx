@@ -1518,21 +1518,30 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const offArtifact = window.h3.onLlmArtifact((event) => {
       const targetId = event.sessionId;
       if (!targetId) return;
-      setSessions((all) => patchLast(all, targetId, (msg) => {
-        const existing = msg.artifacts ?? [];
-        // **编辑写回是"更新"不是"新增"**（实测缺口）：模型用 edit_artifact 改完文件后，
-        // 若仍按新增处理，气泡里会多出一张同名卡片、旧卡片继续显示旧大小。
-        // 按 path 就地替换，卡片数与文件数保持一致。
-        if (event.updated) {
-          return {
-            ...msg,
-            artifacts: existing.map((a) => a.path === event.path
-              ? { ...a, name: event.name, size: event.size, kind: event.kind }
-              : a)
-          };
-        }
-        return { ...msg, artifacts: [...existing, { name: event.name, path: event.path, size: event.size, kind: event.kind }] };
-      }));
+      // **更新要扫整个会话，不能只看最后一条消息**：
+      // 模型在**新一轮**里改上一轮产出的文件时（"把刚才那个页面再改一下"），
+      // 那张卡片挂在更早的助手消息上。若仍用 patchLast，map 找不到匹配项 →
+      // 静默什么都不做，旧卡片永远停在旧大小。新建才追加到当前（最后一条）消息。
+      if (event.updated) {
+        setSessions((all) => all.map((session) => session.id !== targetId ? session : {
+          ...session,
+          messages: session.messages.map((msg) => {
+            const existing = msg.artifacts ?? [];
+            if (!existing.some((a) => a.path === event.path)) return msg;
+            return {
+              ...msg,
+              artifacts: existing.map((a) => a.path === event.path
+                ? { ...a, name: event.name, size: event.size, kind: event.kind }
+                : a)
+            };
+          })
+        }));
+      } else {
+        setSessions((all) => patchLast(all, targetId, (msg) => ({
+          ...msg,
+          artifacts: [...(msg.artifacts ?? []), { name: event.name, path: event.path, size: event.size, kind: event.kind }]
+        })));
+      }
       // 已打开的预览面板同步换一份引用：html 走 URL 加载，path 不变就**不会重载**，
       // 用户会继续看到改动前的旧画面（真机上会误判"还是坏的"）。
       if (event.updated) {

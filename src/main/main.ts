@@ -151,7 +151,7 @@ app.whenReady().then(async () => {
     // 先解析符号链接再判白名单：只比对 path.resolve 的结果挡不住"目录内放一个软链指向外部"。
     const resolved = await resolveWithinRoot(await allowedMediaRoot(), requestedPath);
     // 用户改过输出目录后，历史结果仍留在原目录——按任务记录放行，否则整个历史都变成打不开的死链。
-    if (!resolved && !knownOutputPaths(orchestrator).has(normalizeForCompare(requestedPath))) {
+    if (!resolved && !(await knownOutputPaths(orchestrator)).has(normalizeForCompare(requestedPath))) {
       return new Response("Path outside output directory", { status: 403 });
     }
     const filePath = resolved ?? path.resolve(requestedPath);
@@ -1702,7 +1702,7 @@ function registerIpc(
       return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
     });
     // 同 h3media：改过输出目录后，历史结果仍应能"在文件夹中显示"。
-    if (!insideRoot && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) {
+    if (!insideRoot && !(await knownOutputPaths(orchestrator)).has(normalizeForCompare(resolved))) {
       throw new Error("只能打开输出目录或 ComfyUI 模型目录中的位置。");
     }
     // `showItemInFolder` 对**已不存在的路径是静默空操作**：渲染端拿到 ok:true、
@@ -2095,11 +2095,22 @@ async function loadXlsx(): Promise<typeof import("xlsx")> {
 
 // h3media / showItem 白名单的补充放行集合：本应用自己产出过的结果路径。// 用户改过输出目录后，历史结果仍留在旧目录；只认当前目录会让历史视频全部变成打不开的死链。
 // 安全性不降：放行的只是任务记录里记着的、由本应用写出的文件，渲染端仍无法随意读本地文件。
-function knownOutputPaths(orchestrator: GenerationOrchestrator): Set<string> {
+//
+// **必须同时收录"拼接路径"与"realpath"两种写法**（实测回归）：任务记录里存的是当时
+// `path.join(outputDirectory, …)` 的结果；而调用方现在可能拿 realpath 来比
+// （产物事件已统一成 realpath，`showItem` 的候选也 realpath 过）。
+// 当输出目录本身在符号链接/junction 下（macOS `/var`→`/private/var`、Windows 挪盘）时，
+// 两种写法不相等 → 历史文件被判越界，📁 与 h3media 都会拒绝。放行集合本身仍然只含
+// 任务记录里的那些文件，安全性不变。
+async function knownOutputPaths(orchestrator: GenerationOrchestrator): Promise<Set<string>> {
   const paths = new Set<string>();
-  for (const task of [...orchestrator.list(), ...orchestrator.listDeleted()]) {
-    if (task.outputPath) paths.add(normalizeForCompare(task.outputPath));
-  }
+  const recorded = [...orchestrator.list(), ...orchestrator.listDeleted()]
+    .map((task) => task.outputPath)
+    .filter((value): value is string => Boolean(value));
+  for (const filePath of recorded) paths.add(normalizeForCompare(filePath));
+  // realpath 只在文件仍存在时成功；已删除的历史文件退回拼接写法即可。
+  const real = await Promise.all(recorded.map((filePath) => realpath(filePath).catch(() => undefined)));
+  for (const filePath of real) if (filePath) paths.add(normalizeForCompare(filePath));
   return paths;
 }
 

@@ -991,7 +991,9 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
         inputSchema: z.object({
           name: z.string().min(1).describe("要修改的产物文件名，带扩展名。"),
           edits: z.array(z.object({
-            oldText: z.string().min(1).describe("被替换的原文，逐字符一致且在（前序修改后的）文件中唯一。"),
+            // **同单处编辑**：`.min(1)` 会让空串在 `parseToolCall` 阶段被拒、
+            // 整个调用被静默跳过；而工具层对空 oldText 本就有「第 N 条修改的 oldText 为空」的说明。
+            oldText: z.string().describe("被替换的原文，逐字符一致且在（前序修改后的）文件中唯一。不能为空。"),
             newText: z.string().describe("替换成的新内容。允许为空字符串（删除）。")
           // **下限必须是 1**（实测踩到）：原来写 `min(2)`，模型只给 1 条时
           // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，

@@ -484,4 +484,19 @@ describe("落盘前剥离瞬态字段（stripTransientForPersist）", () => {
     expect(out[0].messages[0].artifacts).toEqual(artifacts);
     expect(out[0].title).toBe("t");
   });
+
+  // 实测形状：挂起的选择题靠主进程内存里的 questionBridge 兑现，
+  // 重启后 requestId 全部失效——卡片留在界面上，点了只会得到"已超时或结束"。
+  // 一个永远点不动的控件比没有更糟，所以两端都要剥。
+  it("questions 不落盘（重启后点不动的卡片）", () => {
+    const questions = { requestId: "r1", questions: [{ id: "q", header: "时长", question: "要几秒？", options: [{ id: "a", label: "6 秒", description: "短" }] }] };
+    const out = stripTransientForPersist([base({ questions })]);
+    expect(out[0].messages[0].questions).toBeUndefined();
+  });
+
+  it("读取侧也会剥掉旧版本写进去的 questions", () => {
+    const questions = { requestId: "r1", questions: [] };
+    const result = normalizeStoredSessions([{ id: "s", messages: [{ id: "m", role: "assistant", content: "x", questions }] }]);
+    expect(result[0].messages[0].questions).toBeUndefined();
+  });
 });

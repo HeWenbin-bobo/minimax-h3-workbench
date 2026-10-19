@@ -1121,7 +1121,12 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
             && typeof (a as { path?: unknown }).path === "string"
         )
       };
-      return migrated.streaming ? { ...migrated, streaming: false, toolSteps: undefined } : migrated;
+      // `questions`（挂起的选择题）同样不能跨重启保留：它靠主进程内存里的
+      // `questionBridge` 兑现，重启后 requestId 全部失效——卡片还在、点了永远无效。
+      // 旧版本已经把这种数据写进过 localStorage，故读取侧也要剥。
+      return migrated.streaming || migrated.questions
+        ? { ...migrated, streaming: false, toolSteps: undefined, questions: undefined }
+        : migrated;
     })
   }));
 }
@@ -1135,13 +1140,19 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
  * 顶到上限时用户看到的是"本地存储空间不足，最近的对话可能无法保存"。
  *
  * 内存态**不动**（界面还要显示步骤条），只影响写到磁盘的那份拷贝。
+ *
+ * **`questions` 也必须剥掉**（实测复现的形状）：挂起的选择题靠主进程内存里的
+ * `questionBridge` 兑现，重启后那批 requestId 全部失效。卡片留在界面上，
+ * 用户点「确认」只会得到"这组问题已经超时或结束了"，然后卡片才消失——
+ * 一个永远点不动的控件比没有更糟。读取侧（`normalizeStoredSessions`）也会再兜一次，
+ * 兼容旧版本已经写进去的数据。
  */
 export function stripTransientForPersist(sessions: PlaygroundSession[]): PlaygroundSession[] {
   return sessions.map((session) => ({
     ...session,
     messages: session.messages.map((msg) => {
-      if (!msg.streaming && !msg.toolSteps) return msg;
-      const { toolSteps: _steps, streaming: _streaming, ...rest } = msg;
+      if (!msg.streaming && !msg.toolSteps && !msg.questions) return msg;
+      const { toolSteps: _steps, streaming: _streaming, questions: _questions, ...rest } = msg;
       return rest;
     })
   }));

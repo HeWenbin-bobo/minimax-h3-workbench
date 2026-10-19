@@ -1311,8 +1311,11 @@ ${tableNote}` : ""}`;
             : "";
           // **标题必须用"实际读到的那个文件"**：`nameNote` 已在上方（keyword 分支之前）
           // 算好——那里提前返回，放这里就看不到回落说明了。
-          return `${nameLead}文件：${found.name}（共 ${displayTotal} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}${reversedNote}${tableNote ? `
-${tableNote}` : ""}`;
+          //
+          // **不再追加 `tableNote`**（实测重复）：这条路径的 `more` 在「大表格被截断」时
+          // 已经解释过"共 N 行、只有前 M 行能读、后面怎么读"，再拼一句同样的说明
+          // 等于同一条回执里说两遍。`tableNote` 只留给 keyword 分支（那里没有 `more`）。
+          return `${nameLead}文件：${found.name}（共 ${displayTotal} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}${reversedNote}`;
         }),
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));

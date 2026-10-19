@@ -58,6 +58,20 @@ const STREAM_BROKEN_MESSAGES: Record<string, string> = {
 /** 网络层异常的关键词（同时用于 cause 与 AI SDK 包裹层文本）。 */
 const NETWORK_HINT_RE = /fetch failed|failed to fetch|network ?error|socket hang up|other side closed|cannot connect to api|failed to process successful response|terminated|premature close|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR_/i;
 
+/**
+ * cause 里的 code / message 是不是**确凿的**网络信号（已收录的 errno 或流中断短句）。
+ *
+ * 为什么需要这层判定（实测缺口）：`cause` 不是网络异常的专利——
+ * 业务代码常用 `new Error(msg, { cause })`，AI SDK 的 `JSONParseError` 也把
+ * `SyntaxError` 塞在 cause 里。旧实现只要 `cause.code ?? cause.message` 非空就当网络错误：
+ * - `{ cause: { code: "ERR_QUOTA" } }` → 「网络连接失败：网络错误 ERR_QUOTA。请检查地址、端口与服务是否已启动。」；
+ * - 上游返回 HTML 错误页 → 「网络错误 Unexpected token '<'。请检查地址…」。
+ * 用户被引去查端口，真实原因（配额用尽、被网关拦截）一个字都看不到。
+ */
+function isKnownNetworkCause(value: string): boolean {
+  return Boolean(NETWORK_CODES[value] ?? STREAM_BROKEN_MESSAGES[value.toLowerCase()]);
+}
+
 /** 从异常的 cause 提取网络层信号：cause 可能是 Error（带 code/message）、字符串或普通对象，三种都要认。 */
 function causeSignal(error: Error): { code?: string; message?: string } {
   const cause = (error as { cause?: unknown }).cause;
@@ -90,7 +104,26 @@ export function describeError(error: unknown, fallback: string): string {
     return "接口地址格式不正确：需要以 http:// 或 https:// 开头（例如 https://api.example.com/v1）。";
   }
   const causeCode = cause.code ?? cause.message;
-  if (causeCode) return `网络连接失败：${NETWORK_CODES[causeCode] ?? STREAM_BROKEN_MESSAGES[causeCode.toLowerCase()] ?? `网络错误 ${causeCode}`}。${HINT}`;
+  // **上游返回的不是 JSON**：网关/代理拦截、地址指到了网页而不是 API 根路径时，
+  // 对端回的是 HTML 错误页。AI SDK 抛 `AI_JSONParseError`，message 里只有一句英文
+  // 加一段截断的原文（实测：「JSON parsing failed: Text: <html><body>502 Bad Gateway」）。
+  // 直接透传既违反"错误提示一律中文"，也没告诉用户该查什么。
+  if (error.name === "AI_JSONParseError" || /json parsing failed/i.test(error.message)) {
+    return "上游返回的不是 JSON（常见于网关拦截、地址指到了网页而不是 API 接口）。请确认接口地址以 /v1 之类的 API 路径结尾，并检查服务商控制台是否有告警。";
+  }
+
+  // **只有确凿的网络信号才拼成网络错误**：业务异常的 `cause` 会带自己的 code
+  // （`ERR_QUOTA`/`ERR_PARSE`）或任意 message，AI SDK 的 JSONParseError 更是把
+  // `SyntaxError: Unexpected token '<'` 放在 cause 里（上游返回 HTML 错误页时）。
+  // 旧实现见码就报网络错误，把用户引去查端口，真实原因全被盖掉。
+  if (causeCode && isKnownNetworkCause(causeCode)) {
+    return `网络连接失败：${NETWORK_CODES[causeCode] ?? STREAM_BROKEN_MESSAGES[causeCode.toLowerCase()] ?? `网络错误 ${causeCode}`}。${HINT}`;
+  }
+  // 未收录的 errno：**只有外层本身就是网络语境**（undici 的 `fetch failed`）时才接管，
+  // 这样 `EWEIRD` 这类新码仍给中文骨架（不吐裸英文）；而 `ERR_QUOTA` 这种业务码不会被误包装。
+  if (causeCode && NETWORK_HINT_RE.test(error.message)) {
+    return `网络连接失败：网络错误 ${causeCode}。${HINT}`;
+  }
   // AI SDK 的 APICallError 会把 errno 塞在 message 里（"Cannot connect to API: read ECONNRESET"），
   // 不设 cause.code——只认 cause 的话这类异常会以裸英文透传到界面。
   // 仅当该 token 是已收录的 errno，或整条 message 本身带网络语境时才翻译，
@@ -127,8 +160,16 @@ export function isNetworkError(error: unknown): boolean {
   if (error.name === "TimeoutError") return true;
   // undici/Node 的 errno（ECONNRESET 等）挂 cause.code；流式中途断开则是 cause.message = "terminated"（无 code）。
   // 两种都要认，并兼容 cause 为字符串的形态——漏判会让"整轮重试"不触发，用户直接看到回落提示。
+  //
+  // **但 cause 非空不等于网络错误**（实测缺口）：业务异常 `new Error(msg, { cause })`、
+  // AI SDK 的 JSONParseError（cause 是 SyntaxError）都会带 cause。旧实现见 cause.code 就
+  // 判 true，`cause: { code: "ERR_QUOTA" }` 会被当成网络故障——main.ts 据此白重试 3 轮，
+  // 每一轮都注定失败，用户干等多倍时间才看到真正的错误。只认确凿信号。
   const cause = causeSignal(error);
-  if ((cause.code && cause.code.trim()) || (cause.message && NETWORK_HINT_RE.test(cause.message))) return true;
+  if (cause.code && isKnownNetworkCause(cause.code)) return true;
+  if (cause.message && NETWORK_HINT_RE.test(cause.message)) return true;
+  // cause.code 未收录时，仍可能整条 message 本身是网络语境（"terminated: other side closed"），
+  // 交给下面的 NETWORK_HINT_RE 统一判断，不再单凭 cause 存在就下结论。
   const wrapped = error as { lastError?: { message?: string }; errors?: Array<{ message?: string }> };
   const text = [
     error.message,

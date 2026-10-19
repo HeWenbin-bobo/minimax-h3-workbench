@@ -2258,8 +2258,15 @@ function PgArtifactList({ items, sessionId, onPreview, onError }: {
  * 两种来源：① 主进程 create_file 推来的**已落盘**元数据（saved 有值，直接可用）；
  * ② 旧路径——从消息正文的围栏代码块扫出来的内容（懒落盘，首次点「预览」才写文件）。 */
 function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }: { kind: ArtifactKind; content?: string; saved?: ArtifactInfo; sessionId: string; onPreview: (artifact: ArtifactInfo) => void; onError: (e: unknown) => void }) {
-  const [artifact, setArtifact] = useState<ArtifactInfo | undefined>(saved);
-  // 懒落盘的去重：`artifact` 是 state，同一 tick 内连点两次「预览」会双双读到 undefined，
+  // 懒落盘（旧路径：从消息正文围栏扫出来的内容）的结果。**不能把 saved 也塞进 state**：
+  // `useState(saved)` 只快照第一次渲染的值，之后父组件推送"产物已更新"事件时
+  // size 变了、卡片却仍显示旧值（实测：模型改完文件，卡片大小纹丝不动）。
+  // 现在 saved 每次渲染直接参与计算，始终是最新元数据。
+  const [savedLocally, setSavedLocally] = useState<ArtifactInfo | undefined>(undefined);
+  const artifact: ArtifactInfo | undefined = saved
+    ? { ...saved, content: saved.content || savedLocally?.content || "" }
+    : savedLocally;
+  // 懒落盘的去重：`artifact` 是派生值，同一 tick 内连点两次「预览」会双双读到 undefined，
   // 各自调一次 saveArtifact —— 落盘两次、生成两个内容相同的文件（`报告.md` 与 `报告 (2).md`），
   // 用户却在卡片上只看到一张。用同步 ref 兜住。
   const savingRef = useRef<Promise<ArtifactInfo | undefined> | undefined>(undefined);
@@ -2281,7 +2288,7 @@ function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }:
         const response = await window.h3.saveArtifact(sessionId, name, content, saveKind);
         if (!response.data) { onError(response.message); return undefined; }
         const info = { ...response.data, kind, content };
-        setArtifact(info);
+        setSavedLocally(info);
         return info;
       } catch (error) {
         onError(error);

@@ -1671,10 +1671,25 @@ function registerIpc(
     if (!isAbsolutePath(filePath)) throw new Error("文件路径无效。");
     // 与 h3media 同类防护：只允许在输出目录、ComfyUI 模型目录或本应用产出过的结果路径内定位。
     const settings = await settingsStore.get();
-    const roots = [settings.outputDirectory, settings.comfyuiRoot, path.join(app.getPath("userData"), "artifacts")]
+    const logicalRoots = [settings.outputDirectory, settings.comfyuiRoot, path.join(app.getPath("userData"), "artifacts")]
       .filter((value): value is string => Boolean(value))
       .map((value) => path.resolve(value));
-    const resolved = path.resolve(filePath);
+    /**
+     * **每个根都要同时认"拼接路径"和"realpath"两种写法**（实测回归）：
+     * 产物事件里的 `path` 现在统一是 realpath（见 `saveArtifactFile`），
+     * 而根是用 `app.getPath("userData")` / 设置项**拼接**出来的。当它们本身就在
+     * 符号链接/junction 下（macOS `/var`→`/private/var`、Windows 把 AppData 挪盘）时，
+     * `path.relative(拼接根, realpath候选)` 会算出 `..\..\real\…` → 被判越界，
+     * 用户点 📁「在文件夹中显示」直接报错。
+     *
+     * 两侧都补齐后仍是**包含性校验**（不放宽任何边界）：只接受"解析后确实落在该根之下"。
+     */
+    const roots = [...new Set([
+      ...logicalRoots,
+      ...(await Promise.all(logicalRoots.map((root) => realpath(root).catch(() => root))))
+    ])];
+    // 候选也解析一次（路径可能不存在 → 回落到 resolve，后续的存在性检查会给中文错误）。
+    const resolved = await realpath(filePath).catch(() => path.resolve(filePath));
     const insideRoot = roots.some((rootDir) => {
       const rel = path.relative(rootDir, resolved);
       return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));

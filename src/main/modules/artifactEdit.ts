@@ -352,11 +352,14 @@ export function sliceWithLineNumbers(text: string, startLine?: number, endLine?:
     const completeLines = clipped.endsWith("\n") ? kept.filter(Boolean) : kept.slice(0, -1);
     const lastLineNo = (() => {
       const lastLine = completeLines[completeLines.length - 1];
-      if (!lastLine) return from - 1;
+      if (!lastLine) return from; // 一行完整的都没有 → 至少"第 from 行"是看到了一部分的
       const match = /^\s*(\d+)\|/.exec(lastLine);
       return match ? Number(match[1]) : to;
     })();
-    const actualTo = Math.max(from - 1, Math.min(lastLineNo, to));
+    // **下限是 `from`，不能是 `from - 1`**（实测边界）：第 1 行本身就是几十万字符的压缩 HTML，
+    // 一行完整行都装不下时，`from - 1` 会让回执写成"本次显示第 1–0 行"——
+    // 明明给了内容，却报了一个不存在的区间。至少要说"看到了第 from 行（被截断）"。
+    const actualTo = Math.max(from, Math.min(lastLineNo, to));
     return { body: clipped, totalLines: total, from, to: actualTo, truncated: actualTo < total, charCapped: true, reversed };
   }
   return { body, totalLines: total, from, to, truncated: to < total, charCapped: false, reversed };

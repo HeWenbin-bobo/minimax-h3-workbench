@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames } from "./artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback } from "./artifactDir";
 
 // 背景：`sessionId` 来自渲染端（可构造），而目录名同时用于落盘与 `artifact:purgeSession`。
 // 旧实现只把危险字符替换成 `_`，会产生**目录名碰撞**：
@@ -141,5 +141,31 @@ describe("foldArtifactNames（清单折叠同名多版本）", () => {
     const got = foldArtifactNames([...versions, "笔记.md"]);
     expect(got).toHaveLength(2);
     expect(got).toContain("笔记.md");
+  });
+});
+
+// 同一句判定原先在 inspect/read/edit/batch 四处各写一遍。
+// 加"csv 顺带找 xlsx"时它们不会一起改：`.csv` 请求会落进 `ext` 分支，
+// 回一句"你写的「data.csv」没带扩展名"——可它明明带着，只是磁盘上叫 .xlsx。
+describe("describeArtifactFallback（名字回落的措辞）", () => {
+  it("csv 落成 xlsx 不能说成「没带扩展名」", () => {
+    const text = describeArtifactFallback("alias", "data.csv", "data.xlsx", "read");
+    expect(text).toContain("落成了");
+    expect(text).toContain("data.xlsx");
+    expect(text).not.toContain("没带扩展名");
+  });
+
+  it("真的没带扩展名时才那么说", () => {
+    expect(describeArtifactFallback("ext", "报告", "报告.html", "read")).toContain("没带扩展名");
+  });
+
+  it("三种动作各自用对动词", () => {
+    expect(describeArtifactFallback("stale", "a.html", "a (2).html", "read")).toContain("实际读的是");
+    expect(describeArtifactFallback("stale", "a.html", "a (2).html", "edit")).toContain("实际改的是");
+    expect(describeArtifactFallback("stale", "a.html", "a (2).html", "inspect")).toContain("上面检查的是");
+  });
+
+  it("正常命中时没有多余说明", () => {
+    expect(describeArtifactFallback(false, "a.html", "a.html", "read")).toBe("");
   });
 });

@@ -100,7 +100,52 @@ export function artifactNameCandidates(requestedName: string): string[] {
 }
 
 /** 在磁盘上永远成对出现的表格扩展名：请求其中任何一个，都要顺带找另一个。 */
-const SHEET_ALIAS_EXTS = [".csv", ".tsv"] as const;
+export const SHEET_REQUEST_EXTS = [".csv", ".tsv"] as const;
+const SHEET_ALIAS_EXTS = SHEET_REQUEST_EXTS;
+
+/**
+ * 名字回落的成因 → 给模型/用户看的中文说明。四种成因（`requested` / `ext` / `alias` /
+ * `stale` / `missing`）各自**不能混用措辞**，否则模型会对一个明明存在的文件重新生成一份。
+ *
+ * 抽成纯函数的原因（实测踩到）：这段判定原先在 4 个地方各写了一遍
+ * （inspect / read / edit / batch），加"csv 顺带找 xlsx"时它们不会一起改——
+ * 结果 `.csv` 请求会落进 `ext` 分支，回一句"你写的「data.csv」没带扩展名"，
+ * 可它明明带着扩展名，只是磁盘上的扩展名被改成了 .xlsx。模型看到这句只会去查扩展名。
+ *
+ * @param requested 模型点名的那份（原样）
+ * @param actual    实际读/改/自检的那份
+ */
+export function describeArtifactFallback(
+  fellBack: false | "missing" | "stale" | "ext" | "alias",
+  requested: string,
+  actual: string,
+  action: "read" | "edit" | "inspect"
+): string {
+  // 动词按调用方区分：读/改/检查说同一件事，但用户看到的是不同动作。
+  const verb = action === "edit" ? "实际改的是" : action === "inspect" ? "上面检查的是" : "实际读的是";
+  switch (fellBack) {
+    case "stale":
+      return action === "inspect"
+        ? `（你给的「${requested}」已被更新的版本取代，上面检查的是「${actual}」。）`
+        : `（你点名的「${requested}」已被更新的版本取代，${verb}「${actual}」）`;
+    case "missing":
+      return action === "inspect"
+        ? `（本会话里没有「${requested}」，上面检查的是同主名的最新版本「${actual}」。）`
+        : `（本会话里没有「${requested}」，已${action === "edit" ? "改" : "读"}同主名的最新版本「${actual}」）`;
+    case "ext":
+      return action === "inspect"
+        ? `（你给的「${requested}」没带扩展名，已按实际类型检查「${actual}」。）`
+        : `（你写的「${requested}」没带扩展名，已按实际类型${action === "edit" ? "改" : "读"}「${actual}」）`;
+    case "alias":
+      // **不能说成"没带扩展名"**：模型写的扩展名是对的，只是落盘时表格统一成了 .xlsx
+      // （`create_file(kind:"csv")` 会被改写成 xlsx，`saveArtifactFile` 再剥掉 .csv）。
+      return action === "inspect"
+        ? `（「${requested}」在本应用里落成了「${actual}」——表格产物统一存成 .xlsx，上面检查的是它。）`
+        : `（「${requested}」在本应用里落成了「${actual}」——表格产物统一存成 .xlsx，${verb}它）`;
+    default:
+      return "";
+  }
+}
 
 /** 与 `saveArtifactFile` 的 kind 白名单保持一致（新增 kind 时两边都要改）。 */
 export const KNOWN_ARTIFACT_EXTS = [".html", ".md", ".xlsx", ".csv", ".tsv"] as const;

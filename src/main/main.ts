@@ -34,7 +34,7 @@ import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
-import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames } from "./modules/artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, SHEET_REQUEST_EXTS } from "./modules/artifactDir";
 import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers, MAX_READ_CHARS } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { resolveWithinRoot } from "./modules/safePath";
@@ -1110,16 +1110,9 @@ function registerIpc(
           const stamp = info
             ? `（${info.size >= 1024 * 1024 ? `${(info.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(info.size / 1024))}KB`}，修改于 ${new Date(info.mtimeMs).toLocaleTimeString("zh-CN", { hour12: false })}）`
             : "";
-          // 标题必须按**实际成因**措辞（与 read/edit 三处对齐）：
-          // `actualName === safeName` 这个二值判断早就过时了——现在还有"只是没写扩展名"这一种，
-          // 那时 actualName 与 safeName 确实不同，但**不能说成"不存在"**（文件明明在）。
-          const why = found.fellBack === "stale"
-            ? `（你给的「${safeName}」已被更新的版本取代，上面检查的是「${actualName}」。）`
-            : found.fellBack === "missing"
-              ? `（本会话里没有「${safeName}」，上面检查的是同主名的最新版本「${actualName}」。）`
-              : found.fellBack === "ext"
-                ? `（你给的「${safeName}」没带扩展名，已按实际类型检查「${actualName}」。）`
-                : "";
+          // 标题必须按**实际成因**措辞：同一个判定在 inspect/read/edit/batch 四处共用
+          // `describeArtifactFallback`——此前四处各写一遍，加"csv 落成 xlsx"时必然漏改。
+          const why = describeArtifactFallback(found.fellBack, safeName, actualName, "inspect");
           const header = `本次检查的文件：${actualName}${stamp}。${why ? `\n${why}` : ""}\n\n`;
           return header + report;
         },
@@ -1187,14 +1180,7 @@ function registerIpc(
           const keyword = String(params.keyword ?? "");
           // 回落说明必须**在分支之前**算好：keyword 分支会提前 return，
           // 若把它放在后面，用 keyword 定位时模型永远看不到"实际读的是哪一份"。
-          // （实测同源问题：同一判定写多处、只在一处补。）
-          const nameNote = found.fellBack === "stale"
-            ? `（你点名的「${safeName}」已被更新的版本取代，实际读的是「${found.name}」）\n`
-            : found.fellBack === "missing"
-              ? `（本会话里没有「${safeName}」，已读同主名的最新版本「${found.name}」）\n`
-              : found.fellBack === "ext"
-                ? `（你写的「${safeName}」没带扩展名，已按实际类型读「${found.name}」）\n`
-                : "";
+          const nameNote = describeArtifactFallback(found.fellBack, safeName, found.name, "read");
           if (keyword) {
             // **不能叫 `found`**：外层 `found` 是"解析出的实际文件"，同名会遮蔽它，
             // 下面回执就会退回用请求名（`safeName`），模型看到的名字与实际读的文件对不上。
@@ -1242,15 +1228,9 @@ function registerIpc(
           const found = await resolveArtifactForTool(dir, safeName);
           if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
           const resolved = found.path;
-          // 下落必须说出来，且**分清成因**：名字不存在 / 已过期 / 只是没写扩展名。
+          // 下落必须说出来，且**分清成因**（名字不存在 / 已过期 / 没写扩展名 / csv 落成 xlsx）。
           // 不说的话模型以为改的就是自己点的那份（界面上同名只展示最新版）。
-          const fellBackNote = found.fellBack === "stale"
-            ? `（你点名的「${safeName}」已被更新的版本取代，实际改的是「${found.name}」）`
-            : found.fellBack === "missing"
-              ? `（本会话里没有「${safeName}」，已改同主名的最新版本「${found.name}」）`
-              : found.fellBack === "ext"
-                ? `（你写的「${safeName}」没带扩展名，已按实际类型改「${found.name}」）`
-                : "";
+          const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
           // 读改写在同一个串行队列里：AI SDK 会在一个 step 里并行执行多个 tool call，
           // 两个 edit 同时读同一份文件时后写的会覆盖前一个改动（与 create_file 同名覆盖同类）。
@@ -1301,13 +1281,7 @@ function registerIpc(
           const found = await resolveArtifactForTool(dir, safeName);
           if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
           const resolved = found.path;
-          const fellBackNote = found.fellBack === "stale"
-            ? `（你点名的「${safeName}」已被更新的版本取代，实际改的是「${found.name}」）`
-            : found.fellBack === "missing"
-              ? `（本会话里没有「${safeName}」，已改同主名的最新版本「${found.name}」）`
-              : found.fellBack === "ext"
-                ? `（你写的「${safeName}」没带扩展名，已按实际类型改「${found.name}」）`
-                : "";
+          const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
           return artifactWriteQueue.run(async (): Promise<string> => {
             const before = await readFile(resolved, "utf8");
@@ -1887,7 +1861,7 @@ async function uniqueArtifactPath(dir: string, fileName: string): Promise<string
 async function resolveArtifactForTool(
   dir: string,
   requestedName: string
-): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" | "ext" } | undefined> {
+): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" | "ext" | "alias" } | undefined> {
   // **不带扩展名也要能解析**（实测契约不一致）：`create_file` 的参数说明是
   // "文件名，不含扩展名（如'科技新闻'）"，而 read/edit 的说明是"带扩展名"。
   // 模型按前者的写法调用后者时（read_artifact("科技新闻")），精确匹配与同主名回落
@@ -1906,8 +1880,14 @@ async function resolveArtifactForTool(
       continue;
     }
     if (exact) {
-      // 命中的是补全后的候选 → 报 "ext"，不要说成"名字不存在"。
-      return { name: candidate, path: exact, fellBack: candidate === requestedName ? false : "ext" };
+      // 命中的是补全/别名后的候选 → 必须区分成因，不要说成"名字不存在"。
+      // `alias`：请求写的是 .csv/.tsv，实际落成 .xlsx（表格统一存 xlsx）——
+      // 这时说"没带扩展名"是错的（模型写对了扩展名，只是落盘时被改写）。
+      if (candidate === requestedName) return { name: candidate, path: exact, fellBack: false };
+      const requestedExt = path.extname(requestedName).toLowerCase();
+      const isAlias = (SHEET_REQUEST_EXTS as readonly string[]).includes(requestedExt)
+        && path.extname(candidate).toLowerCase() === ".xlsx";
+      return { name: candidate, path: exact, fellBack: isAlias ? "alias" : "ext" };
     }
   }
   // 只有在**没有任何精确命中**时才回落到"同主名最新版"。

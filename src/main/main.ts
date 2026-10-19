@@ -223,7 +223,12 @@ app.whenReady().then(async () => {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Content-Security-Policy": PREVIEW_CSP,
-          "X-Content-Type-Options": "nosniff"
+          "X-Content-Type-Options": "nosniff",
+          // **必须禁缓存**（与 h3media 对齐）：URL 里只有 path，没有版本号——
+          // 模型用 edit_artifact 改完文件后，预览面板靠 `revision` 换 key 重新请求，
+          // 但同一个 URL 若命中 HTTP 缓存，拿到的仍是**改动前**的页面。
+          // 实测症状和"改完没生效"一模一样，而磁盘上的文件其实早就变了。
+          "Cache-Control": "no-store"
         }
       });
     } catch {

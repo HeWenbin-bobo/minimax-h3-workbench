@@ -37,7 +37,7 @@ import { QuestionBridge } from "./modules/questionBridge";
 import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, SHEET_REQUEST_EXTS } from "./modules/artifactDir";
 import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers, MAX_READ_CHARS } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
-import { resolveWithinRoot } from "./modules/safePath";
+import { isPathInside, resolveWithinRoot } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
 import { normalizeHistory } from "./modules/historyNormalize";
 import { freezeTurn } from "./modules/stepSnapshot";
@@ -1729,10 +1729,7 @@ ${tableNote}` : ""}`;
     ])];
     // 候选也解析一次（路径可能不存在 → 回落到 resolve，后续的存在性检查会给中文错误）。
     const resolved = await realpath(filePath).catch(() => path.resolve(filePath));
-    const insideRoot = roots.some((rootDir) => {
-      const rel = path.relative(rootDir, resolved);
-      return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-    });
+    const insideRoot = roots.some((rootDir) => isPathInside(rootDir, resolved));
     // 同 h3media：改过输出目录后，历史结果仍应能"在文件夹中显示"。
     if (!insideRoot && !(await knownOutputPaths(orchestrator)).has(normalizeForCompare(resolved))) {
       throw new Error("只能打开输出目录或 ComfyUI 模型目录中的位置。");
@@ -1877,8 +1874,7 @@ ${tableNote}` : ""}`;
     const root = path.join(app.getPath("userData"), "artifacts");
     const target = path.join(root, artifactSessionDirName(id));
     // 再兜一层：resolve 后必须仍在 artifacts 根之下（规则若被改动，这里也不会越界）。
-    const relative = path.relative(root, path.resolve(target));
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+    if (!isPathInside(path.resolve(root), path.resolve(target))) return false;
     // **必须排在写队列里**（实测竞态）：`saveArtifactFile` 也在队列里建目录，
     // 不串行的话"删目录 → 落盘又建回来"会留下孤儿目录（记录已删、界面打不开、磁盘占着）。
     return artifactWriteQueue.run(async () => {
@@ -2224,8 +2220,7 @@ async function unlinkIfInside(roots: string[], filePath: string): Promise<void> 
     } catch {
       continue; // 该根目录不存在（用户删了旧目录）：跳过
     }
-    const relative = path.relative(rootReal, targetReal);
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    if (!isPathInside(rootReal, targetReal)) continue;
     await unlink(targetReal).catch(() => undefined);
     return;
   }

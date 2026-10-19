@@ -105,4 +105,18 @@ describe("resolveWithinRoot", () => {
     }
     expect(await resolveWithinRoot(linkedRoot, path.join(root, "inside.html"))).not.toBeNull();
   });
+
+  // **以两个点开头的合法文件名**（实测缺陷）：旧判定是 `relative.startsWith("..")`，
+  // 它把 `..报告.html` 当成"往上跳一层"——产物目录里真有这种文件时，
+  // 预览 / 读回 / 在文件夹中显示 / 清理全部失效，而报错是「不在产物目录内」，
+  // 用户看着一个完全正常的文件名，根本查不出原因。
+  it("以两个点开头的文件名仍算根内（.. 只在整段等于 .. 时才是越界）", async () => {
+    const dotted = path.join(root, "..报告.html");
+    await writeFile(dotted, "<html>ok</html>", "utf8");
+    expect(await resolveWithinRoot(root, dotted)).not.toBeNull();
+  });
+
+  it("真正的 .. 越界仍被拒（放宽后不能漏）", async () => {
+    expect(await resolveWithinRoot(root, path.join(root, "..", "nope.html"))).toBeNull();
+  });
 });

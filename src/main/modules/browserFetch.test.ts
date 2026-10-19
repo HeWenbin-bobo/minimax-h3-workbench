@@ -98,6 +98,20 @@ describe("自检日志过滤（formatConsoleLine）", () => {
     expect(formatConsoleLine("error", "Uncaught ReferenceError: _near is not defined"))
       .toBe("错误：Uncaught ReferenceError: _near is not defined");
   });
+
+  // 真机证据：模型拿到报错却不知道在哪一行，把 2100 行的文件分 5 次读完再逐段比对，
+  // 光读文件就吃掉 5 步。Chromium 早就把行号给了我们，之前丢掉了。
+  it("带上行号，模型才能直接跳到出错那一段", () => {
+    expect(formatConsoleLine("error", "Uncaught ReferenceError: x is not defined", 126))
+      .toBe("错误（第 126 行）：Uncaught ReferenceError: x is not defined");
+    expect(formatConsoleLine("warning", "deprecated API", 42)).toBe("警告（第 42 行）：deprecated API");
+  });
+
+  it("行号缺失或非法时不硬拼（旧事件兼容）", () => {
+    expect(formatConsoleLine("error", "boom")).toBe("错误：boom");
+    expect(formatConsoleLine("error", "boom", 0)).toBe("错误：boom");
+    expect(formatConsoleLine("error", "boom", "12")).toBe("错误：boom");
+  });
 });
 
 describe("产物自检报告（formatProbeReport）", () => {

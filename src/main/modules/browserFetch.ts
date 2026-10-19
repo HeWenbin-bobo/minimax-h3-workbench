@@ -291,12 +291,16 @@ const MAX_LOGS = 12;
  * ② 着色器 `getShaderInfoLog` 末尾常带 NUL（实测 "…syntax error\n\u0000"），
  *    直接回传会在报告里留下一行空白。控制字符清掉，换行保留（多行报错要看得懂）。
  */
-export function formatConsoleLine(level: unknown, message: unknown): string | undefined {
+export function formatConsoleLine(level: unknown, message: unknown, lineNumber?: unknown): string | undefined {
   if (typeof message !== "string" || !message) return undefined;
   if (level !== "error" && level !== "warning") return undefined;
   if (message.includes("Electron Security Warning")) return undefined;
   const cleaned = message.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
-  return `${level === "warning" ? "警告" : "错误"}：${sliceSafe(cleaned.trim(), MAX_LOG_CHARS)}`;
+  // **行号必须带上**（实测真机）：模型拿到报错却不知道在哪一行，只能把 2100 行的文件
+  // 分 5 次读完再逐段比对（那一轮光读文件就吃掉 5 步，最终仍打满 20 步）。
+  // Chromium 早就把行号给了我们，之前丢掉了。
+  const where = typeof lineNumber === "number" && lineNumber > 0 ? `（第 ${lineNumber} 行）` : "";
+  return `${level === "warning" ? "警告" : "错误"}${where}：${sliceSafe(cleaned.trim(), MAX_LOG_CHARS)}`;
 }
 
 /** 加载后额外等待的时长：让 requestAnimationFrame / 首帧初始化跑完，否则 canvas 采样必然为空。 */
@@ -336,7 +340,9 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
   win.webContents.on("console-message", (event: Electron.Event<Electron.WebContentsConsoleMessageEventParams>) => {
     const level = (event as unknown as { level?: string }).level;
     const message = (event as unknown as { message?: string }).message;
-    const line = formatConsoleLine(level, message);
+    // 行号也传下去：模型据此能直接跳到出错那一段，而不是把整个文件分段读完。
+    const lineNumber = (event as unknown as { lineNumber?: number }).lineNumber;
+    const line = formatConsoleLine(level, message, lineNumber);
     if (!line || logs.includes(line)) return;
     if (logs.length < MAX_LOGS) logs.push(line);
   });

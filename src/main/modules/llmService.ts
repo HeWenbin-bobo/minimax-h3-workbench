@@ -873,13 +873,26 @@ export async function chatAgent(
 - 需要第三方库（如 three.js）时**不要用 CDN**：预览沙箱禁止外发网络，外链加载不到。
   用原生 Canvas/WebGL/CSS 自己实现，或把必要的少量代码内联进来。`,
         inputSchema: z.object({
-          kind: z.enum(["html", "csv", "tsv", "md"]).describe("文件类型。csv/tsv=结构化数据（存为 .xlsx）；html=网页/小工具/游戏；md=文档/报告。"),
+          // **不要用 z.enum**（实测同类坑第六处）：模型写 `excel` / `word` / `xlsx`
+          // 这种常见叫法时，AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
+          // 整个调用被**静默跳过** → 收不到回执 → 反复重试 → 20 步预算烧光，
+          // 探针实测「20 步、0 产物」。改成字符串 + 执行侧归一。
+          kind: z.string().min(1).describe("文件类型：html（网页/小工具/游戏）、csv 或 tsv（结构化数据，存为 .xlsx）、md（文档/报告）。常见别名（excel/xlsx/word/doc/markdown）也会被识别。"),
           name: z.string().min(1).describe("文件名。带不带扩展名都行（如「科技新闻」或「科技新闻.html」）——扩展名会按 kind 自动补齐/纠正，返回结果里会告诉你实际存成了什么名字。"),
           content: z.string().min(1).describe("完整文件内容。csv/tsv 首行为表头；html 为完整网页（含 <!DOCTYPE html>）；md 为 markdown 正文。")
         }),
         execute: async (params) => {
+          // **kind 归一**（见 schema 处说明）：把模型的口语化叫法映射到四种规范值。
+          // 认不出来时**不在这里拒绝**——交给 `saveArtifactFile` 抛中文错误并回给模型
+          // （工具层返回文本比抛异常好：抛出去会让 AI SDK 判整轮失败、回落普通对话）。
+          const rawKind = String(params.kind || "").trim().toLowerCase();
+          // 类型上仍是四种规范值 + 未知原样（未知走 `saveArtifactFile` 的中文报错）。
+          const kind = (/^(html?|web|page|网页|页面)$/.test(rawKind) ? "html"
+            : /^(csv|tsv|xlsx?|excel|sheet|table|表格)$/.test(rawKind) ? "xlsx"
+              : /^(md|markdown|docx?|word|text|文档|报告)$/.test(rawKind) ? "md"
+                : rawKind) as "html" | "csv" | "tsv" | "md" | "xlsx";
           try {
-            return await callbacks.createFile({ ...params, kind: params.kind === "csv" || params.kind === "tsv" ? "xlsx" : params.kind });
+            return await callbacks.createFile({ ...params, kind });
           } catch (error) {
             return `保存文件失败：${describeError(error, "未知错误")}。请把内容改写成围栏代码块直接输出，并在回复里说明文件未能保存。`;
           }

@@ -1873,7 +1873,13 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
       const XLSX = await loadXlsx();
       const book = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(parseCsvRows(content)), "Sheet1");
-      XLSX.writeFile(book, filePath);
+      // **也要原子写**（与 `atomicWriteText` 同理）：`writeFile` 走到一半失败/被杀，
+      // 目标路径上会留下一个**打不开的半截 xlsx**——而这个坏文件已经占住了名字，
+      // 卡片会挂上去、预览会报"表格文件已损坏"，用户以为是我们生成错了。
+      // SheetJS 默认按扩展名判格式，故显式指定 `bookType` 写到 `.tmp`，再 rename。
+      const temporary = `${filePath}.tmp`;
+      XLSX.writeFile(book, temporary, { bookType: "xlsx" });
+      await rename(temporary, filePath);
       const info = await stat(filePath);
       return { name: finalName, path: filePath, size: info.size };
     }

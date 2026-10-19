@@ -1153,12 +1153,14 @@ function registerIpc(
           // 于是把 2118 行的文件按 400 行一段连读 5 次，光找位置就吃掉 5 步。
           const keyword = String(params.keyword ?? "");
           if (keyword) {
-            const found = findMatchingLines(raw, keyword);
-            if (found.total === 0) {
-              return `在 ${safeName}（共 ${raw.split("\n").length} 行）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。`;
+            // **不能叫 `found`**：外层 `found` 是"解析出的实际文件"，同名会遮蔽它，
+            // 下面回执就会退回用请求名（`safeName`），模型看到的名字与实际读的文件对不上。
+            const hits = findMatchingLines(raw, keyword);
+            if (hits.total === 0) {
+              return `在 ${found.name}（共 ${raw.split("\n").length} 行）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。`;
             }
-            const more = found.total > found.matches.length ? `\n（共 ${found.total} 处命中，只显示前 ${found.matches.length} 处。）` : "";
-            return `在 ${safeName} 里找到 ${found.total} 处「${keyword}」：\n${found.body}${more}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。`;
+            const more = hits.total > hits.matches.length ? `\n（共 ${hits.total} 处命中，只显示前 ${hits.matches.length} 处。）` : "";
+            return `在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。`;
           }
           const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
           // **必须说明被截断了**（实测真机）：模型不带范围读 1651 行全文，紧接着又读一遍，

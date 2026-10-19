@@ -1103,7 +1103,7 @@ function registerIpc(
           // `create_file` 的参数说明是"不含扩展名"，模型照此调用 `inspect_artifact("鹈鹕")`
           // 时，若先按 `safeName` 判扩展名 → 没有 `.html` → 直接报"只能自检 html 产物"，
           // 而文件其实就在那里、也确实能跑。解析器已支持无扩展名补全，先让它找出实际文件。
-          const found = await resolveArtifactForTool(dir, safeName);
+          const found = await resolveArtifactQueued(dir, safeName);
           if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
           if (!/\.html?$/i.test(found.name)) throw new Error(`「${found.name}」不是 html 产物，无法自检（csv/md 没有可运行的脚本）。`);
           const resolved = found.path;
@@ -1320,7 +1320,9 @@ ${tableNote}` : ""}`;
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
-          const found = await resolveArtifactForTool(dir, safeName);
+          // **解析必须排队**（见 resolveArtifactQueued 的注释）：同 step 里并行的
+          // create_file 可能还没落盘，直接解析会报"找不到产物"。
+          const found = await resolveArtifactQueued(dir, safeName);
           if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
           const resolved = found.path;
           // 下落必须说出来，且**分清成因**（名字不存在 / 已过期 / 没写扩展名 / csv 落成 xlsx）。
@@ -1379,7 +1381,8 @@ ${tableNote}` : ""}`;
         editArtifactBatch: async (params: { name: string; edits: Array<{ oldText: string; newText: string }> }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
-          const found = await resolveArtifactForTool(dir, safeName);
+          // 同 editArtifact：解析排队，避免同 step 里 create_file 还没落盘。
+          const found = await resolveArtifactQueued(dir, safeName);
           if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
           const resolved = found.path;
           const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
@@ -2102,6 +2105,25 @@ async function resolveArtifactForTool(
   // 只有在**没有任何精确命中**时才回落到"同主名最新版"。
   if (staleMatch) return { ...staleMatch, fellBack: "stale" };
   return undefined;
+}
+
+/**
+ * 解析产物文件，但**排进写队列**。
+ *
+ * 为什么必须排队（实测竞态，`probe-same-step-create-inspect`）：AI SDK 在**同一个 step**
+ * 里并行执行多个 tool call，而模型很自然地写成"写完立刻自检"——一次响应里同时给出
+ * `create_file` 与 `inspect_artifact`。`create_file` 的「建目录 + 落盘」在
+ * `artifactWriteQueue` 里，解析原本在队列**之外**，于是自检可能先跑：
+ * 目录里还没有那个文件 → 回执「自会话里找不到产物」，而紧接着 create_file 却成功了。
+ * 模型只能多花一步重试（预算本就紧），或干脆放弃自检。
+ *
+ * 排进同一条队列后，解析必然排在落盘之后。解析本身很快，占队列时间可以忽略。
+ */
+function resolveArtifactQueued(
+  dir: string,
+  requestedName: string
+): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" | "ext" | "alias" } | undefined> {
+  return artifactWriteQueue.run(() => resolveArtifactForTool(dir, requestedName));
 }
 
 /**

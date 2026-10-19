@@ -1165,8 +1165,8 @@ function registerIpc(
             // **必须推一次"更新"事件**（实测缺口）：此前只有 create_file 会推，
             // 于是卡片上的大小停在旧值，已打开的预览面板也不会重载——
             // 用户对着旧画面判断"还是坏的"，模型却说改好了。
-            notifyArtifactUpdated(resolved, safeName, after.size);
-            return `已修改 ${safeName}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）${fellBackNote}。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
+            notifyArtifactUpdated(resolved, found.name, after.size);
+            return `已修改 ${found.name}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${Math.max(1, Math.round(after.size / 1024))}KB）${fellBackNote}。建议立刻 inspect_artifact 自检一次，确认没有引入新报错。`;
           });
         },
         // 批量编辑：一次调用应用多处修改，**全部成功才写盘**。

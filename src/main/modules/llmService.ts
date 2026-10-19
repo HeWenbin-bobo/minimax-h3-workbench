@@ -1087,10 +1087,20 @@ export async function chatAgent(
     onToolExecutionEnd: (event) => {
       if (!onToolEnd || !event) return;
       const toolName = String(event.toolCall.toolName ?? "");
-      const output = (event as { toolOutput?: { output?: unknown } }).toolOutput?.output;
+      // **`execute` 抛异常时 SDK 给的是 `tool-error`**（不是 `tool-result`），
+      // 它的 `.output` 上什么都没有——只读 `.output` 会拿到 undefined，
+      // 摘要于是变成「✓ 名称完成（完成）」：打勾 + 一句废话，而工具其实炸了。
+      // 我们的工具大多自己 catch 并返回文本，但 `execute` 之外的失败
+      // （schema 里 `z.string().url()` 拒绝、回调里未捕获的异常）走的就是这条路。
+      const toolOutput = (event as { toolOutput?: { type?: string; output?: unknown; error?: unknown } }).toolOutput;
+      const failed = toolOutput?.type === "tool-error";
+      const output = failed ? toolOutput?.error : toolOutput?.output;
       // 成败必须显式传：我们的工具失败也返回文本（见 isToolFailure），
       // 渲染端没法从摘要里可靠区分"完成"与"失败"。
-      onToolEnd(toolName, humanizeToolOutput(toolName, output), !isToolFailure(output));
+      const summary = failed
+        ? `工具执行失败：${describeError(output, "未知错误")}`
+        : humanizeToolOutput(toolName, output);
+      onToolEnd(toolName, summary, !failed && !isToolFailure(output));
     }
   });
   let seq = 0;

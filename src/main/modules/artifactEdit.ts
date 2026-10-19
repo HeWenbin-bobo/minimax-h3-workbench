@@ -214,9 +214,16 @@ export function applyExactEdit(text: string, oldText: string, newText: string): 
     const strippedHits = occurrences(normalizedText, degutterNeedle);
     if (strippedHits.length === 1) {
       const at = strippedHits[0];
+      // **newText 多半也被一起抄成了带行号的样子**，必须同样剥掉——
+      // 实测复现：模型照抄读回结果写 `newText = "    1| const a = 9;"`，
+      // 只剥 oldText 的话，那一行的 `    1| ` 会被**写进文件本身**（产物直接坏掉，
+      // 而且它自己下一轮读回时看到的就是这段脏内容）。
+      // 判据与 oldText 同一套（degutter 会先要求"至少一半的行带行号"），
+      // 单纯在正文里写 `1| ` 的产物不会被误剥。
+      const cleanReplacement = degutter(normalizeEol(replacement)) ?? normalizeEol(replacement);
       return {
         ok: true,
-        text: normalizedText.slice(0, at) + normalizeEol(replacement) + normalizedText.slice(at + degutterNeedle.length),
+        text: normalizedText.slice(0, at) + cleanReplacement + normalizedText.slice(at + degutterNeedle.length),
         line: lineOf(normalizedText, at),
         strippedGutter: true
       };

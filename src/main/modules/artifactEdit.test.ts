@@ -106,6 +106,29 @@ describe("applyExactEdit", () => {
     if (out.ok) expect(out.strippedGutter).toBeUndefined();
   });
 
+  // 实测复现：模型把**新内容也照抄成带行号的样子**（`newText = "    1| const a = 9;"`）。
+  // 只剥 oldText 的话，那串 `    1| ` 会被**写进文件本身**——产物直接坏掉，
+  // 而且下一轮读回时模型看到的就是这段脏内容。
+  it("newText 也带行号前缀时一并剥掉（不能写进文件）", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["const a = 1;", "const b = 2;"].join(NL);
+    const out = applyExactEdit(file, "    1| const a = 1;", "    1| const a = 9;");
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.text).toBe(`const a = 9;${NL}const b = 2;`);
+      expect(out.text).not.toContain("|");
+    }
+  });
+
+  // 反向自检：只有**一半以上**的行带行号时才剥，普通正文不许被动。
+  it("普通正文里的竖线在 newText 里也保留（不误剥）", () => {
+    const NL = String.fromCharCode(10);
+    const file = ["1| 不是行号", "2| 也是正文"].join(NL);
+    const out = applyExactEdit(file, "2| 也是正文", "2| 改过了");
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.text).toBe(`1| 不是行号${NL}2| 改过了`);
+  });
+
   it("CRLF 文件用 LF 的 oldText 也能改到（行尾归一）", () => {
     const text = "a\r\nM.identity();\r\nb";
     const out = applyExactEdit(text, "M.identity();", "M.ident();");

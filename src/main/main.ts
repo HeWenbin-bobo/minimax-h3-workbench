@@ -1160,6 +1160,13 @@ function registerIpc(
           // `raw` 末尾还拼了一段说明，算出来会多一行（实测 5000 行表格 → "只有前 2001 行能读"，
           // 而正文里明说只给了 2000 行，两个数字又打架）。
           let readableRows: number | undefined;
+          /**
+           * 表格截断的说明。**必须与 `raw` 分开**（实测复现）：
+           * 原先把它拼在 `raw` 末尾，于是 `read_artifact(keyword)` 会**在我们自己的说明里命中**——
+           * 搜「表格」「行」会返回一个带假行号的"命中行"，模型据此以为那是文件内容，
+           * 甚至把它当 oldText 去改（当然改不动）。我们自己写的说明不是文件内容。
+           */
+          let tableNote = "";
           if (/\.xlsx$/i.test(resolved)) {
             const XLSX = await loadXlsx();
             try {
@@ -1187,7 +1194,10 @@ function registerIpc(
                   // 后面那些行压根不在字符串里。模型照做，注定搜不到，只会怀疑是关键词写错了。
                   realRowCount = rowCount;
                   readableRows = MAX_ROWS;
-                  raw = `${XLSX.utils.sheet_to_csv(capped)}\n\n（表格共 ${rowCount} 行，这里只给了前 ${MAX_ROWS} 行。注意：keyword 与 startLine/endLine 都只能在这前 ${MAX_ROWS} 行里找，看不到后面的内容。要看后面，请在回复里说明具体要哪几行/哪一列，或让用户直接在 Excel 里打开这份文件。）`;
+                  // **说明不拼进 `raw`**：`raw` 是"文件内容"，keyword 搜索与按行读都作用在它上面。
+                  // 拼进去会让模型在自己写的说明里搜到"命中行"（实测：搜「表格」返回第 7 行）。
+                  raw = XLSX.utils.sheet_to_csv(capped);
+                  tableNote = `（表格共 ${rowCount} 行，这里只给了前 ${MAX_ROWS} 行。注意：keyword 与 startLine/endLine 都只能在这前 ${MAX_ROWS} 行里找，看不到后面的内容。要看后面，请在回复里说明具体要哪几行/哪一列，或让用户直接在 Excel 里打开这份文件。）`;
                 } else {
                   raw = XLSX.utils.sheet_to_csv(sheet);
                 }
@@ -1235,7 +1245,8 @@ function registerIpc(
               // 不能拿 `raw.split("\n").length - 1` 反推——`raw` 末尾还拼着说明段，会多算一行。
               const keywordTotal = realRowCount ?? raw.split("\n").length;
               const readableNote = realRowCount !== undefined && readableRows !== undefined ? `，只载入了前 ${readableRows} 行` : "";
-              return `${nameLead}在 ${found.name}（共 ${keywordTotal} 行${readableNote}）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}${keywordGutterNote}${ignoredRange}`;
+              return `${nameLead}在 ${found.name}（共 ${keywordTotal} 行${readableNote}）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}${keywordGutterNote}${ignoredRange}${tableNote ? `
+${tableNote}` : ""}`;
             }
             const more = hits.total > hits.matches.length ? `\n（共 ${hits.total} 处命中，只显示前 ${hits.matches.length} 处。）` : "";
             // 命中行本身可能极长（压缩过的 HTML 一行几十万字符），`findMatchingLines`
@@ -1260,7 +1271,8 @@ function registerIpc(
             const partialNote = realRowCount !== undefined && readableRows !== undefined
               ? `\n（注意：这个表格共 ${realRowCount} 行，但搜索只在**前 ${readableRows} 行**里进行。${realRowCount > readableRows ? "后面的行没有载入，可能还有别的命中。" : ""}）`
               : "";
-            return `${nameLead}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}${partialNote}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。${keywordGutterNote}${ignoredRange}`;
+            return `${nameLead}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}${partialNote}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。${keywordGutterNote}${ignoredRange}${tableNote ? `
+${tableNote}` : ""}`;
           }
           const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
           // **显示用的总行数**：大表格被截到 2000 行后，`raw.split("\n")` 只有 ~2002 行，
@@ -1299,7 +1311,8 @@ function registerIpc(
             : "";
           // **标题必须用"实际读到的那个文件"**：`nameNote` 已在上方（keyword 分支之前）
           // 算好——那里提前返回，放这里就看不到回落说明了。
-          return `${nameLead}文件：${found.name}（共 ${displayTotal} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}${reversedNote}`;
+          return `${nameLead}文件：${found.name}（共 ${displayTotal} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}${reversedNote}${tableNote ? `
+${tableNote}` : ""}`;
         }),
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));

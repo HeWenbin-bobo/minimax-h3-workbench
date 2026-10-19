@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
-import { readFile, stat, writeFile, unlink, mkdir, rm, realpath, open, readdir } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink, mkdir, rm, realpath, open, readdir, rename } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -1283,7 +1283,7 @@ function registerIpc(
               const where = outcome.lines.slice(0, 6).join("、");
               throw new Error(`oldText 在文件里出现了 ${outcome.count} 次（第 ${where} 行）。为了不改错位置，我拒绝执行。请把 oldText 连同上下各一行一起贴进去，让它只匹配一处。`);
             }
-            await writeFile(resolved, outcome.text, "utf8");
+            await atomicWriteText(resolved, outcome.text);
             const after = await stat(resolved);
             // 让模型知道改完共几行 / 多大——据此判断是不是真的只动了那一处。
             const totalLines = outcome.text.split("\n").length;
@@ -1338,7 +1338,7 @@ function registerIpc(
               const where = outcome.lines.slice(0, 6).join("、");
               throw new Error(`第 ${nth} 条修改的 oldText 出现了 ${outcome.count} 次（第 ${where} 行），无法确定改哪一处（整批未写入）。请把那条 oldText 连同上下各一行一起贴进去，让它在文件里只匹配一处。`);
             }
-            await writeFile(resolved, outcome.text, "utf8");
+            await atomicWriteText(resolved, outcome.text);
             const after = await stat(resolved);
             const totalLines = outcome.text.split("\n").length;
             const at = outcome.lines.join("、");
@@ -1782,6 +1782,23 @@ function registerIpc(
 
 /** 产物落盘共享逻辑（artifact:save IPC 与 create_file 工具两路复用）：
  * 存 userData/artifacts/<sessionId>/，kind 白名单 html/csv/tsv/md/xlsx；xlsx 走 SheetJS 转 Excel 二进制。 */
+/**
+ * **原子写文本**：先写 `<file>.tmp` 再 rename 覆盖。
+ *
+ * 为什么编辑产物不能用就地 `writeFile`（实测风险，不是理论问题）：
+ * 就地写是"先截断、再写内容"。磁盘满、进程被用户强杀、或机器断电时，
+ * 文件会停在**被截断**的状态——而那是用户唯一的产物副本（界面里没有任何备份版本）。
+ * `settingsStore` / `taskStore` 早就是"先写 .tmp 再 rename"，产物编辑这条路漏了。
+ *
+ * 串行性由调用方保证（`artifactWriteQueue`），这里不重复加锁；
+ * 但仍先把上一次崩溃残留的 `.tmp` 覆盖掉（`writeFile` 默认就是覆盖）。
+ */
+async function atomicWriteText(filePath: string, text: string): Promise<void> {
+  const temporary = `${filePath}.tmp`;
+  await writeFile(temporary, text, "utf8");
+  await rename(temporary, filePath);
+}
+
 async function saveArtifactFile(sessionId: string, name: string, content: string, kind: string): Promise<{ name: string; path: string; size: number }> {
   const extByKind: Record<string, string> = { html: ".html", csv: ".csv", tsv: ".tsv", md: ".md", xlsx: ".xlsx" };
   // **未知 kind 必须明确拒绝，不能静默落成 .html**。
@@ -1827,7 +1844,7 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
       const info = await stat(filePath);
       return { name: finalName, path: filePath, size: info.size };
     }
-    await writeFile(filePath, content, "utf8");
+    await atomicWriteText(filePath, content);
     return { name: finalName, path: filePath, size: Buffer.byteLength(content, "utf8") };
   });
 }

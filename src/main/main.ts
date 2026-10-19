@@ -1425,12 +1425,19 @@ function registerIpc(
           // 本轮若已经通过 generate_video 建过任务，重试会**把任务再建一遍**——
           // 云端按次计费时等于替用户重复扣费（RB 还会重复扣卡密次数）。
           // 已建任务时不再重试，直接走下面的失败收尾，让用户看到真实原因。
-          if (isContentFilterError(error) && attempts < 3 && agentSent === 0 && agentTaskCount === 0) {
+          // **产物也是副作用，同样不能重放**（与上面 `agentTaskCount` 同一理由）。
+          // 整轮重试会把模型从头再跑一遍，而它这一轮已经 create_file / edit_artifact 过了：
+          // - create_file 会再落一份 `名字 (2).html`（磁盘多一份、卡片多一个旧版本）；
+          // - edit_artifact 更糟——oldText 已经被改掉，重放必然 not-found，
+          //   模型于是开始怀疑自己、换片段重试，把预算烧在"修一个已经修好的东西"上。
+          // 已经产出东西的这一轮，直接如实报错 + 回落普通对话，比悄悄重放更可控。
+          const producedSideEffects = agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0;
+          if (isContentFilterError(error) && attempts < 3 && agentSent === 0 && !producedSideEffects) {
             chunk({ seq: 0, delta: contentFilterNotice(attempts, 3) });
             effective = [...effective, { role: "user", content: CONTENT_FILTER_GUIDANCE }];
             continue;
           }
-          const retryable = attempts < 3 && agentSent === 0 && agentTaskCount === 0 && isNetworkError(error);
+          const retryable = attempts < 3 && agentSent === 0 && !producedSideEffects && isNetworkError(error);
           if (!retryable) break;
         }
       }

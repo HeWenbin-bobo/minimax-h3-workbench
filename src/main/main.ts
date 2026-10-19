@@ -1210,7 +1210,10 @@ function registerIpc(
               const caseHint = hits.caseOnly > 0
                 ? `\n（忽略大小写时有 ${hits.caseOnly} 行能命中——你要找的应该是它，只是大小写不同。请按文件里的实际写法再搜一次。）`
                 : "";
-              return `${nameLead}在 ${found.name}（共 ${raw.split("\n").length} 行）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}`;
+              // 行数同样以真实行数为准（大表格被截到 2000 行时，
+              // `raw.split("\n").length` 只有 ~2002，与正文里的"表格共 5001 行"打架）。
+              const keywordTotal = realRowCount ?? raw.split("\n").length;
+              return `${nameLead}在 ${found.name}（共 ${keywordTotal} 行${realRowCount !== undefined ? `，只载入了前 ${raw.split("\n").length - 1} 行` : ""}）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}`;
             }
             const more = hits.total > hits.matches.length ? `\n（共 ${hits.total} 处命中，只显示前 ${hits.matches.length} 处。）` : "";
             // 命中行本身可能极长（压缩过的 HTML 一行几十万字符），`findMatchingLines`

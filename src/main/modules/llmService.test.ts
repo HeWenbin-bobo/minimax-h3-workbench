@@ -634,6 +634,22 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
     const parsed = s.safeParse({ plan: [{ step: "a", status: "done" }, { step: "b", status: "in-progress" }] });
     expect(parsed.success, parsed.error?.issues[0]?.message).toBe(true);
   });
+
+  // 实测复现（probe-schema-question-field）：模型只写 `{ id, question, options }`，
+  // 省掉 `header`、或选项只给 `{ id, label }` 不给 `description`。
+  // 必填时 AI SDK 在 `parseToolCall` 阶段抛错 → 调用被**静默跳过**：
+  // 探针实测 request_user_input 连续 20 次没执行，界面上连选择题卡片都不出现。
+  it("request_user_input：缺 header / question / description 也能进工具层", async () => {
+    const s = (await schemas()).request_user_input;
+    for (const value of [
+      { questions: [{ id: "q1", question: "多久？", options: [{ id: "a", label: "6 秒" }] }] },
+      { questions: [{ id: "q1", header: "时长", options: [{ id: "a" }] }] },
+      { questions: [{ options: [] }] }
+    ]) {
+      const parsed = s.safeParse(value);
+      expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
 });
 
 // 智能体路径端点：AI SDK 固定拼 /chat/completions，但 MiniMax 官方是 /text/chatcompletion_v2。

@@ -1190,9 +1190,16 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
 一次调用最多 3 个问题，每个问题 2–4 个选项。用户可以选择不回答（超时或跳过），此时你必须按自己认为最合理的方式继续，不要卡住不动。`,
         inputSchema: z.object({
           questions: z.array(z.object({
-            id: z.string().describe("问题标识（英文短名，如'video_duration'），用于回传答案时对应。"),
-            header: z.string().describe("很短的中文标签，最多 12 个字（如'视频时长'）。"),
-            question: z.string().describe("完整问题，一句话说清要用户在什么之间做选择。"),
+            // **这几个字段一律可选**（实测同类坑第十四处）：模型很自然只写
+            // `{ id, question, options }`，省掉 `header`，或选项只给 `{ id, label }`
+            // 不给 `description`。必填时 AI SDK 在 `parseToolCall` 阶段抛
+            // `InvalidToolInputError`，整个调用被**静默跳过**——探针实测
+            // request_user_input 连续 20 次没执行，界面上连选择题卡片都不出现，
+            // 用户只看到「本轮工具调用已结束，没有产生可展示的产物」。
+            // 缺的值在 execute 里补默认（`formatAnswers` 本来也对缺字段做了兜底）。
+            id: z.string().nullish().describe("问题标识（英文短名，如'video_duration'），用于回传答案时对应。"),
+            header: z.string().nullish().describe("很短的中文标签，最多 12 个字（如'视频时长'）。"),
+            question: z.string().nullish().describe("完整问题，一句话说清要用户在什么之间做选择。"),
             multiSelect: z.boolean().describe("是否允许多选。只有确实可以同时选多个时才设为 true。").optional(),
             // **不要在这里写 min(2).max(4)**（实测同类坑第五处）：模型只给 1 个选项时，
             // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
@@ -1201,9 +1208,9 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
             // **空数组也收**（同类坑的收尾）：`questions: []` / `options: []` 在 schema 层
             // 被拒会让整个调用静默跳过；这些交到 execute 里给一句可纠正的说明更合适。
             options: z.array(z.object({
-              id: z.string().describe("选项标识（英文短名）。"),
-              label: z.string().describe("选项显示文字，简短（如'8 秒'）。"),
-              description: z.string().describe("这个选项意味着什么，一句话。")
+              id: z.string().nullish().describe("选项标识（英文短名）。"),
+              label: z.string().nullish().describe("选项显示文字，简短（如'8 秒'）。"),
+              description: z.string().nullish().describe("这个选项意味着什么，一句话。")
             })).describe("互斥选项，建议 2–4 个。")
           })).describe("问题清单，建议 1–3 个。")
         }),
@@ -1219,11 +1226,23 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           }
           // **夹取而不是拒绝**（见 schema 处的说明）：渲染端能正常画 1 个选项的卡片，
           // 超过 3 个问题/4 个选项则截断——少问一个总比整轮报废好。
+          //
+          // 缺字段在这里补默认（schema 已放宽为可选，见上面的说明）：
+          // - `id` 缺失时按下标生成，否则回传答案时对不上题（`formatAnswers` 按 id 匹配）；
+          // - `header` / `label` 缺失时退回「问题 N」/ 选项 id——渲染端会画出一个空标签的芯片；
+          // - `question` 缺失时用 header 顶上，总比一张只有标签的空卡片强。
           const clipped = {
             ...params,
-            questions: params.questions.slice(0, 3).map((question) => ({
-              ...question,
-              options: question.options.slice(0, 4)
+            questions: params.questions.slice(0, 3).map((question, index) => ({
+              id: question.id?.trim() || `q${index + 1}`,
+              header: question.header?.trim() || `问题 ${index + 1}`,
+              question: question.question?.trim() || question.header?.trim() || `请选择第 ${index + 1} 项的取值`,
+              multiSelect: question.multiSelect,
+              options: question.options.slice(0, 4).map((option, optionIndex) => ({
+                id: option.id?.trim() || `opt${optionIndex + 1}`,
+                label: option.label?.trim() || option.id?.trim() || `选项 ${optionIndex + 1}`,
+                description: option.description?.trim() || ""
+              }))
             }))
           };
           try {

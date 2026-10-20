@@ -612,6 +612,12 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
     expect((await schemas()).open_page.safeParse({ url: "example.com/foo" }).success).toBe(true);
   });
 
+  // 实测同类坑第十五处：模型把 url 传成空串时（"打开刚才那个链接"），
+  // `.min(1)` 会让 AI SDK 在 parseToolCall 阶段拒掉整个调用 → 静默跳过。
+  it("open_page：空 url 也能进工具层（由 execute 回一句可纠正说明）", async () => {
+    expect((await schemas()).open_page.safeParse({ url: "" }).success).toBe(true);
+  });
+
   // 实测复现（probe-schema-empty-name）：模型说"刚才那个文件"时把 name 留空，
   // `z.string().min(1)` 让 AI SDK 在 parseToolCall 阶段抛错、调用被**静默跳过**：
   // 1 次 create_file + **19 次空转**，20 步预算全烧光、步骤条一片空白。

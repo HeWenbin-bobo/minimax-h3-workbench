@@ -856,14 +856,20 @@ export async function chatAgent(
           // 改成普通字符串，缺协议时在执行侧补 `https://` 再交给
           // `assertPublicHttpUrlResolved`——那道校验（含 DNS 落点检查）一个字没动，
           // 安全边界不变，只是把"格式瑕疵"从"整轮报废"降级成"自动补全或一条中文错误"。
-          url: z.string().min(1).describe("要打开的网页地址，建议带协议（https:// 开头）；不带协议时会自动按 https 补全。")
+          // **`.min(1)` 也不要**（同一类坑第十五处）：模型偶尔会把 url 传成空串
+          // （"打开刚才那个链接"这类指代），`.min(1)` 让 AI SDK 在 `parseToolCall`
+          // 阶段直接拒掉、**整个调用被静默跳过**。空值交给 execute 回一句可纠正的说明。
+          url: z.string().describe("要打开的网页地址，建议带协议（https:// 开头）；不带协议时会自动按 https 补全。不能为空。")
         }),
         execute: async ({ url }) => {
           try {
+            const trimmed = String(url || "").trim();
+            if (!trimmed) {
+              return "打开网页失败：url 是空的。请填上要打开的具体网址（可带 https://，不带也能自动补全）；如果还不知道该打开哪个页面，先用 web_search 搜一下。";
+            }
             // 补协议：`example.com/a` → `https://example.com/a`。
             // 只认"看起来是域名"的形态（含点、无空白、不以 / 开头），避免把
             // `about:blank` 之类的意外输入硬编码成 https。
-            const trimmed = String(url || "").trim();
             const normalized = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) || trimmed.startsWith("/") || !/^[^\s/]+\.[^\s/]+/.test(trimmed)
               ? trimmed
               : `https://${trimmed}`;

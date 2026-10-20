@@ -174,6 +174,27 @@ describe("applyExactEdit", () => {
     if (out.ok) expect(out.text).toBe(`a${CR}${NL}B1${CR}${NL}B2${CR}${NL}c`);
   });
 
+  // 实测缺陷：按行读回 CRLF 文件时每行末尾都带一个 `\r`（`split("\n")` 的必然结果），
+  // 而它在界面上**看不见**——模型照抄那一整段当 oldText 时会把 `\r` 一起抄进来，
+  // 与文件里的 `\r\n` 对不上 → 精确匹配必然 not-found，模型只会以为"片段抄错了"。
+  // 修法是**从源头去掉**：读回的正文里不该出现行尾 `\r`（否则就是"读回来的东西贴不回去"）。
+  it("CRLF 文件读回时行尾不带 \\r，且照抄回去能改到", () => {
+    const NL = String.fromCharCode(10);
+    const CR = String.fromCharCode(13);
+    const text = `const a = 1;${CR}${NL}const b = 2;${CR}${NL}const c = 3;${CR}${NL}`;
+    const read = sliceWithLineNumbers(text, 2, 2);
+    // 显示给人看的内容里不能有不可见字符（否则模型照抄必失败）。
+    expect(read.body).toBe("    2| const b = 2;");
+    expect(read.body).not.toContain(CR);
+    // 反过来：照抄回去必须改得到，且文件仍保持 CRLF。
+    const out = applyExactEdit(text, read.body, "    2| const b = 99;");
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.text).toContain(`const b = 99;${CR}${NL}`);
+      expect(out.text).not.toContain("const b = 2;");
+    }
+  });
+
   // 实测复现：**行尾归一那条分支**（oldText 用 LF、文件是 CRLF）原先把归一化后的
   // 全文直接写回，等于把整个 CRLF 文件**静默改成 LF**。
   // 上面那条只覆盖了"直接命中"的分支，这条覆盖归一分支。

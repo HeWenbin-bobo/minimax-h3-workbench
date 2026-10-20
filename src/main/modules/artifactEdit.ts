@@ -94,9 +94,32 @@ function occurrences(haystack: string, needle: string): number[] {
   }
 }
 
-/** 行尾归一：Windows 上模型给的 oldText 可能是 `\r\n`，而文件里是 `\n`。 */
+/**
+ * 行尾归一：Windows 上模型给的 oldText 可能是 `\r\n`，而文件里是 `\n`。
+ *
+ * **只认 `\r\n`**：行末孤立的 `\r` 不走这里——那种 `\r` 是"按行读回时带出来的显示残渣"，
+ * 已在 `splitLines` 里从源头去掉了。若把它也归一成 `\n`，`oldText` 会**多吃一个换行**，
+ * 替换后两行被拼在一起（实测：`const b = 99;const c = 3;` 粘成一行）。
+ */
 function normalizeEol(text: string): string {
   return text.replace(/\r\n/g, "\n");
+}
+
+/**
+ * 按 `\n` 切行，并**去掉每行末尾的 `\r`**。
+ *
+ * 为什么必须在源头去掉（实测缺陷）：CRLF 文件 `split("\n")` 后每行末尾都挂着一个 `\r`，
+ * 而它在界面上**看不见**——模型照抄读回的那一整段当 oldText 时，`\r` 会一起被抄进来。
+ * 之后无论走"直接匹配"还是"剥行号"分支都对不上（文件里是 `\r\n`，抄来的是 `…;\r` 加别的组合），
+ * 模型只会以为是"片段抄错了"，反复重读、白烧预算。
+ *
+ * 这是我们**自己的输出格式**给模型挖的坑：读回来的文本必须能原样贴回去。
+ */
+function splitLines(text: string): string[] {
+  const lines = text.split("\n");
+  // 末尾换行不产生额外一行（见 `countLines`）。
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
 }
 
 /**
@@ -359,10 +382,8 @@ export function countLines(text: string): number {
  * @param endLine   含端点，缺省到 startLine + MAX_READ_LINES - 1
  */
 export function sliceWithLineNumbers(text: string, startLine?: number, endLine?: number): { body: string; totalLines: number; from: number; to: number; truncated: boolean; charCapped: boolean; reversed: boolean } {
-  const lines = text.split("\n");
-  // 末尾换行不产生额外一行（见 `countLines`）：否则回执行数会多报 1，
-  // 而且恰好 MAX_READ_LINES 行的文件会被误判成"还有 1 行没显示"。
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  // 行尾的 `\r` 从源头去掉（见 `splitLines`）：读回来的文本必须能原样贴回 oldText。
+  const lines = splitLines(text);
   const total = lines.length;
   const from = Math.max(1, Math.min(Math.floor(startLine ?? 1) || 1, total));
   // 有显式 endLine 时尊重它（但也夹到文件末尾）；没给就按默认上限截断。
@@ -429,7 +450,9 @@ export function findMatchingLines(
   context = 2
 ): { matches: Array<{ line: number; text: string }>; total: number; body: string; charCapped: boolean; lineCapped: boolean; caseOnly: number; strippedGutter?: boolean } {
   let needle = String(keyword ?? "");
-  const lines = text.split("\n");
+  // 同样从源头去掉行尾 `\r`：模型是把**读回的正文**复制过来当 keyword 的，
+  // 而那份正文现在不带 `\r`（见 `splitLines`）；文件侧也不该带，否则命中不了。
+  const lines = splitLines(text);
   if (!needle) return { matches: [], total: 0, body: "", charCapped: false, lineCapped: false, caseOnly: 0 };
   // **keyword 也可能带着读回时的行号前缀**（实测复现）：模型常把 `    42| const a = 1;`
   // 整行复制进来当关键词。那不是文件内容，`includes` 永远命中不了，回执还会说

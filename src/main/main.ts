@@ -1650,11 +1650,30 @@ ${tableNote}` : ""}`;
             // 用户答了但答的是时长、没提后端时，也应该允许模型自己定——
             // 否则它会为了"凑一个后端名"再问一次，白烧步骤。
             backendSettled = true;
-            // **选项答案走 loose**：那里的文本是我们自己给出的选项（「云端（按秒计费）」），
-            // 出现「云端」没有歧义。而 `userText`（用户原话）必须是严格模式——
-            // 用户描述画面说「云端漂浮的城堡」时被判成"选了云端"会直接跳过询问、
-            // 按秒计费生成（实测误判，花的是真钱）。
-            const picked = backendMentionedInText(answer, { loose: true });
+            // **只在「我们自己给出的选项」里找后端**（实测缺陷 probe-custom-answer-backend）。
+            //
+            // 答案串是 `formatAnswers` 拼出来的：`【header】用户选择：<label>（<description>）`。
+            // 它既包含预设选项的 label，**也包含用户手写的自定义文本**——两者混在一段字符串里。
+            //
+            // 旧写法对整段答案走 `loose` 模式（裸「云端」也算），于是用户在自定义框里写
+            // 「云端漂浮的城堡那种感觉」就被判成"选了 MiniMax 云端"，直接按秒计费生成。
+            // 他明明只是在描述画面。
+            //
+            // 现在把两件事分开：
+            // ① 选项 label 是我们自己生成的，出现即代表用户点了它 → 可以走 loose；
+            // ② 整段答案（含手写内容）只走**严格**模式，认「用/走/选 云端」这类明确指令。
+            const pickedFromOptions = (): BackendKind | undefined => {
+              for (const question of params.questions) {
+                for (const option of question.options ?? []) {
+                  const label = typeof option.label === "string" ? option.label : "";
+                  if (!label || !answer.includes(label)) continue;
+                  const kind = normalizeBackendKind(option.id) ?? backendMentionedInText(label, { loose: true });
+                  if (kind) return kind;
+                }
+              }
+              return undefined;
+            };
+            const picked = pickedFromOptions() ?? backendMentionedInText(answer);
             if (picked) {
               backendFromUser = picked;
               // **记进会话**：计划模式下轮 2 点「继续执行」时不该再问一遍。

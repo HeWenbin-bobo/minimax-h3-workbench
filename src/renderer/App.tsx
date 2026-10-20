@@ -1789,6 +1789,67 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     })();
     return () => { cancelled = true; };
   }, [activeId]);
+  /**
+   * **补齐"离开期间丢掉的整轮收尾"**（实测缺陷 probe-tasks-while-away）。
+   *
+   * 切页会卸载本组件，那段时间 `llm:chunk` / `llm:tasks` / `llm:done` **全部**被丢弃。
+   * 最严重的是 `llm:done` —— 渲染端靠它清 `generatingIds` 与 `streaming`：
+   * 丢了这个，会话就**永久停在「生成中」**（■ 停止一直在），
+   * 而 `send()` 的守卫会一直 return，用户**再也发不出新消息**；
+   * 期间建出的视频任务卡片也一并消失。
+   *
+   * 主进程保留了本轮状态（正文 / 任务 id / 是否已收尾），挂载或切回会话时补齐。
+   */
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await window.h3.turnState(activeId);
+        if (cancelled || !response.ok || !response.data) return;
+        const state = response.data;
+        const target = activeId;
+        // 正文：只在比现有更长时覆盖（与 onLlmDone 同一口径）。
+        if (state.fullText) {
+          streamBuffers.current.set(target, state.fullText);
+        }
+        // 任务 id：并入当前气泡（与 onLlmTasks 同一口径，按 id 去重）。
+        if (state.taskIds.length > 0) {
+          setSessions((all) => patchLast(all, target, (msg) => {
+            const seen = new Set((msg.taskGroups ?? []).flat());
+            const missing = state.taskIds.filter((id) => !seen.has(id));
+            return missing.length ? { ...msg, taskGroups: [...(msg.taskGroups ?? []), missing] } : msg;
+          }));
+        }
+        if (state.done) {
+          setSessions((all) => patchLast(all, target, (msg) => {
+            const base = state.fullText && state.fullText.length > (msg.content?.length ?? 0)
+              ? state.fullText
+              : msg.content;
+            const failed = !state.ok && Boolean(state.message);
+            return {
+              ...msg,
+              streaming: false,
+              questions: undefined,
+              error: failed,
+              content: failed
+                ? (base ? `${base}\n\n请求失败：${state.message}` : `请求失败：${state.message}`)
+                : base
+            };
+          }));
+          // **必须同时退出"生成中"**：否则停止键一直在、send() 守卫一直挡，
+          // 用户再也发不出新消息（这正是本缺陷最伤人的地方）。
+          setGeneratingIds((all) => all.filter((id) => id !== target));
+          sendingRef.current.delete(target);
+          streamBuffers.current.delete(target);
+          taskIdBuffers.current.delete(target);
+        }
+      } catch {
+        // 补不回来就当没有：这条路径只是兜底，不该让界面报错。
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeId]);
   const onMessagesScroll = () => {
     const el = scrollRef.current;
     if (!el) return;

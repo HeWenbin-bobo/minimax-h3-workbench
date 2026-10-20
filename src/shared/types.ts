@@ -321,6 +321,23 @@ export interface WorkbenchApi {
    */
   pendingQuestion(sessionId: string): Promise<ApiResponse<{ requestId: string; questions: LlmQuestionEvent["questions"] } | undefined>>;
   /**
+   * 取该会话**本轮运行状态**（正文、任务 id、是否已收尾）。
+   *
+   * 切页会卸载 `PlaygroundPage`，那段时间 `llm:chunk` / `llm:tasks` / `llm:done`
+   * 全部没有订阅者、被直接丢弃。最严重的是 `llm:done`：渲染端靠它清 `generatingIds`
+   * 与 `streaming`，丢了这个就**永久停在「生成中」、再也发不出新消息**，
+   * 期间建出的任务卡片也一并消失（实测缺陷 probe-tasks-while-away）。
+   *
+   * 渲染端挂载/切回会话时调一次，把这三样补齐。已收尾的条目读一次即清。
+   */
+  turnState(sessionId: string): Promise<ApiResponse<{
+    fullText: string;
+    taskIds: string[];
+    done: boolean;
+    ok: boolean;
+    message?: string;
+  } | undefined>>;
+  /**
    * 安装包下载进度（`downloadAndInstallUpdate` 期间推送）。
    *
    * 主进程早就把 electron-updater 的 `download-progress` 接出来了，界面也备好了

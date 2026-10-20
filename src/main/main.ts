@@ -503,6 +503,26 @@ function registerIpc(
    */
   const sessionChosenBackend = new Map<string, BackendKind>();
   /**
+   * 本轮运行的**收尾状态**（按会话，供渲染端在"离开期间丢了事件"时补齐）。
+   *
+   * 为什么需要（实测缺陷 probe-tasks-while-away，比丢正文严重得多）：
+   * 切页会卸载 `PlaygroundPage`，那段时间 `llm:done` **整个事件**也被丢弃——
+   * 而渲染端正是靠它来 `setGeneratingIds(剔除)` 与 `streaming: false`。
+   * 结果：用户切回来看到的是一个**永远转圈的空气泡**，`■ 停止` 一直在，
+   * 而且因为 `generatingIds` 里还有它，**再也发不出新消息**（`send()` 的守卫一直 return）。
+   * 同期建出的视频任务卡片也一并丢失（`llm:tasks` 同样没有订阅者）。
+   *
+   * 这里把"这一轮最终如何"留一份，渲染端挂载/切回会话时问一次即可补齐。
+   * 只存内存（重启后本就无从恢复，且那时渲染端也不会有残留的 generating 状态）。
+   */
+  const sessionTurnState = new Map<string, {
+    fullText: string;
+    taskIds: string[];
+    done: boolean;
+    ok: boolean;
+    message?: string;
+  }>();
+  /**
    * 交互提问桥：工具循环挂起等渲染端回答（`request_user_input`）。
    * 必须带超时——没有超时的话用户关窗走开会让该会话的取消器永久占着，
    * 那条会话从此再也发不出消息（同会话并发守卫一直拒绝）。
@@ -871,11 +891,22 @@ function registerIpc(
     // 口径必须与渲染端 `streamBuffers` 完全一致：**所有** `chunk()` 推过的文本都算
     // （包括"已停止生成""连接中断重试"这类提示），否则补出来的内容会对不上。
     let turnText = "";
+    // 本轮状态：渲染端离开期间丢掉的 `llm:tasks` / `llm:done` 靠它补齐
+    // （见 `sessionTurnState` 的说明）。
+    const turnState = { fullText: "", taskIds: [] as string[], done: false, ok: true, message: undefined as string | undefined };
+    sessionTurnState.set(session, turnState);
     const chunk = (event: LlmStreamEvent) => {
       if (typeof event.delta === "string" && event.delta) turnText += event.delta;
+      turnState.fullText = turnText;
       sendChunk({ ...event, sessionId: session });
     };
-    const done = (event: LlmDoneEvent) => sendDone({ ...event, sessionId: session, fullText: turnText });
+    const done = (event: LlmDoneEvent) => {
+      turnState.fullText = turnText;
+      turnState.done = true;
+      turnState.ok = event.ok;
+      turnState.message = event.message;
+      sendDone({ ...event, sessionId: session, fullText: turnText });
+    };
     /**
      * 上游报"上下文超窗"（对齐 Codex 的 `ContextWindowExceeded` 触发源）时的统一处理：
      * 本地窗口表把窗口估小了 → 记录 forceCompact，下一轮 maybeCompact 会无条件压缩。
@@ -987,7 +1018,14 @@ function registerIpc(
        */
       let agentQuestionCount = 0;
       const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
-      const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
+      const sendTasks = (taskIds: string[]) => {
+        agentTaskCount += taskIds.length;
+        // 记进本轮状态：渲染端离开期间丢掉的 `llm:tasks` 靠它补齐
+        // （否则用户切回来只看到"生成中"，不知道任务已经建出来了）。
+        const state = sessionTurnState.get(session);
+        if (state) state.taskIds.push(...taskIds);
+        sendLlmTasks({ taskIds, sessionId: session });
+      };
       // 编辑产物后推一条"更新"事件：渲染端就地刷新卡片大小与已打开的预览。
       // 为什么需要（实测缺口）：此前只有 create_file 会推事件，于是模型改完文件后，
       // 卡片上的大小停在旧值、**已打开的预览面板也不会重载**——用户对着旧画面
@@ -1933,6 +1971,26 @@ ${tableNote}` : ""}`;
   handle("llm:pending-question", (_event, sessionId: string) => {
     const session = typeof sessionId === "string" && sessionId ? sessionId : "";
     return session ? questionBridge.pendingFor(session) : undefined;
+  });
+  /**
+   * 取该会话**本轮运行状态**（正文、任务 id、是否已收尾）。
+   *
+   * 切页会卸载 `PlaygroundPage`，那段时间 `llm:chunk` / `llm:tasks` / `llm:done`
+   * **全部**没有订阅者，被直接丢弃。最严重的是 `llm:done`：渲染端靠它清 `generatingIds`
+   * 与 `streaming`，丢了这个就**永久停在「生成中」、再也发不出新消息**，
+   * 期间建出的任务卡片也一并消失（实测缺陷 probe-tasks-while-away）。
+   *
+   * 渲染端挂载/切回会话时调一次，把这三样补齐。
+   */
+  handle("llm:turn-state", (_event, sessionId: string) => {
+    const session = typeof sessionId === "string" && sessionId ? sessionId : "";
+    if (!session) return undefined;
+    const state = sessionTurnState.get(session);
+    if (!state) return undefined;
+    // 已收尾的条目读一次就清掉：渲染端补齐之后不再需要，
+    // 留着会让"下一轮开始时短暂读到上一轮的 done=true"造成瞬态错判。
+    if (state.done) sessionTurnState.delete(session);
+    return state;
   });
 
   /**

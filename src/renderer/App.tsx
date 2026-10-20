@@ -1821,6 +1821,15 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             return missing.length ? { ...msg, taskGroups: [...(msg.taskGroups ?? []), missing] } : msg;
           }));
         }
+        // 产物同理：切页期间丢掉的 `llm:artifact` 靠它补齐
+        // （否则气泡写着"写好了"，却没有任何文件卡片，而磁盘上文件确实在）。
+        if (state.artifacts.length > 0) {
+          setSessions((all) => patchLast(all, target, (msg) => {
+            const existing = msg.artifacts ?? [];
+            const missing = state.artifacts.filter((a) => !existing.some((b) => b.path === a.path));
+            return missing.length ? { ...msg, artifacts: [...existing, ...missing] } : msg;
+          }));
+        }
         if (state.done) {
           setSessions((all) => patchLast(all, target, (msg) => {
             const base = state.fullText && state.fullText.length > (msg.content?.length ?? 0)

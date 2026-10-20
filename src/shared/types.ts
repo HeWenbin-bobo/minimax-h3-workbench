@@ -333,6 +333,8 @@ export interface WorkbenchApi {
   turnState(sessionId: string): Promise<ApiResponse<{
     fullText: string;
     taskIds: string[];
+    /** 本轮产出的文件（`create_file` 建的）。切页期间 `llm:artifact` 会丢，靠它补齐。 */
+    artifacts: Array<{ name: string; path: string; size: number; kind: "html" | "sheet" | "doc" }>;
     done: boolean;
     ok: boolean;
     message?: string;

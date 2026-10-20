@@ -518,6 +518,15 @@ function registerIpc(
   const sessionTurnState = new Map<string, {
     fullText: string;
     taskIds: string[];
+    /**
+     * 本轮产出的产物（`create_file` 建的）。
+     *
+     * 同一根因的第四个实例（实测缺陷 probe-artifact-while-away）：`llm:artifact`
+     * 也靠 `PlaygroundPage` 订阅，切页期间被丢弃 —— 用户切回来时气泡写着
+     * 「写好了。」却没有**任何**文件卡片，而磁盘上文件确实在。
+     * 产物是这一轮的主要交付物，看不到就等于白做。
+     */
+    artifacts: Array<{ name: string; path: string; size: number; kind: "html" | "sheet" | "doc" }>;
     done: boolean;
     ok: boolean;
     message?: string;
@@ -891,9 +900,16 @@ function registerIpc(
     // 口径必须与渲染端 `streamBuffers` 完全一致：**所有** `chunk()` 推过的文本都算
     // （包括"已停止生成""连接中断重试"这类提示），否则补出来的内容会对不上。
     let turnText = "";
-    // 本轮状态：渲染端离开期间丢掉的 `llm:tasks` / `llm:done` 靠它补齐
+    // 本轮状态：渲染端离开期间丢掉的 `llm:tasks` / `llm:artifact` / `llm:done` 靠它补齐
     // （见 `sessionTurnState` 的说明）。
-    const turnState = { fullText: "", taskIds: [] as string[], done: false, ok: true, message: undefined as string | undefined };
+    const turnState: {
+      fullText: string;
+      taskIds: string[];
+      artifacts: Array<{ name: string; path: string; size: number; kind: "html" | "sheet" | "doc" }>;
+      done: boolean;
+      ok: boolean;
+      message?: string;
+    } = { fullText: "", taskIds: [], artifacts: [], done: false, ok: true, message: undefined };
     sessionTurnState.set(session, turnState);
     const chunk = (event: LlmStreamEvent) => {
       if (typeof event.delta === "string" && event.delta) turnText += event.delta;
@@ -1321,6 +1337,9 @@ function registerIpc(
           // （几十 KB 的 3D 页面 ≈ 每轮多烧上万 token，还会触发压缩）。内容已在磁盘上。
           const renderKind: "html" | "sheet" | "doc" =
             /\.html?$/i.test(saved.name) ? "html" : /\.xlsx$/i.test(saved.name) ? "sheet" : "doc";
+          // 记进本轮状态：切页期间丢掉的 `llm:artifact` 靠它补齐
+          // （否则用户切回来只看到"写好了"，却没有任何文件卡片）。
+          turnState.artifacts.push({ name: saved.name, path: saved.path, size: saved.size, kind: renderKind });
           sendLlmArtifact({ name: saved.name, path: saved.path, size: saved.size, kind: renderKind, sessionId: session });
           agentArtifactCount += 1;
           return `文件已生成并保存：${saved.name}（${saved.size >= 1024 * 1024 ? `${(saved.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(saved.size / 1024))}KB`}）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。**不要**把文件内容重复贴进回复——卡片已经承载了它。请用一两句话说明文件内容概要即可。`;

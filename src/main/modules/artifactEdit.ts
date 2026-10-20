@@ -326,6 +326,26 @@ export const MAX_READ_LINES = 400;
 export const MAX_READ_CHARS = 60_000;
 
 /**
+ * 文本的**真实行数**。
+ *
+ * 为什么不能用 `text.split("\n").length`（实测缺陷）：几乎所有编辑器写出的文件都以换行结尾，
+ * 而 `"a\nb\nc\n".split("\n")` 是 `["a","b","c",""]` —— **4 个元素、3 行内容**。
+ * 后果全是"对着数字说错话"：
+ * - 回执写「共 4 行」，用户在编辑器里看到 3 行；
+ * - 恰好 400 行（`MAX_READ_LINES`）的文件被判成 401 行 → 说「还有 1 行没显示」，
+ *   模型去读第 401 行，什么也拿不到（实测：它会据此怀疑文件被截断了）。
+ *
+ * 规则：**末尾那一个换行不产生额外一行**；空文本仍算 1 行（否则 `from` 会落到 0）。
+ */
+export function countLines(text: string): number {
+  const lines = text.split("\n");
+  // 只有"确实有内容 + 以换行结尾"才丢掉末尾空元素；纯空串保留 1 行，
+  // 否则 `sliceWithLineNumbers` 的 `from = min(start, total)` 会算出 0。
+  if (lines.length > 1 && lines[lines.length - 1] === "") return lines.length - 1;
+  return lines.length;
+}
+
+/**
  * 带行号地切一段出来（读文件工具用）。
  *
  * 为什么要行号：模型据"第 42 行"能补出唯一上下文，而按字符偏移它算不准。
@@ -340,6 +360,9 @@ export const MAX_READ_CHARS = 60_000;
  */
 export function sliceWithLineNumbers(text: string, startLine?: number, endLine?: number): { body: string; totalLines: number; from: number; to: number; truncated: boolean; charCapped: boolean; reversed: boolean } {
   const lines = text.split("\n");
+  // 末尾换行不产生额外一行（见 `countLines`）：否则回执行数会多报 1，
+  // 而且恰好 MAX_READ_LINES 行的文件会被误判成"还有 1 行没显示"。
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   const total = lines.length;
   const from = Math.max(1, Math.min(Math.floor(startLine ?? 1) || 1, total));
   // 有显式 endLine 时尊重它（但也夹到文件末尾）；没给就按默认上限截断。

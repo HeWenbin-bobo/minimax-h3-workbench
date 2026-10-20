@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers, MAX_READ_LINES, MAX_READ_CHARS } from "./artifactEdit";
+import { applyExactEdit, applyExactEdits, countLines, findMatchingLines, sliceWithLineNumbers, MAX_READ_LINES, MAX_READ_CHARS } from "./artifactEdit";
 
 // 这些用例全部来自真机观察到的形态（鹈鹕案例）：
 // 模型为改一处 `M.identity` 整份重写 40KB，改完仍是错的，且它无法核对。
@@ -269,6 +269,33 @@ describe("read_artifact 的默认行数上限", () => {
     const out = sliceWithLineNumbers("a\nb\nc");
     expect(out.truncated).toBe(false);
     expect(out.to).toBe(3);
+  });
+
+  // 实测缺陷：几乎所有编辑器写出的文件都以换行结尾，而 `"a\nb\nc\n".split("\n")`
+  // 是 4 个元素、3 行内容。旧实现按数组长度报行数，于是：
+  // ① 回执写「共 4 行」，用户在编辑器里看到 3 行；
+  // ② 恰好 400 行（MAX_READ_LINES）的文件被算成 401 行 → 说「还有 1 行没显示」，
+  //    模型去读第 401 行什么也拿不到。
+  it("以换行结尾时不多算一行", () => {
+    const out = sliceWithLineNumbers("a\nb\nc\n");
+    expect(out.totalLines).toBe(3);
+    expect(out.body).toBe("    1| a\n    2| b\n    3| c");
+  });
+
+  it("恰好 MAX_READ_LINES 行且以换行结尾时不误报截断", () => {
+    const text = `${Array.from({ length: MAX_READ_LINES }, (_, i) => `line ${i + 1}`).join("\n")}\n`;
+    const out = sliceWithLineNumbers(text);
+    expect(out.totalLines).toBe(MAX_READ_LINES);
+    expect(out.truncated).toBe(false);
+  });
+
+  it("countLines 的边界（空串仍是 1 行，末尾换行不算）", () => {
+    const NL = String.fromCharCode(10);
+    expect(countLines("")).toBe(1);
+    expect(countLines("a")).toBe(1);
+    expect(countLines(`a${NL}`)).toBe(1);
+    expect(countLines(`a${NL}b${NL}`)).toBe(2);
+    expect(countLines(`a${NL}${NL}`)).toBe(2);
   });
 
   it("从中间开始读时按上限往后取，而不是一口气读到末尾", () => {

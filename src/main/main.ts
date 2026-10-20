@@ -35,7 +35,7 @@ import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
 import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, SHEET_REQUEST_EXTS } from "./modules/artifactDir";
-import { applyExactEdit, applyExactEdits, findMatchingLines, sliceWithLineNumbers, MAX_READ_CHARS } from "./modules/artifactEdit";
+import { applyExactEdit, applyExactEdits, countLines, findMatchingLines, MAX_READ_CHARS, sliceWithLineNumbers } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { isPathInside, resolveWithinRoot } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
@@ -1364,7 +1364,9 @@ ${tableNote}` : ""}`;
             await atomicWriteText(resolved, outcome.text);
             const after = await stat(resolved);
             // 让模型知道改完共几行 / 多大——据此判断是不是真的只动了那一处。
-            const totalLines = outcome.text.split("\n").length;
+            // 用 `countLines` 而不是 `split("\n").length`：文件通常以换行结尾，
+            // 后者会多算 1 行（回执说"共 8 行"、用户在编辑器里看到 7 行）。
+            const totalLines = countLines(outcome.text);
             // **必须推一次"更新"事件**（实测缺口）：此前只有 create_file 会推，
             // 于是卡片上的大小停在旧值，已打开的预览面板也不会重载——
             // 用户对着旧画面判断"还是坏的"，模型却说改好了。
@@ -1420,7 +1422,8 @@ ${tableNote}` : ""}`;
             }
             await atomicWriteText(resolved, outcome.text);
             const after = await stat(resolved);
-            const totalLines = outcome.text.split("\n").length;
+            // 同单处编辑：用 `countLines`（末尾换行不算额外一行）。
+            const totalLines = countLines(outcome.text);
             const at = outcome.lines.join("、");
             // 事件与回执都用 **found.name**（实际改的那份）：用请求名会让卡片标签被打回旧名，
             // 模型也会以为改的是自己点名的那份（`8dc8c3b` 在单处编辑里修过，批量这条漏了）。

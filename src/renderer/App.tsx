@@ -431,7 +431,12 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       {catEdit.project ? <input className="cat-input" autoFocus value={catEdit.value} placeholder="分类名（留空清除）"
         onChange={(e) => setCatEdit({ project: true, value: e.target.value })}
         onBlur={() => commitProjectCategory()}
-        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") setCatEdit({ project: false, value: "" }); }} />
+        onKeyDown={(e) => {
+          // 输入法组字中按 Enter 是"选字"，不该提交/失焦（实测缺陷 probe-ime-enter）。
+          if (isComposingKey(e)) return;
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") setCatEdit({ project: false, value: "" });
+        }} />
         : <button className="text-button" title="给当前项目设置分类" disabled={!activeProject} onClick={() => { if (activeProject) setCatEdit({ project: true, value: activeProject[0].category || "" }); }}>＋ 分类</button>}
     </div>}
     <div className="project-tabs">
@@ -974,8 +979,24 @@ interface PlaygroundMessage {
 const pgSessionsKey = "h3-playground-sessions";
 
 /** token 数的可读格式：12345 → "12.3k"。用于上下文占用与压缩提示。 */
-function formatTokens(tokens: number): string {
-  if (!Number.isFinite(tokens) || tokens < 0) return "0";
+/**
+ * 这次按键是不是**输入法组字过程中**产生的（中文/日文用户按 Enter 选字）。
+ *
+ * 为什么必须判断（实测缺陷 probe-ime-enter）：输入法组字时按 Enter 是"上屏候选词"，
+ * 而我们的 `onKeyDown` 只判 `key === "Enter"` 就直接 `send()` ——
+ * 用户拼音还没选完（「帮我生成一个xiao」）就被发了出去，输入框还被清空，
+ * 刚敲的内容全丢。中文用户几乎每次输入都要经过这一步。
+ *
+ * 两个信号都要认：`isComposing`（标准）与 `keyCode === 229`（部分输入法/旧浏览器
+ * 只在 keydown 上给 229，isComposing 为 false）。
+ */
+function isComposingKey(event: { isComposing?: boolean; keyCode?: number; nativeEvent?: { isComposing?: boolean; keyCode?: number } }): boolean {
+  if (event.isComposing || event.nativeEvent?.isComposing) return true;
+  const keyCode = event.keyCode ?? event.nativeEvent?.keyCode;
+  return keyCode === 229;
+}
+
+function formatTokens(tokens: number): string {  if (!Number.isFinite(tokens) || tokens < 0) return "0";
   return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(Math.round(tokens));
 }
 
@@ -2359,9 +2380,18 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const running = generatingIds.includes(session.id);
     return <div key={session.id} className={`pg-session${session.id === activeId ? " active" : ""}${running ? " running" : ""}${indented ? " indented" : ""}`}>
       {renamingId === session.id
-        ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(undefined); }} onFocus={(e) => e.target.select()} />
+        ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => {
+          // 输入法组字中按 Enter 是"选字"，不该提交（实测缺陷 probe-ime-enter）。
+          if (isComposingKey(e)) return;
+          if (e.key === "Enter") commitRename();
+          if (e.key === "Escape") setRenamingId(undefined);
+        }} onFocus={(e) => e.target.select()} />
         : catSessionId === session.id
-        ? <input className="pg-rename" autoFocus value={catSessionDraft} placeholder="分类名（留空清除）" onChange={(e) => setCatSessionDraft(e.target.value)} onBlur={commitSessionCategory} onKeyDown={(e) => { if (e.key === "Enter") commitSessionCategory(); if (e.key === "Escape") setCatSessionId(undefined); }} onFocus={(e) => e.target.select()} />
+        ? <input className="pg-rename" autoFocus value={catSessionDraft} placeholder="分类名（留空清除）" onChange={(e) => setCatSessionDraft(e.target.value)} onBlur={commitSessionCategory} onKeyDown={(e) => {
+          if (isComposingKey(e)) return;
+          if (e.key === "Enter") commitSessionCategory();
+          if (e.key === "Escape") setCatSessionId(undefined);
+        }} onFocus={(e) => e.target.select()} />
         : <button className="pg-session-body" onClick={() => { switchSession(session.id); }} onDoubleClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }} title="双击重命名">
           <strong>{session.title || "新对话"}</strong>
           <small>
@@ -2482,7 +2512,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           {/* 单框内嵌工具条（对齐 Codex 的 composer 形态）：输入框与发送键同框，工具 chips 在框下。
               保留 .pg-input-row / .primary 类名——E2E 与既有样式都按它们定位，改类名等于无谓的回归面。 */}
           <div className="pg-input-row">
-            <textarea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder={generating ? "AI 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
+            <textarea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder={generating ? "AI 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"} onKeyDown={(e) => {
+              // **输入法组字中的 Enter 是"选字"，不是"发送"**（实测缺陷 probe-ime-enter）。
+              if (e.key !== "Enter" || e.shiftKey || isComposingKey(e)) return;
+              e.preventDefault();
+              void send();
+            }} />
             {/* 这个方形键在生成中就是停止键：图标已经是 ■，却还 disabled（灰掉、点了没反应），
                 用户只能去下面 chips 里找「■ 停止」。图标语义已经说明它是停止，就让它真能停。 */}
             {/* 这个方形键在生成中就是停止键：图标已经是 ■，却还 disabled（灰掉、点了没反应），

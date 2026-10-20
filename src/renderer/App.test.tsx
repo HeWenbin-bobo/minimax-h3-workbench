@@ -30,6 +30,17 @@ describe("方案块渲染（<proposed_plan> 契约）", () => {
     expect(html).not.toContain("proposed_plan");
   });
 
+  // 实测缺陷：`好的，方案如下：` 紧跟 `<proposed_plan>`（中间没空行）时，
+  // 段落合并条件不认开标签 → 整个块被并进段落，标签按字面文本显示、
+  // 方案卡片彻底不出现。模型"先说一句、再给方案块"是最自然的写法。
+  it("方案块紧跟在段落后面（中间没有空行）也要渲染成卡片", () => {
+    const NL = String.fromCharCode(10);
+    const html = render(["好的，方案如下：", PLAN_BLOCK_OPEN, "## 方案", "1. 第一步", PLAN_BLOCK_CLOSE].join(NL));
+    expect(html).toContain("md-plan");
+    expect(html).not.toContain("proposed_plan");
+    expect(html).toContain("好的，方案如下：");
+  });
+
   it("块内 markdown 照常渲染（标题与有序列表都不丢）", () => {
     const html = render(`${PLAN_BLOCK_OPEN}\n## 方案标题\n\n1. 搜价格\n2. 出表格\n${PLAN_BLOCK_CLOSE}`);
     expect(html).toContain("<h4>");

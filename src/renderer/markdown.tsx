@@ -155,9 +155,20 @@ export function renderMarkdown(text: string, depth = 0): ReactNode[] {
     // 普通段落（连续非空非特殊行合并）
     const paragraph: string[] = [line];
     index += 1;
-    while (index < lines.length && lines[index].trim() && !lines[index].trimStart().startsWith("```") && !/^\s*[-*]\s+/.test(lines[index]) && !/^\s*\d+[.、]\s+/.test(lines[index]) && !/^#{1,4}\s/.test(lines[index]) && !isTableRow(lines[index])) {
-      // 表格行不能并入段落：否则"说明文字：\n| a | b |\n|---|---|" 会把整张表
-      // 当成段落正文（实测：紧随其后的表格完全不渲染，用户看到的是一堆竖线）。
+    // **方案块的开标签也算"特殊行"**（实测缺陷）：`好的，方案如下：` 紧跟 `<proposed_plan>`
+    // （中间没有空行）时，旧条件不认它，于是整个块被并进段落 →
+    // 标签按字面文本显示成 `&lt;proposed_plan&gt;`，方案卡片彻底不出现。
+    // 模型在"先说一句、再给方案块"这种很自然的写法下必定踩到。
+    // 表格行同理不能并入（注释见下）：否则"说明文字：\n| a | b |\n|---|---|" 会把整张表吞进段落。
+    const isSpecialLine = (text: string) =>
+      !text.trim()
+      || text.trimStart().startsWith("```")
+      || text.trim() === PLAN_BLOCK_OPEN
+      || /^\s*[-*]\s+/.test(text)
+      || /^\s*\d+[.、]\s+/.test(text)
+      || /^#{1,4}\s/.test(text)
+      || isTableRow(text);
+    while (index < lines.length && !isSpecialLine(lines[index])) {
       paragraph.push(lines[index]);
       index += 1;
     }

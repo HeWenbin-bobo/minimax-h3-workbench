@@ -865,8 +865,17 @@ function registerIpc(
       sessionAborters.delete(session);
       throw error;
     }
-    const chunk = (event: LlmStreamEvent) => sendChunk({ ...event, sessionId: session });
-    const done = (event: LlmDoneEvent) => sendDone({ ...event, sessionId: session });
+    // **累计本轮所有 delta**（见 `LlmDoneEvent.fullText` 的说明）：渲染端切页会卸载组件，
+    // 那段时间没有订阅者、`llm:chunk` 被丢弃，切回后正文中间缺一段。
+    // 主进程本来就经手每个 delta，顺手存一份，收尾时让渲染端补齐。
+    // 口径必须与渲染端 `streamBuffers` 完全一致：**所有** `chunk()` 推过的文本都算
+    // （包括"已停止生成""连接中断重试"这类提示），否则补出来的内容会对不上。
+    let turnText = "";
+    const chunk = (event: LlmStreamEvent) => {
+      if (typeof event.delta === "string" && event.delta) turnText += event.delta;
+      sendChunk({ ...event, sessionId: session });
+    };
+    const done = (event: LlmDoneEvent) => sendDone({ ...event, sessionId: session, fullText: turnText });
     /**
      * 上游报"上下文超窗"（对齐 Codex 的 `ContextWindowExceeded` 触发源）时的统一处理：
      * 本地窗口表把窗口估小了 → 记录 forceCompact，下一轮 maybeCompact 会无条件压缩。

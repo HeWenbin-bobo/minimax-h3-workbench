@@ -1605,7 +1605,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     });
     const offDone = window.h3.onLlmDone((event) => {
       const targetId = event.sessionId;
-      const buffered = targetId ? streamBuffers.current.get(targetId) ?? "" : "";
+      // **收尾优先用主进程带来的全量文本**（见 `LlmDoneEvent.fullText` 的说明）：
+      // 切页会卸载本组件，那段时间的 `llm:chunk` 没人接收、直接丢掉——
+      // 仅靠本地缓冲补出来会**中间缺一段**（实测：`甲乙` + `戊己庚辛`，缺「丙丁」）。
+      // 主进程逐 delta 累计过一份完整文本，这里取更长的那份即可补齐。
+      const localBuffered = targetId ? streamBuffers.current.get(targetId) ?? "" : "";
+      const buffered = (typeof event.fullText === "string" && event.fullText.length > localBuffered.length)
+        ? event.fullText
+        : localBuffered;
       const pendingGroups = targetId ? taskIdBuffers.current.get(targetId) ?? [] : [];
       // 本轮是否以 plan 语义发出：决定要不要给收尾消息打「待确认」标记（渲染端据此亮「继续执行」）。
       const wasPlanTurn = targetId ? planTurnRef.current.has(targetId) : false;

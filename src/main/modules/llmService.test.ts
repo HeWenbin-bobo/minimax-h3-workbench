@@ -239,6 +239,17 @@ describe("工具成败判定（isToolFailure）", () => {
     it("摘要要说「没有创建任务」，不能只写「完成」", () => {
       expect(humanizeToolOutput("generate_video", blocked[0])).toMatch(/没有创建任务|还没有确定/);
     });
+
+    /**
+     * **摘要会渲染成纯文本**（`.pg-tool-step` 是 `<div>{step}</div>`，不走 markdown），
+     * 所以回执里的 `**` 会**原样显示**成星号——实测提取出来是
+     * `**还没有确定用哪个后端，任务没有创建`。
+     */
+    it("摘要里不能残留 markdown 粗体标记（步骤条按纯文本渲染）", () => {
+      const summary = humanizeToolOutput("generate_video", blocked[0]);
+      expect(summary).not.toContain("**");
+      expect(summary).not.toContain("`");
+    });
   });
 
   // 本会话自引入：允许 `duration` / `count` 写成 `"8 秒"` / `"2 路"` 之后，

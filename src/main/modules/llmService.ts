@@ -686,7 +686,13 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
     // 用户不需要读到"写清要做什么 + 当前 status"这种内部约定。
     const first = String(output).split(/[。\n]/, 1)[0] ?? "";
     const short = first.split(/[：:]/, 1)[0] ?? first;
-    return sliceSafe(short.trim() || first, 80);
+    // **必须剥掉 markdown 标记**：步骤条是 `<div>{step}</div>`，按**纯文本**渲染，
+    // 不做 markdown 解析。而回执里常带粗体强调——闸门那条以
+    // `**还没有确定用哪个后端，任务没有创建。**` 开头，不剥就会原样显示星号
+    // （实测提取结果：`**还没有确定用哪个后端，任务没有创建`）。
+    // 反引号同理（`\`local\`` 会显示成带反引号的字面量）。
+    const plain = (short.trim() || first).replace(/\*\*|`/g, "");
+    return sliceSafe(plain, 80);
   }
   switch (toolName) {
     case "web_search": {

@@ -2126,7 +2126,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         onNotice("AI 正在等你回答上面的选择题——请点一个选项，或点「跳过，你决定」。");
         return;
       }
-      if (generatingIds.includes(active.id) || sendingRef.current.has(active.id)) return;
+      // **AI 正在回复时也要说清楚**（实测缺陷 probe-send-while-streaming）：
+      // 这一刻方形主键是「■ 停止」，用户在输入框打完字点它会被静默 return ——
+      // 字还在框里、界面毫无反应。他会以为"发了"或"卡住了"，然后反复点。
+      // 与上面"等回答选择题"那条同一类：被挡住必须说明原因。
+      if (generatingIds.includes(active.id) || sendingRef.current.has(active.id)) {
+        onNotice("AI 正在回复这条消息——等它说完，或点「■ 停止」后再发。你刚输入的内容还在框里。");
+        return;
+      }
     } else if (creatingSessionRef.current) {
       // 第一次点击已经进入"新建会话"流程，第二次点击必须被挡住。
       // 这个哨兵要**一直保持到 activeId 真正切换**（见下面重置的 useEffect），

@@ -1991,6 +1991,15 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           sendingRef.current.delete(target);
           streamBuffers.current.delete(target);
           taskIdBuffers.current.delete(target);
+          // **与 `offDone` 同一口径**：执行轮失败（含智能体回落普通对话）时，
+          // 把「继续执行」还给用户。切页期间 `offDone` 根本没跑过，
+          // 少了这一步就会出现"在线路径有按钮、切页回来没按钮"的不一致。
+          const failedTurn = !state.ok || state.fellBack === true;
+          const planMessageId = uiPlanMessageIds.get(target);
+          if (planMessageId) {
+            uiPlanMessageIds.delete(target);
+            if (failedTurn) restorePlanMark(target, planMessageId);
+          }
         }
       } catch {
         // 补不回来就当没有：这条路径只是兜底，不该让界面报错。

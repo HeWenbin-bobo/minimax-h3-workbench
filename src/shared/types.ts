@@ -350,6 +350,8 @@ export interface WorkbenchApi {
     compactionNotices: Array<{ reason: string; before: number; after: number }>;
     done: boolean;
     ok: boolean;
+    /** 本轮智能体失败、已自动回落普通对话（`ok` 仍为 true，但这一轮其实没干成）。 */
+    fellBack?: boolean;
     message?: string;
   } | undefined>>;
   /**

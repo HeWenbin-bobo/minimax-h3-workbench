@@ -474,9 +474,13 @@ button { cursor: pointer; }
 .pg-msg.user .pg-bubble { background: var(--brand-gradient); color: #fff; border: 0; }
 /* 长用户消息（附件全文会拼进来）：默认只显示开头，避免一整面墙把 AI 回复顶到很远。
    实测 3000 行附件曾把气泡撑到 54091px 高（probe-long-attachment）。
-   这里再加一层高度上限兜底：即使预览段本身很长，也不会无界撑开。 */
+   这里再加一层高度上限兜底：即使预览段本身很长，也不会无界撑开。
+
+   **渐变必须与气泡底色同色系**：用户气泡是 `--brand-gradient`（#e0195c 系），
+   第一版这里写成了紫色 rgba(122,39,255)，红底上横一条紫带，很扎眼。
+   取 --brand-gradient 中间那个色标（#d41450）作为淡出终点。 */
 .pg-msg.user .pg-user-clip { max-height: 220px; overflow: hidden; position: relative; }
-.pg-msg.user .pg-user-clip::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 48px; background: linear-gradient(rgba(122, 39, 255, 0), rgba(122, 39, 255, 0.92)); pointer-events: none; }
+.pg-msg.user .pg-user-clip::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 48px; background: linear-gradient(rgba(212, 20, 80, 0), rgba(212, 20, 80, 0.92)); pointer-events: none; }
 .pg-msg.user .pg-user-more { margin-top: 6px; background: rgba(255, 255, 255, 0.18); color: #fff; border: 0; border-radius: 8px; padding: 3px 10px; font-size: 11px; cursor: pointer; }
 .pg-msg.user .pg-user-more:hover { background: rgba(255, 255, 255, 0.3); }
 .pg-msg.user .pg-bubble code { background: rgba(255, 255, 255, 0.18); color: #fff; }

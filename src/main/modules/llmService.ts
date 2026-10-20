@@ -501,14 +501,15 @@ export function isToolFailure(output: unknown): boolean {
   // `没有找到` 是 read_artifact(keyword) 的"没命中"，不是失败调用，但对用户是
   // 「这次没找到」——打勾会让人以为读到了内容（实测渲染成 `✓ 读取文件完成（共 2118 行）`）。
   //
+  // **`未获得用户回答` 不算失败**（实测 probe-skip-question）：用户点的是「跳过，你决定」，
+  // 那是他**主动做的选择**，工具也正常完成了"把选择告诉模型"这件事。
+  // 归进失败会让步骤条打 ✕ 并写「用户未回答」——用户明明刚点了按钮，
+  // 看到的是"软件把我点的当成故障了"。超时同理（没人答，不是工具坏了）。
+  // 两种情况都靠 {@link humanizeToolOutput} 的摘要说清，不需要靠 ✕ 表达。
+  //
   // **"可纠正的拒绝"也算未成功**（本会话放宽 schema 后新增的一类回执）：
-  // 参数空/缺时工具**什么都没做**，只回一句让模型改正的话，例如
-  // 「搜索关键词是空的。…」「步骤清单是空的：…」「没有要问的问题（questions 是空的）。…」
-  // 「没有可应用的修改：edits 是空的。…」。它们不含"失败"二字，旧判定一律打勾，
-  // 步骤条于是显示 `✓ 更新步骤清单完成（步骤清单已更新）`——而清单根本没变。
-  // 判据放在 `head`（第一小句）上：这些回执的第一句就点明了"是空的 / 没有…"。
   if (REJECTION_RE.test(head)) return true;
-  return /失败|未获得用户回答|没有找到/.test(sliceSafe(head, 160));
+  return /失败|没有找到/.test(sliceSafe(head, 160));
 }
 
 /**
@@ -656,8 +657,18 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       const body = output.replace(/\n\n（页面过长已截断）$/, "");
       return `已读取 ${body.length} 字正文${/已截断/.test(output) ? "（已截断）" : ""}`;
     }
-    case "request_user_input":
-      return /未获得用户回答/.test(output) ? "用户未回答，按默认继续" : "已收到你的回答";
+    case "request_user_input": {
+      // **用户主动跳过 ≠ 工具失败**（实测 probe-skip-question）：回执里一直带着
+      // 区分依据——`questionBridge.skip()` reject 的是"用户跳过了这组问题。"，
+      // 而超时 reject 的是"用户未在时限内回答。"。旧摘要一律压成
+      // 「用户未回答，按默认继续」，配合判失败就打 ✕ 显示出来：
+      // 用户明明刚点了「跳过，你决定」，界面却说他"没回答"。
+      // 两句话都是他自己的动作，得分开说。
+      if (/用户跳过了这组问题/.test(output)) return "已跳过（按默认继续）";
+      if (/用户停止了本轮对话/.test(output)) return "已停止本轮";
+      if (/用户未在时限内回答/.test(output)) return "等待超时，按默认继续";
+      return /未获得用户回答/.test(output) ? "未获得回答，按默认继续" : "已收到你的回答";
+    }
     default:
       return "完成";
   }

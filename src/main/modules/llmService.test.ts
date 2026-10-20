@@ -190,6 +190,32 @@ describe("工具成败判定（isToolFailure）", () => {
     expect(text).toBe("共 2118 行");
   });
 
+  // 实测 probe-skip-question（2026-10-20）：用户**自己点**了「跳过，你决定」，
+  // 步骤条却渲染成 `✕ 用户未回答，按默认继续`——把他的主动选择当成工具故障。
+  // 回执里本来就有区分依据（skip / 超时 / 停止 三句文案各不相同），摘要各说各的即可。
+  describe("request_user_input 的跳过/超时/停止不能判成失败", () => {
+    const answered = [
+      "未获得用户回答（用户跳过了这组问题。）。请按你认为最合理的方式继续执行，并在回复里说明你做了哪些默认假设。",
+      "未获得用户回答（用户未在时限内回答。）。请按你认为最合理的方式继续执行。",
+      "未获得用户回答（用户停止了本轮对话。）。请按你认为最合理的方式继续执行。"
+    ];
+
+    it("三种「没答成」都不是失败（用户跳过是他主动的选择）", () => {
+      for (const text of answered) expect(isToolFailure(text), text.slice(0, 20)).toBe(false);
+    });
+
+    it("摘要要说清是哪种情况，不能一律「用户未回答」", () => {
+      expect(humanizeToolOutput("request_user_input", answered[0])).toBe("已跳过（按默认继续）");
+      expect(humanizeToolOutput("request_user_input", answered[1])).toBe("等待超时，按默认继续");
+      expect(humanizeToolOutput("request_user_input", answered[2])).toBe("已停止本轮");
+    });
+
+    it("真的拿到回答时仍说收到了", () => {
+      expect(humanizeToolOutput("request_user_input", "用户已回答：\n【时长】用户选择：6 秒"))
+        .toBe("已收到你的回答");
+    });
+  });
+
   // 本会话自引入：允许 `duration` / `count` 写成 `"8 秒"` / `"2 路"` 之后，
   // 步骤条仍要显示这两个值——只判 `typeof === "number"` 会让它们**从步骤条上消失**，
   // 而"这一轮生成几秒、几条"正是用户最想在这一行确认的东西。

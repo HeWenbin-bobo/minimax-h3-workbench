@@ -1295,6 +1295,20 @@ interface PlaygroundLive {
 }
 let playgroundLive: PlaygroundLive | undefined;
 
+/**
+ * 流式正文与任务 id 的累积缓冲（**模块级**，切页卸载后仍然保留）。
+ *
+ * 为什么不能放在组件内的 `useRef`（实测缺陷 probe-switch-mid-stream）：
+ * `onLlmChunk` 是**整体替换** content（`patchLast(msg => ({ ...msg, content: buffered }))`），
+ * 缓冲就是"到目前为止的全文"。组件卸载重建后会得到空 Map，
+ * 切回后第一个 chunk 只把新那一段写进去 —— **切页前收到的正文被覆盖掉**。
+ * 实测：切页前已有「甲乙」，切完再跑完只剩「戊己庚辛」。
+ *
+ * 与 `playgroundLive` 同一套语义：只存内存，关掉应用即丢（重启没有续传，本来就该清）。
+ */
+const uiStreamBuffers = new Map<string, string>();
+const uiTaskIdBuffers = new Map<string, string[]>();
+
 function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
   // **只解析一次 localStorage**：此前 `useState(loadSessions)` 与
   // `useState(() => loadSessions().find(...))` 各读一遍，等于把整份会话
@@ -1384,8 +1398,17 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 若这里仍放开 10/12/15，非法 seconds+preset 组合会真的发到云端——失败也照样扣卡密次数。
   const videoDurationOptions = durationOptionsFor(videoRequest.backend, videoRequest.preset);
   // 每个会话一条流：sessionId → 累积文本 / 已收到的任务 id / 同步发送守卫。
-  const streamBuffers = useRef(new Map<string, string>());
-  const taskIdBuffers = useRef(new Map<string, string[]>());
+  //
+  // **这两个缓冲必须是模块级的**（实测缺陷 probe-switch-mid-stream）：
+  // 它们是"流式正文的累计值"，而 `onLlmChunk` 是**整体替换** content：
+  //     streamBuffers.set(id, (get(id) ?? "") + delta);
+  //     patchLast(msg => ({ ...msg, content: buffered }));
+  // 放在组件内 useRef 里时，切页卸载 → 重建为空 Map → 切回后第一个 chunk
+  // 把缓冲重置成"只有新来的一段"，**切页前已收到的正文被覆盖掉**。
+  // 实测：切页前已有「甲乙」，切回并跑完后只剩「戊己庚辛」。
+  // 与 `playgroundLive` 同一套语义：只存内存，关掉应用即丢。见 `uiStreamBuffers`。
+  const streamBuffers = { current: uiStreamBuffers };
+  const taskIdBuffers = { current: uiTaskIdBuffers };
   const sendingRef = useRef(new Set<string>());
   // 「提交生成任务」的同步守卫：同一 tick 内连点两次会读到两次 false，
   // 于是创建两组任务（RB 后端每次提交都扣卡密次数，等于重复扣费）。

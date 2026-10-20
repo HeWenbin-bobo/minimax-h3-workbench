@@ -1,6 +1,6 @@
 // CDP E2E 驱动：启动 Electron（remote debugging）→ 连接 → 模拟人类操作 → 断言
 import { spawn } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -8,25 +8,39 @@ import { setTimeout as delay } from "node:timers/promises";
 const ELECTRON = process.platform === "win32"
   ? "node_modules/electron/dist/electron.exe"
   : "node_modules/.bin/electron";
-const PORT = 9222;
 
 export async function launchApp(extraEnv = {}) {
   // 每次启动用独立临时 userData：settings/secrets/tasks/localStorage 全隔离，测试互不污染。
   const userData = await mkdtemp(path.join(tmpdir(), "h3-e2e-"));
-  const child = spawn(ELECTRON, [".", `--remote-debugging-port=${PORT}`], {
+  // **端口必须由本次实例自己决定，不能写死 9222**（实测踩到，2026-10-20）：
+  // 上一轮残留的 electron 还占着 9222 时，下面的 `fetch(/json/list)` 会**连到那个旧实例**
+  // 并立刻拿到 page 返回——探针于是跑在**旧构建**上。实测表现：test-01 假红了 3 条
+  // （`.hero .primary` 明明存在、RB 预设明明正确），杀掉残留进程后同一份代码 21/21 全绿。
+  // 更糟的方向是反过来的：旧构建恰好全绿，于是"改完验证通过"是假的。
+  // 用 `--remote-debugging-port=0` 让 Electron 自选空闲端口，再读它写进 profile 的
+  // `DevToolsActivePort`（两行：端口 + 浏览器 ws 路径）——端口必然属于**我们刚起的这个**。
+  //
+  // **`--user-data-dir` 不能省**（实测 2026-10-20）：`DevToolsActivePort` 是 Chromium
+  // **在应用主进程执行 `app.setPath("userData", …)` 之前**就写好的，落在它自己的 profile
+  // 目录里。只设 `H3_USER_DATA` 时它跑去默认的 `%APPDATA%\minimax-h3-workbench`，
+  // 临时目录里根本没这个文件（探针实测：60 次重试后仍不可达）。
+  // 把 Chromium 的 `--user-data-dir` 也指向同一个临时目录，两侧才一致。
+  const child = spawn(ELECTRON, [".", "--remote-debugging-port=0", `--user-data-dir=${userData}`], {
     cwd: process.cwd(),
     env: { ...process.env, H3_USER_DATA: userData, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"]
   });
   child.stderr.on("data", () => {});
-  // 等调试端口就绪
+  const portFile = path.join(userData, "DevToolsActivePort");
   for (let i = 0; i < 60; i++) {
     try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/json/list`);
+      const port = Number((await readFile(portFile, "utf8")).split("\n")[0]);
+      if (!port) throw new Error("端口文件还没有内容");
+      const res = await fetch(`http://127.0.0.1:${port}/json/list`);
       const targets = await res.json();
       const page = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
-      if (page) return { child, wsUrl: page.webSocketDebuggerUrl };
-    } catch {}
+      if (page) return { child, wsUrl: page.webSocketDebuggerUrl, port };
+    } catch { /* 还没起来，继续等 */ }
     await delay(500);
   }
   child.kill();

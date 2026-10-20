@@ -1226,6 +1226,21 @@ function registerIpc(
             // 按 utf8 硬读只会把乱码喂给模型，它据此改出来的东西必然是坏的。
             raw = decodeTextBytes(await readFile(resolved));
           }
+          // **空文件/空表格要单独说**（实测缺口）：`raw` 是空串时
+          // `sliceWithLineNumbers` 会回「共 1 行，本次显示第 1–1 行」+ 一行空白——
+          // 模型据此以为文件里真有一行内容（或者以为读到的是空行），
+          // 接着去 edit_artifact 找一个不存在的片段，白烧一两步。
+          // 空表格尤其常见：`create_file(kind:"csv")` 内容只有表头以外的空白时，
+          // SheetJS 转出来的就是空串。
+          if (!raw.trim()) {
+            const nameNote = describeArtifactFallback(found.fellBack, safeName, found.name, "read");
+            const nameLead = nameNote ? `${nameNote}\n` : "";
+            return `${nameLead}文件：${found.name}（**这个文件是空的**，没有任何内容可读）。${
+              /\.xlsx$/i.test(found.name)
+                ? "表格里没有数据行——如果你本来要生成内容，请用 create_file(kind=\"csv\") 重新生成，并在 content 里给出完整表头与数据行。"
+                : "如果你本来就该写入内容，请用 create_file 或 edit_artifact 补上。"
+            }`;
+          }
           // **按关键词定位优先**（实测真机）：模型要找某个函数却不知道在哪，
           // 于是把 2118 行的文件按 400 行一段连读 5 次，光找位置就吃掉 5 步。
           const keyword = String(params.keyword ?? "");

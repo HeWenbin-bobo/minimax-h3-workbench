@@ -763,13 +763,17 @@ export async function chatAgent(
 查询词提炼为最核心的 3–6 个词（不是整句话，也不要加"请帮我搜索"之类的礼貌语）。结果不相关就换一组词再搜一次；连续两次不相关就如实告知，不要反复搜同一个词。`,
           // 同样不做 `.min(1)` 硬校验：空 query 时让工具层回一句可纠正的说明，
           // 而不是在 `parseToolCall` 阶段把整个调用丢掉（那一丢就是"收不到回执 → 反复重试"）。
-          inputSchema: z.object({ query: z.string().describe("搜索关键词，3–6 个词，如'iPhone 18 Pro 京东 价格'。不要写整句话。") }),
+          // **`.nullish()` 也不可少**（实测同类坑第十八处）：`query` **整个键缺失**时，
+          // `z.string()` 同样在 `parseToolCall` 阶段被拒——空串与缺键是两条不同的路径，
+          // 只修前者照样静默跳过。下面对每个工具都按"缺键"复核过一遍。
+          inputSchema: z.object({ query: z.string().nullish().describe("搜索关键词，3–6 个词，如'iPhone 18 Pro 京东 价格'。不要写整句话。") }),
           execute: async ({ query }) => {
-            if (!String(query ?? "").trim()) {
+            const text = String(query ?? "").trim();
+            if (!text) {
               return "搜索关键词是空的。请给出 3–6 个具体的词（如'iPhone 18 Pro 京东 价格'），不要写整句话。";
             }
             try {
-              const results = await callbacks.webSearch(query);
+              const results = await callbacks.webSearch(text);
               return results || "未搜索到相关内容。可换一组关键词重试，或改用 open_page 打开已知的站点。";
             } catch (error) {
               return `搜索失败：${describeError(error, "未知错误")}。可以基于自身知识回答，但要如实说明这部分未经联网核实。`;
@@ -798,7 +802,8 @@ export async function chatAgent(
           // **`.min(1)` 同样不要**（同一类坑第十一处）：空 prompt 会让整个调用在
           // `parseToolCall` 阶段被拒、静默跳过。下游 `validateRequest` 本就有
           // 「请输入视频描述。」这条中文提示，让它来回答比让 SDK 静默丢弃有用得多。
-          prompt: z.string().describe("视频内容描述：画面主体、动作、镜头运动、光线、风格。建议英文，越具体越好。不能为空。"),
+          // **`.nullish()` 同样必须有**（缺键与空串是两条不同路径）。
+          prompt: z.string().nullish().describe("视频内容描述：画面主体、动作、镜头运动、光线、风格。建议英文，越具体越好。不能为空。"),
           // **不要在这里做范围硬校验**（实测踩到，与 `edit_artifact_batch` 的 min(2) 同一个坑）：
           // 参数越界时 AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
           // **整个调用被静默跳过**（toolCall 记进历史但不执行）——模型看不到任何回执，
@@ -827,8 +832,10 @@ export async function chatAgent(
             // 由下游 `clampDurationForBackend` 用自己的默认值（6 秒 / 1 路）。
             const duration = toFiniteNumber(params.duration);
             const count = toFiniteNumber(params.count);
+            // `prompt` 缺省（nullish）时传空串：`validateRequest` 本就有
+            // 「请输入视频描述。」这条中文提示，交给它回答比在这里编一句更准。
             return await callbacks.generateVideo({
-              prompt: params.prompt,
+              prompt: String(params.prompt ?? ""),
               duration: duration ?? 6,
               count: count ?? 1
             });
@@ -859,7 +866,8 @@ export async function chatAgent(
           // **`.min(1)` 也不要**（同一类坑第十五处）：模型偶尔会把 url 传成空串
           // （"打开刚才那个链接"这类指代），`.min(1)` 让 AI SDK 在 `parseToolCall`
           // 阶段直接拒掉、**整个调用被静默跳过**。空值交给 execute 回一句可纠正的说明。
-          url: z.string().describe("要打开的网页地址，建议带协议（https:// 开头）；不带协议时会自动按 https 补全。不能为空。")
+          // **`.nullish()` 同样必须有**（缺键与空串是两条不同路径）。
+          url: z.string().nullish().describe("要打开的网页地址，建议带协议（https:// 开头）；不带协议时会自动按 https 补全。不能为空。")
         }),
         execute: async ({ url }) => {
           try {
@@ -897,7 +905,8 @@ export async function chatAgent(
           // 调用被**静默跳过**——实测复现：1 次 create_file + **19 次空转**，
           // 20 步预算全烧光、步骤条一片空白，界面还归因成"参数被上游截断"。
           // 空值交给 execute 回一句可纠正的说明（见下）。
-          name: z.string().describe("产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。不能为空。"),
+          // **`.nullish()` 同样必须有**（缺键与空串是两条不同路径）。
+          name: z.string().nullish().describe("产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。不能为空。"),
           // **空串 / null 也要收**（实测同类坑第九处）：模型"不用关键词、只想按行读"时
           // 常显式传 `keyword: ""` 或 `null`，`z.string().min(1).optional()` 会在
           // `parseToolCall` 阶段拒掉 → 整个调用被**静默跳过**（收不到回执 → 反复重试）。
@@ -924,7 +933,9 @@ export async function chatAgent(
             // 归一：空串 / null → 不给（"没指定"而不是"指定成空"）。
             const keyword = typeof params.keyword === "string" && params.keyword.trim() ? params.keyword : undefined;
             return await callbacks.readArtifact({
-              name: params.name,
+              // `name` 缺省（nullish）时传空串：各工具层已有「name 是空的」的中文说明，
+              // 再往前一步就由 `main.ts` 里那句「本会话里找不到产物「」」兜住。
+              name: String(params.name ?? ""),
               keyword,
               // 行号同理：`"第 3 行"` / `"3-100"` 也要能读成一个数（见 schema 处说明）。
               startLine: toFiniteNumber(params.startLine),
@@ -1019,14 +1030,16 @@ export async function chatAgent(
 注意：它给你的是**运行状态**（有没有报错、画布多大、WebGL 通没通），**不是截图**——你仍然看不到画面长什么样、构图好不好看。自检通过 ≠ 视觉效果符合预期，如实说明这个区别，不要宣称"我看过效果"。`,
         inputSchema: z.object({
           // 同 read_artifact：`.min(1)` 会让空名字**静默跳过整个调用**（实测复现 19 次空转）。
-          name: z.string().describe("要自检的产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。必须是用 create_file 在本会话里生成过的文件。不能为空。")
+          // **`.nullish()` 同样必须有**（缺键与空串是两条不同路径）。
+          name: z.string().nullish().describe("要自检的产物文件名，带扩展名（如「鹈鹕骑自行车_3D.html」）。必须是用 create_file 在本会话里生成过的文件。不能为空。")
         }),
         execute: async ({ name }) => {
-          if (!String(name ?? "").trim()) {
+          const safeName = String(name ?? "");
+          if (!safeName.trim()) {
             return "自检失败：name 是空的。请填上要自检的 html 文件名（带扩展名），可以先看世界状态里的「本会话已产出的文件」清单。";
           }
           try {
-            return await callbacks.inspectArtifact({ name });
+            return await callbacks.inspectArtifact({ name: safeName });
           } catch (error) {
             return `自检失败：${describeError(error, "未知错误")}。这通常说明文件没能加载起来（路径不对或文件已删除）。可以继续用 create_file 重新生成一份完整体，再试一次自检。`;
           }
@@ -1060,20 +1073,28 @@ export async function chatAgent(
 md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifact 复核即可。`,
         inputSchema: z.object({
           // 同 read_artifact：`.min(1)` 会让空名字**静默跳过整个调用**（实测复现 19 次空转）。
-          name: z.string().describe("要修改的产物文件名，带扩展名。必须是本会话里已存在的文件。不能为空。"),
+          // **`.nullish()` 同样必须有**（缺键与空串是两条不同路径）。
+          name: z.string().nullish().describe("要修改的产物文件名，带扩展名。必须是本会话里已存在的文件。不能为空。"),
           // **不要 `.min(1)`**（实测同类坑第七处）：模型给空 oldText 时，
           // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，调用被**静默跳过**——
           // 而 `main.ts` 里那段"oldText 不能为空。"的提示**永远执行不到**，
           // 模型只会反复重试空串。改成普通字符串，空值交给工具层回一句可纠正的说明。
-          oldText: z.string().describe("被替换的原文，必须与文件中逐字符一致且全文件唯一。建议带上上下各一行以保证唯一。不能为空。"),
-          newText: z.string().describe("替换成的新内容。允许为空字符串（表示删除这段）。")
+          oldText: z.string().nullish().describe("被替换的原文，必须与文件中逐字符一致且全文件唯一。建议带上上下各一行以保证唯一。不能为空。"),
+          newText: z.string().nullish().describe("替换成的新内容。允许为空字符串（表示删除这段）。")
         }),
         execute: async (params) => {
-          if (!String(params.name ?? "").trim()) {
+          const safeName = String(params.name ?? "");
+          if (!safeName.trim()) {
             return "修改文件失败：name 是空的。请填上要修改的文件名（带扩展名），可以先看世界状态里的「本会话已产出的文件」清单。";
           }
           try {
-            return await callbacks.editArtifact(params);
+            // `oldText` / `newText` 缺省时补空串：`applyExactEdit` 对空 oldText
+            // 本就有「oldText 不能为空。」的中文说明（那是可纠正的），比 schema 静默拒掉好。
+            return await callbacks.editArtifact({
+              name: safeName,
+              oldText: String(params.oldText ?? ""),
+              newText: String(params.newText ?? "")
+            });
           } catch (error) {
             return `修改文件失败：${describeError(error, "未知错误")}。可以用 read_artifact 读回原文后再试，或改用 create_file 整份重写。`;
           }
@@ -1098,12 +1119,14 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
 何时不用：只有一处要改（用 edit_artifact 更直接）；或要改的地方超过全文一半（重新 create_file）。`,
         inputSchema: z.object({
           // 同 read_artifact：`.min(1)` 会让空名字**静默跳过整个调用**（实测复现 19 次空转）。
-          name: z.string().describe("要修改的产物文件名，带扩展名。不能为空。"),
+          name: z.string().nullish().describe("要修改的产物文件名，带扩展名。不能为空。"),
+          // **`.nullish()` 同样必须有**（实测同类坑第十八处）：`edits` **整个键缺失**时
+          // `z.array()` 会拒掉整个调用，和空数组是两条不同路径。两者都交到 execute 里说。
           edits: z.array(z.object({
             // **同单处编辑**：`.min(1)` 会让空串在 `parseToolCall` 阶段被拒、
             // 整个调用被静默跳过；而工具层对空 oldText 本就有「第 N 条修改的 oldText 为空」的说明。
-            oldText: z.string().describe("被替换的原文，逐字符一致且在（前序修改后的）文件中唯一。不能为空。"),
-            newText: z.string().describe("替换成的新内容。允许为空字符串（删除）。")
+            oldText: z.string().nullish().describe("被替换的原文，逐字符一致且在（前序修改后的）文件中唯一。不能为空。"),
+            newText: z.string().nullish().describe("替换成的新内容。允许为空字符串（删除）。")
           // **下限必须是 1**（实测踩到）：原来写 `min(2)`，模型只给 1 条时
           // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
           // **整个调用被静默跳过**（toolCall 记进历史但不执行）——
@@ -1115,22 +1138,31 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           // **上限也不要写成 `.max(20)`**（实测同类坑第十处）：模型一次给 25 条时同样会在
           // `parseToolCall` 阶段被拒、整个调用被静默跳过。改在 execute 里截断（保留前 20 条）
           // 并把"只应用了前 N 条"如实告知——少改几处总比整轮报废好。
-          })).describe("修改列表，建议 1–20 条（超过 20 条只应用前 20 条）。按数组顺序依次应用。").min(0)
+          })).describe("修改列表，建议 1–20 条（超过 20 条只应用前 20 条）。按数组顺序依次应用。").min(0).nullish()
         }),
         execute: async (params) => {
-          if (!String(params.name ?? "").trim()) {
+          const safeName = String(params.name ?? "");
+          if (!safeName.trim()) {
             return "批量修改失败：name 是空的。请填上要修改的文件名（带扩展名），可以先看世界状态里的「本会话已产出的文件」清单。";
           }
-          // 空数组：直接回一句可纠正的说明（而不是让 SDK 拒掉整个调用）。
-          if (params.edits.length === 0) {
-            return "没有可应用的修改：edits 是空数组。请把要改的内容写成至少一条 {oldText, newText}。";
+          // 缺键与空数组是同一件事的两种写法（`edits` 已放宽为 nullish）：
+          // 都回一句可纠正的说明，而不是让 SDK 静默拒掉整个调用。
+          const rawEdits = Array.isArray(params.edits) ? params.edits : [];
+          if (rawEdits.length === 0) {
+            return "没有可应用的修改：edits 是空的。请把要改的内容写成至少一条 {oldText, newText}。";
           }
-          const edits = params.edits.slice(0, 20);
+          // `oldText` / `newText` 缺省（nullish）时补空串：`applyExactEdits` 对空 oldText
+          // 本就有「第 N 条修改的 oldText 为空」的中文说明——那是可纠正的，
+          // 比 schema 层静默拒掉整个调用好（本会话已修 17 处同一类坑）。
+          const edits = rawEdits.slice(0, 20).map((edit) => ({
+            oldText: String(edit.oldText ?? ""),
+            newText: String(edit.newText ?? "")
+          }));
           try {
-            const result = await callbacks.editArtifactBatch({ ...params, edits });
+            const result = await callbacks.editArtifactBatch({ name: safeName, edits });
             // 截断要明说：否则模型以为 25 条都改了，后面自检会对着"没改的部分"困惑。
-            if (params.edits.length > edits.length) {
-              return `${result}\n（你给了 ${params.edits.length} 条修改，本次只应用了前 ${edits.length} 条。剩下的请再调用一次。）`;
+            if (rawEdits.length > edits.length) {
+              return `${result}\n（你给了 ${rawEdits.length} 条修改，本次只应用了前 ${edits.length} 条。剩下的请再调用一次。）`;
             }
             return result;
           } catch (error) {
@@ -1171,10 +1203,15 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
             status: z.string().nullish().describe("步骤状态：pending（未开始）/ in_progress（进行中，全清单最多一项）/ completed（已完成）。")
           // **`.min(1)` 也不要**：模型偶尔会给空数组（"这轮没步骤"），
           // schema 一拒就是整个调用被静默跳过。空清单在 execute 里回一句说明即可。
-          })).describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。")
+          // **`.nullish()` 同样必须有**（实测同类坑第十八处）：整个 `plan` 键缺失
+          // 与"给了空数组"是两条不同路径，只修后者仍会静默跳过。
+          })).describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。").nullish()
         }),
         execute: async (params) => {
-          if (params.plan.length === 0) {
+          // `plan` 已放宽为 nullish（见 schema 处说明）：缺键与空数组是同一件事，
+          // 都回一句可纠正的说明，而不是让 SDK 静默拒掉整个调用。
+          const rawPlan = Array.isArray(params.plan) ? params.plan : [];
+          if (rawPlan.length === 0) {
             return "步骤清单是空的：请给出至少一步（每步写清要做什么 + 当前 status）。如果这轮不需要清单，就不用调用本工具。";
           }
           // status 归一：把模型的口语化写法映射到三个规范值。
@@ -1191,7 +1228,7 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           // 要求它必须是字符串——空串会让清单里出现一行没有任何文字的条目，
           // 所以给「步骤 N」而不是 ""。
           let sawInProgress = false;
-          const plan = params.plan.map((entry, index) => {
+          const plan = rawPlan.map((entry, index) => {
             const step = String(entry.step ?? "").trim() || `步骤 ${index + 1}`;
             const status = normalizeStatus(entry.status);
             if (status !== "in_progress") return { step, status };
@@ -1200,7 +1237,8 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
             return { step, status };
           });
           try {
-            return await callbacks.updatePlan({ ...params, plan });
+            // `explanation` 要原样带上去：渲染端会显示"为什么更新这一步"。
+            return await callbacks.updatePlan({ plan, explanation: params.explanation });
           } catch (error) {
             return `步骤清单更新失败：${describeError(error, "未知错误")}（不影响任务继续，请直接用文字说明进度）`;
           }
@@ -1241,16 +1279,18 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
               id: z.string().nullish().describe("选项标识（英文短名）。"),
               label: z.string().nullish().describe("选项显示文字，简短（如'8 秒'）。"),
               description: z.string().nullish().describe("这个选项意味着什么，一句话。")
-            })).describe("互斥选项，建议 2–4 个。")
-          })).describe("问题清单，建议 1–3 个。")
+            })).describe("互斥选项，建议 2–4 个。").nullish()
+          })).describe("问题清单，建议 1–3 个。").nullish()
         }),
         execute: async (params) => {
-          // 空清单 / 某题没有选项：**回一句可纠正的说明**，不要让整轮失效
-          // （与"参数不满足 schema 就静默跳过"是同一个坑，见前面几处）。
-          if (params.questions.length === 0) {
-            return "没有要问的问题（questions 是空数组）。如果确实需要用户拍板，请给出 1–3 个问题、每题 2–4 个选项；否则直接按最合理的方式继续。";
+          // `questions` / `options` 已放宽为 nullish（见 schema 处说明）：
+          // **缺键与空数组是同一件事的两种写法**，都回一句可纠正的说明，
+          // 而不是让 SDK 静默拒掉整个调用。
+          const rawQuestions = Array.isArray(params.questions) ? params.questions : [];
+          if (rawQuestions.length === 0) {
+            return "没有要问的问题（questions 是空的）。如果确实需要用户拍板，请给出 1–3 个问题、每题 2–4 个选项；否则直接按最合理的方式继续。";
           }
-          const emptyOptions = params.questions.findIndex((question) => question.options.length === 0);
+          const emptyOptions = rawQuestions.findIndex((question) => !Array.isArray(question.options) || question.options.length === 0);
           if (emptyOptions >= 0) {
             return `第 ${emptyOptions + 1} 个问题没有任何选项。请为它提供 2–4 个互斥选项（每个带 label 与 description），再调用一次；不需要问的话就直接继续。`;
           }
@@ -1262,13 +1302,12 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           // - `header` / `label` 缺失时退回「问题 N」/ 选项 id——渲染端会画出一个空标签的芯片；
           // - `question` 缺失时用 header 顶上，总比一张只有标签的空卡片强。
           const clipped = {
-            ...params,
-            questions: params.questions.slice(0, 3).map((question, index) => ({
+            questions: rawQuestions.slice(0, 3).map((question, index) => ({
               id: question.id?.trim() || `q${index + 1}`,
               header: question.header?.trim() || `问题 ${index + 1}`,
               question: question.question?.trim() || question.header?.trim() || `请选择第 ${index + 1} 项的取值`,
               multiSelect: question.multiSelect,
-              options: question.options.slice(0, 4).map((option, optionIndex) => ({
+              options: (question.options ?? []).slice(0, 4).map((option, optionIndex) => ({
                 id: option.id?.trim() || `opt${optionIndex + 1}`,
                 label: option.label?.trim() || option.id?.trim() || `选项 ${optionIndex + 1}`,
                 description: option.description?.trim() || ""

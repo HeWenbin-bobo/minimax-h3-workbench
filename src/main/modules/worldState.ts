@@ -20,13 +20,14 @@ import type { ChatMessage } from "../../shared/types";
  *    所以 `diffWorldState` 每轮渲染全部 section；差异只用于**节流正文刷新**。
  */
 
-export type SectionId = "current_time" | "network_access" | "artifacts" | "context_budget";
+export type SectionId = "current_time" | "network_access" | "artifacts" | "video_backends" | "context_budget";
 
 /** section 的中文名。注入文本是给模型读的中文事实，不能把内部 id 直接拼进去。 */
 const SECTION_LABELS: Record<SectionId, string> = {
   current_time: "当前时间",
   network_access: "联网状态",
   artifacts: "产物能力",
+  video_backends: "视频生成后端",
   context_budget: "上下文余量"
 };
 
@@ -79,6 +80,15 @@ export interface WorldStateInput {
    * 结果被压缩/截断打断在半路。提前告知剩余量，它才会主动收尾。
    */
   contextBudget?: { remainingTokens: number; modelLimitTokens: number };
+  /**
+   * 本轮**真的可用**的视频生成后端（已配好凭据的那些）。
+   *
+   * 为什么必须给模型看：`generate_video` 现在要求先问用户"用哪个后端"，
+   * 而模型看不到「连接设置」——不告诉它，它会把没配密钥的选项摆给用户，选了必然失败。
+   * 空数组 = 一个都没有（此时应让用户先去配置，而不是硬生成）。
+   * 计划模式下不注入（本轮不产视频）。
+   */
+  videoBackends?: Array<{ kind: string; label: string; note?: string }>;
   /** 注入时刻。测试注入固定值，避免断言随真实时间漂移。 */
   now?: Date;
 }
@@ -169,6 +179,31 @@ function networkSection(input: WorldStateInput): WorldSection {
   };
 }
 
+/**
+ * 可用的视频生成后端（对齐「先问用户用哪个方式生成」这条要求）。
+ *
+ * 为什么必须注入：模型现在要在调用 `generate_video` 之前先问用户"用哪个后端"，
+ * 而它**看不到**「连接设置」——不知道哪些后端配好了凭据。
+ * 不告诉它，它会把没配密钥的云端选项摆给用户选，用户选完必然失败
+ * （"未保存瞬映卡密"/"请先保存 API Key"），白走一轮还显得软件很傻。
+ */
+function videoBackendsSection(input: WorldStateInput): WorldSection {
+  const backends = input.videoBackends ?? [];
+  const body = backends.length === 0
+    ? `**现在没有任何可用的视频生成后端**。不要调用 generate_video；请先告诉用户去「连接设置」配置（本机 ComfyUI 地址、SSH 主机，或保存云端密钥/卡密）。`
+    : `可用（调用 generate_video 前先问用户选哪个）：
+${backends.map((entry) => `- \`${entry.kind}\`：${entry.label}${entry.note ? ` — ${entry.note}` : ""}`).join("\n")}
+${
+  backends.length === 1
+    ? `\n**只有一个可用**：不用给用户列选项，一句话说明"这轮只能走${backends[0].label}"即可，然后问时长与数量。`
+    : `\n**用户没指定时不要自己挑**——不同后端的花费差别很大（本机不额外计费；云 API 按秒扣费；RB 扣卡密次数）。`
+}`;
+  return {
+    id: "video_backends",
+    render: () => `# 视频生成后端\n${body}`
+  };
+}
+
 function artifactsSection(input: WorldStateInput): WorldSection {
   const kinds = input.artifactKinds.length > 0
     ? `可用类型：${input.artifactKinds.join(" / ")}。`
@@ -247,6 +282,10 @@ function budgetTier(rendered: string): number {
  */
 export function buildSections(input: WorldStateInput): WorldSection[] {
   const sections = [timeSection(input.now ?? new Date()), networkSection(input), artifactsSection(input)];
+  // 后端清单插在**产物能力之后、上下文余量之前**：它和"能产出什么"同属能力事实，
+  // 而余量是每轮都会变的数字，放最后更不扰动前缀。
+  // 只在本轮真的可能生成视频时出现（计划模式不产视频，问了也没用）。
+  if (input.videoBackends) sections.push(videoBackendsSection(input));
   if (input.contextBudget && input.contextBudget.modelLimitTokens > 0) sections.push(contextBudgetSection(input));
   return sections;
 }

@@ -32,7 +32,9 @@ const TOOLS = `# 你的工具
 
 ## 产出物工具（看用户要什么，**选一个**，不要都做）
 - create_file(kind, name, content)：生成文件产物。用户要**网页/页面/小工具/游戏/3D 场景**（kind=html）、**表格/Excel**（kind=csv/tsv）、**文档/报告**（kind=md）时用它——这几类是绝大多数"帮我做个 X"请求的答案。
-- generate_video(prompt, duration, count)：生成 AI 视频（4–15 秒、1–4 路）。**仅当用户要的就是视频本身时**才用。
+- generate_video(prompt, duration, count, backend)：生成 AI 视频（4–15 秒、1–4 路）。**仅当用户要的就是视频本身时**才用。
+  **动手前必须先问清后端 / 时长 / 数量**（用 request_user_input 一次问完）：本机不额外计费、
+  云 API 按秒扣费、RB 扣卡密次数，**不能让用户默认撞上某一个后端**。用户原话里已给过的就不用再问。
 
 ## 修改已有文件（Codex 的硬规矩：先读，再精确改一处）
 - read_artifact(name, startLine?, endLine?, keyword?)：读回你生成的产物。
@@ -52,8 +54,8 @@ const TOOLS = `# 你的工具
 - open_page(url)：打开指定网页并返回内容。需要看某个具体页面、抓取详情时调用（比搜索更精准）。
 - update_plan(plan)：3 步以上、或要连续调多个工具时，动手前先列一遍，之后每完成一步更新状态。
   它是给用户看进度的，**不是回答本身**——一步能做完的事别列清单。
-- request_user_input(questions)：卡在一两个关键取舍（时长、格式、风格）且不同选择会导致明显不同产出时用它问，
-  比猜一个再做省事。能从上下文合理推断的就直接做，别问。`;
+- request_user_input(questions)：卡在关键取舍（后端、时长、格式、风格）且不同选择会导致明显不同产出时用它问，
+  比猜一个再做省事。能从上下文合理推断的就直接做，别问——**但生成视频是例外**（见上面 generate_video 那条）。`;
 
 const ARTIFACTS = `# 文件产物（你的核心能力——界面自动把代码块变成可预览、可保存的文件卡片）
 - Excel/表格数据：kind=csv/tsv，首行表头。保存为 .xlsx，Excel 可直接打开。

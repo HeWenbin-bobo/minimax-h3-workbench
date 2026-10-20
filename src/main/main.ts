@@ -16,7 +16,7 @@ import {
   shell,
   type IpcMainInvokeEvent
 } from "electron";
-import { AdapterRegistry } from "./backends/adapterRegistry";
+import { AdapterRegistry, normalizeBackendKind } from "./backends/adapterRegistry";
 import { mediaMime, parseByteRange } from "./modules/mediaRange";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import { describeError, isNetworkError } from "../shared/errors";
@@ -421,6 +421,38 @@ function registerIpc(
     baseSeed: 1
   };
   const backendKindLabel = (kind: BackendKind) => kind === "local" ? "本机 ComfyUI" : kind === "ssh" ? "SSH 远程显卡" : kind === "rb" ? "瞬映 RB" : "MiniMax H3";
+  /**
+   * 本轮**真的可用**的视频后端（已配好凭据的那些），供世界状态告诉模型。
+   *
+   * 判据只认"能不能发出去"，不做连通性探测（那要几秒，且每轮都探会拖慢对话）：
+   * - `local`：配了 ComfyUI 地址就算（本机服务开着与否由工具执行时的报错回答）；
+   * - `ssh`：填了主机 + 用户名；
+   * - `minimax` / `rb`：存了对应密钥 / 卡密。
+   *
+   * **不筛会怎样**（实测语义缺口）：模型现在要先问用户"用哪个方式生成"，
+   * 而它看不到「连接设置」。把没配密钥的云端选项摆给用户，用户选了必然报
+   * "未保存瞬映卡密"/"请先保存 API Key"——白走一轮，还显得软件不认账。
+   */
+  const availableVideoBackends = async (
+    settings: AppSettings
+  ): Promise<Array<{ kind: BackendKind; label: string; note?: string }>> => {
+    const out: Array<{ kind: BackendKind; label: string; note?: string }> = [];
+    if (settings.localComfyUrl) {
+      out.push({ kind: "local", label: backendKindLabel("local"), note: "不额外计费，用本机显卡" });
+    }
+    if (settings.ssh.host && settings.ssh.username) {
+      out.push({ kind: "ssh", label: backendKindLabel("ssh"), note: `远程 ${settings.ssh.host}` });
+    }
+    // `hasSecret` 会真的试解密：换机器 / Local State 丢失时密文在但解不开，
+    // 那种情况必须算"没有"（否则界面上写着有，用起来每次都失败）。
+    if (await settingsStore.hasSecret("minimaxApiKey").catch(() => false)) {
+      out.push({ kind: "minimax", label: backendKindLabel("minimax"), note: "云端按秒计费" });
+    }
+    if (await settingsStore.hasSecret("rbCardCode").catch(() => false)) {
+      out.push({ kind: "rb", label: backendKindLabel("rb"), note: "扣卡密次数" });
+    }
+    return out;
+  };
   /**
    * 按后端约束夹取时长（智能体工具用）。
    *
@@ -988,6 +1020,11 @@ function registerIpc(
           searchApiReady: Boolean(turn.value.searchBaseUrl),
           artifactKinds: turn.value.planMode === "plan" ? [] : ["html（网页/小工具）", "xlsx（表格，由 csv/tsv 生成）", "md（文档）"],
           artifactFiles,
+          // **只有真的配好凭据的后端才列出来**（实测缺口）：模型现在要先问用户
+          // "用哪个方式生成"，而它看不到「连接设置」。不筛的话它会把没配密钥的云端
+          // 选项摆给用户，选了必然报"未保存卡密"/"请先保存 API Key"，白走一轮。
+          // 计划模式不产视频，不注入（问了也没用）。
+          videoBackends: turn.value.planMode === "plan" ? [] : await availableVideoBackends(turnSettings),
           contextBudget: { remainingTokens: Math.max(0, modelLimit - activeTokens), modelLimitTokens: modelLimit }
         }),
         sessionWorldState.get(session)
@@ -1023,17 +1060,29 @@ function registerIpc(
           renderHtml: (url, signal) => renderHtml(url, undefined, signal),
           browserOnly: turn.value.browserOnly
         }, controller.signal),
-        generateVideo: async (params: { prompt: string; duration: number; count: number }) => {
+        generateVideo: async (params: { prompt: string; duration: number; count: number; backend?: string }) => {
+          // **后端必须能按模型给的值走，不能永远用默认后端**（实测缺口）：
+          // 旧实现无条件 `backend: turn.value.defaultBackend`，于是用户说"生成一段视频"时
+          // 无论问没问过、想用哪个后端，都会直接落到「连接设置」里的默认后端（常见是本机
+          // ComfyUI）开跑——云端按次计费的选项用户压根没机会选。
+          // 现在接受模型显式传的 backend；认不出来或没传时才回落到默认。
+          // 别名表抽在 `adapterRegistry.normalizeBackendKind`（纯函数，可单测）。
+          const requested = String(params.backend ?? "").trim();
+          // 认不出来的值要**说清有哪些可选**，而不是悄悄换成默认后端——
+          // 用户以为自己选了云端、实际跑在本机，结果与花费完全不同。
+          if (requested && !normalizeBackendKind(requested)) {
+            return `不认识的生成后端「${params.backend}」。可选：local（本机 ComfyUI）/ ssh（SSH 远程显卡）/ minimax（MiniMax 云 API）/ rb（瞬映 RB）。请向用户确认用哪一个再调用。`;
+          }
+          const backend: BackendKind = normalizeBackendKind(requested) ?? turn.value.defaultBackend;
           const request: GenerationRequest = {
             ...initialAgentVideoRequest,
-            // 跟随用户当前默认后端；不写死（写死 rb 会让没配瞬映卡密的用户必然失败）。
-            backend: turn.value.defaultBackend,
+            backend,
             prompt: params.prompt,
             // 时长必须按**后端**约束夹取：工具 schema 允许 4–15 秒，但 RB 的
             // reference/tail_frame 只收 4/6/8（validateRequest 会直接拒）。
             // 不夹的话模型传 10 秒时任务根本建不出来，而工具报错后模型往往
             // 换个说法重试同一个时长，用户看到的是"一直失败"。
-            duration: clampDurationForBackend(turn.value.defaultBackend, params.duration),
+            duration: clampDurationForBackend(backend, params.duration),
             count: Math.max(1, Math.min(4, Math.round(params.count || 1))),
             baseSeed: Math.floor(Math.random() * 1_000_000)
           };

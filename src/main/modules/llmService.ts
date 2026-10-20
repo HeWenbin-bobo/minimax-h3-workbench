@@ -388,7 +388,7 @@ export interface AgentToolCallbacks {
   /** 联网搜索工具：返回参考段落（未配置搜索 API 时抛错）。 */
   webSearch: (query: string) => Promise<string>;
   /** 视频生成工具：提交生成任务并返回给用户的说明文本。 */
-  generateVideo: (params: { prompt: string; duration: number; count: number }) => Promise<string>;
+  generateVideo: (params: { prompt: string; duration: number; count: number; backend?: string }) => Promise<string>;
   /** 打开网页工具（open_page）：用应用自带 Chromium 渲染指定 URL 并返回**可见正文**（innerText），让模型能真正"打开浏览器"。 */
   openPage: (url: string) => Promise<string>;
   /** 文件产物工具（create_file）：把内容保存为文件并返回给模型的确认文本。 */
@@ -844,7 +844,15 @@ export async function chatAgent(
       generate_video: tool({
         description: `生成 AI 短视频，并直接提交为后台任务（4–15 秒、1–4 路）。
 
-何时使用：**用户要的就是视频本身**——说"生成一段视频/做个短片/来几条视频"，或描述了想拍的画面并明确要视频。参数从用户的描述里提取即可，不需要事先反问确认。
+何时使用：**用户要的就是视频本身**——说"生成一段视频/做个短片/来几条视频"，或描述了想拍的画面并明确要视频。
+
+**开工前必须先问清三件事**（用 request_user_input，一次调用问完；用户点「跳过，你决定」才自行取默认）：
+1. **用哪个后端生成**——本机 ComfyUI / SSH 远程显卡 / 瞬映 RB / MiniMax 云 API。花费与耗时差别很大
+   （本机不额外计费但要本地显卡、云 API 真实扣费、RB 扣卡密次数），**不能让用户默认撞上**。
+   只有「连接设置」里已配好凭据的后端才是可选项；只有一个可用时也要用一句话说明"这轮只能走它"。
+2. **时长**（秒）——按后端合法档位给选项。
+3. **数量**（几路）——1–4 路，云端按路计费。
+用户已在原话里给过的（例如"来 3 条 8 秒的"）就不用再问，直接照做；只有明确缺少的才问。
 
 何时不用（这条最容易搞错，请务必对照）：
 - 用户要的是**网页/页面/小工具/游戏/3D 场景** → 用 create_file(kind=html)，**不是**视频。
@@ -876,7 +884,11 @@ export async function chatAgent(
           // generate_video 连续 20 次没执行、20 步预算烧光。下游 `clampDurationForBackend`
           // 本来就会 Math.round + 夹取，所以这里只要能收下字符串，值交给 `toFiniteNumber` 归一。
           duration: z.union([z.number(), z.string()]).describe("时长秒数，建议 4–15（越界会被自动夹到合法值）。用户没说就按 6。"),
-          count: z.union([z.number(), z.string()]).describe("生成数量，建议 1–4（越界会被自动夹到合法值）。用户没说就按 1。")
+          count: z.union([z.number(), z.string()]).describe("生成数量，建议 1–4（越界会被自动夹到合法值）。用户没说就按 1。"),
+          // **用哪个后端生成**。用普通字符串而不是 `z.enum`：模型写「本机」「ComfyUI」「comfy」
+          // 这类口语时，枚举会在 `parseToolCall` 阶段拒掉整个调用（本会话已修 19 处同类坑）。
+          // 认不出来的值由执行侧回一句"可选后端是哪些"，不会让整轮报废。
+          backend: z.string().nullish().describe("生成后端：local（本机 ComfyUI）/ ssh（SSH 远程显卡）/ minimax（MiniMax 云 API）/ rb（瞬映 RB 云生成）。**先问过用户再填**；省略则用「连接设置」里的默认后端。")
         }),
         // 与其他工具一致：失败要变成**给模型的说明**，而不是抛出。
         // `orchestrator.submit` 会做参数校验并抛中文错误（未保存卡密、RB 预设只收 4/6/8 秒、
@@ -891,10 +903,14 @@ export async function chatAgent(
             const count = toFiniteNumber(params.count);
             // `prompt` 缺省（nullish）时传空串：`validateRequest` 本就有
             // 「请输入视频描述。」这条中文提示，交给它回答比在这里编一句更准。
+            // `backend` 同理交给下游解析：认不出来时 `main.ts` 会回一句"可选后端是哪些"，
+            // 而不是在这里 reject（本会话已修 19 处"schema 硬校验静默打死整轮"）。
+            const backend = typeof params.backend === "string" ? params.backend.trim() : "";
             return await callbacks.generateVideo({
               prompt: String(params.prompt ?? ""),
               duration: duration ?? 6,
-              count: count ?? 1
+              count: count ?? 1,
+              ...(backend ? { backend } : {})
             });
           } catch (error) {
             return `创建视频任务失败：${describeError(error, "未知错误")}。请如实告诉用户失败原因和需要先补什么（例如到「连接设置」保存对应后端的密钥/卡密），不要假装任务已创建，也不要重复调用本工具重试。`;

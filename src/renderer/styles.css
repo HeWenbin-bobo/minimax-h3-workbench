@@ -670,6 +670,12 @@ button { cursor: pointer; }
 .pg-question-actions { display: flex; align-items: center; gap: 10px; }
 .pg-question-skip { border: 0; background: transparent; color: var(--muted); font-size: 10px; text-decoration: underline; padding: 4px 2px; }
 .pg-question-skip:hover { color: var(--ink); }
+/* 逐题推进时的「第 2/3 题」（模型一次问 3 题时，用户得知道还剩几题）。 */
+.pg-question-step { margin-left: 8px; color: var(--muted); font-weight: 700; letter-spacing: 0; }
+/* 选项列表的最后一项永远是可自由输入的（预设选项覆盖不完真实需求）。 */
+.pg-question-custom { display: grid; gap: 4px; cursor: text; }
+.pg-question-custom input { width: 100%; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 7px; padding: 6px 9px; font: inherit; font-size: 11px; color: var(--ink); outline: 0; }
+.pg-question-custom input:focus { border-color: var(--pink); }
 .pg-video-form { margin: 10px 16px 0; padding: 13px; border: 1px dashed var(--brand-border); background: var(--brand-wash-strong); border-radius: 12px; display: grid; gap: 4px; }
 .pg-video-form label { color: var(--muted); font-size: 10px; display: block; }
 .pg-video-form input, .pg-video-form select, .pg-video-form textarea { width: 100%; margin-top: 4px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; font: inherit; outline: 0; }

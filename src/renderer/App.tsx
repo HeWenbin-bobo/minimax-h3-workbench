@@ -2643,34 +2643,113 @@ function PgQuestionCard({ questions, onSubmit, onSkip }: {
   onSubmit: (answers: Record<string, string[]>) => void;
   onSkip: () => void;
 }) {
+  // 当前答到第几题（逐题推进）。
+  const [step, setStep] = useState(0);
   const [picked, setPicked] = useState<Record<string, string[]>>({});
-  const toggle = (question: LlmQuestion, optionId: string) => {
-    setPicked((all) => {
-      const current = all[question.id] ?? [];
-      if (!question.multiSelect) return { ...all, [question.id]: [optionId] };
-      return { ...all, [question.id]: current.includes(optionId) ? current.filter((id) => id !== optionId) : [...current, optionId] };
-    });
-    // 单选：点完立刻提交这一题（只有一道题时就是提交全部，多道题时逐题落定）。
-    if (!question.multiSelect && questions.length === 1) onSubmit({ [question.id]: [optionId] });
+  // 每题的自定义输入：`{ [questionId]: 文本 }`。非空即代表"选了自定义"。
+  const [custom, setCustom] = useState<Record<string, string>>({});
+  const question = questions[step];
+  const customText = question ? (custom[question.id] ?? "") : "";
+  const usingCustom = customText.trim().length > 0;
+  const pickedFor = question ? (picked[question.id] ?? []) : [];
+
+  /**
+   * 把「已选的选项 id」+「自定义原文」合成该题的答案。
+   * `override` 用于"刚点下的选项"：`setPicked` 是异步的，同一 tick 读 `picked` 还是旧值。
+   */
+  const answerFor = (target: LlmQuestion, override?: string[]): string[] => {
+    if (override) return override;
+    const text = (custom[target.id] ?? "").trim();
+    // 自定义优先：用户手写了内容，就不该再叠加预设选项（那会让模型以为"两个都选了"）。
+    return text ? [text] : picked[target.id] ?? [];
   };
+  const answered = (target: LlmQuestion) => answerFor(target).length > 0;
+
+  const advance = (target: LlmQuestion, justPicked?: string[]) => {
+    const answers: Record<string, string[]> = {};
+    // 把**所有已答**的题（含当前这题）合进最终载荷；未答的不放进 map
+    // （主进程据此区分"用户跳过"与"这题没答"）。
+    for (const item of questions) {
+      const value = answerFor(item, item.id === target.id ? justPicked : undefined);
+      if (value.length > 0) answers[item.id] = value;
+    }
+    // 还有下一题 → 推进一步；已是最后一题 → 提交。
+    if (step < questions.length - 1) {
+      setStep(step + 1);
+      return;
+    }
+    onSubmit(answers);
+  };
+
+  const toggle = (target: LlmQuestion, optionId: string) => {
+    // 点预设选项即清掉自定义输入（二选一，不该同时生效）。
+    setCustom((all) => (all[target.id] ? { ...all, [target.id]: "" } : all));
+    setPicked((all) => {
+      const current = all[target.id] ?? [];
+      if (!target.multiSelect) return { ...all, [target.id]: [optionId] };
+      return { ...all, [target.id]: current.includes(optionId) ? current.filter((id) => id !== optionId) : [...current, optionId] };
+    });
+  };
+
+  if (!question) return null;
+  const isLast = step === questions.length - 1;
+  const multi = Boolean(question.multiSelect);
+  const canAdvance = answered(question);
+
   return <div className="pg-question-card">
-    <div className="pg-question-head">AI 想先确认几件事</div>
-    {questions.map((question) => <div key={question.id} className="pg-question">
+    <div className="pg-question-head">
+      AI 想先确认几件事
+      {questions.length > 1 && <span className="pg-question-step">第 {step + 1}/{questions.length} 题</span>}
+    </div>
+    <div className="pg-question">
       <div className="pg-question-title">{question.header && <span className="pg-question-chip">{question.header}</span>}{question.question}</div>
       <div className="pg-question-options">
         {question.options.map((option) => <button
           key={option.id}
-          className={`pg-question-option${(picked[question.id] ?? []).includes(option.id) ? " picked" : ""}`}
-          onClick={() => toggle(question, option.id)}
+          className={`pg-question-option${!usingCustom && pickedFor.includes(option.id) ? " picked" : ""}`}
+          onClick={() => {
+            // 必须把"刚点的这一个"显式传给 advance：setPicked 是异步的，
+            // 同一 tick 里读 picked 还是旧值（否则这题会被当成未作答）。
+            const next = multi
+              ? (pickedFor.includes(option.id) ? pickedFor.filter((id) => id !== option.id) : [...pickedFor, option.id])
+              : [option.id];
+            toggle(question, option.id);
+            // 单选：点完立刻进入下一题 / 提交（省一次点击）。
+            if (!multi) advance(question, next);
+          }}
         >
           <strong>{option.label}</strong>
           <small>{option.description}</small>
         </button>)}
+        {/* **选项最后一项永远是可以自由输入的**（用户明确要求）：
+            预设选项覆盖不完真实需求（"要 9 秒"、"竖屏 2.35:1"）。
+            做成"选项列表里的最后一项"，而不是独立区块——用户在这里挑东西的心智模型
+            就是"从这一列里选一个"，多出来的输入框也该在同一列里。 */}
+        <label className={`pg-question-option pg-question-custom${usingCustom ? " picked" : ""}`}>
+          <strong>其它（自己填）</strong>
+          <input
+            value={customText}
+            placeholder="选项里没有合适的？直接写你要的（如「9 秒」「竖屏」）"
+            onChange={(event) => {
+              const text = event.target.value;
+              setCustom((all) => ({ ...all, [question.id]: text }));
+              // 一旦开始手写，就清掉已选的预设选项（避免两个答案同时生效）。
+              if (text.trim()) setPicked((all) => ({ ...all, [question.id]: [] }));
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              if (customText.trim()) advance(question);
+            }}
+          />
+        </label>
       </div>
-    </div>)}
+    </div>
     <div className="pg-question-actions">
-      {/* 多选或有多个问题时需要显式提交；单选单题已在点选时直接提交，这里不重复渲染按钮。 */}
-      {!(questions.length === 1 && !questions[0].multiSelect) && <button className="pg-plan-run" onClick={() => onSubmit(picked)}>确认</button>}
+      {/* 上一题：答错了能回去改，不必跳过整组重来。 */}
+      {step > 0 && <button className="pg-question-skip" onClick={() => setStep(step - 1)}>← 上一题</button>}
+      {/* 多选必须显式确认；单选点选项已自动推进，这里只在"填了自定义"时出现。 */}
+      {(multi || usingCustom) && canAdvance && <button className="pg-plan-run" onClick={() => advance(question)}>{isLast ? "确认" : "下一题"}</button>}
       <button className="pg-question-skip" onClick={onSkip} title="不回答，让 AI 自己按最合理的方式做">跳过，你决定</button>
     </div>
   </div>;

@@ -1940,14 +1940,34 @@ ${tableNote}` : ""}`;
   });
 
   /** 手动压缩：用户点「立即压缩上下文」时触发（对齐 Codex 的 Manual trigger）。 */
+  /**
+   * 手动压缩的并发守卫（按会话）。
+   *
+   * **`useState` 在渲染端挡不住双击**（实测缺陷 probe-double-compact）：同一 tick 内连点两次，
+   * 两次都读到 `compacting === false`，于是发出**两次** `compactContext`。
+   * 而 `maybeCompact` 内部会调 `summarizeHistory` —— 那是一次**真实计费**的完整上游请求。
+   * 实测：双击后上游收到 2 次摘要请求（本该 1 次）。
+   *
+   * 守卫放在主进程而不是只修按钮：这是所有压缩请求的唯一出口，
+   * 无论从按钮、快捷键还是将来的自动路径进来都挡得住。
+   */
+  const compactingSessions = new Set<string>();
   handle("llm:compact", async (_event, messages: ChatMessage[], sessionId: string) => {
     const session = typeof sessionId === "string" && sessionId ? sessionId : "anon";
+    // 已在压缩中：直接返回"进行中"，不重复计费。前端会显示同一份占用数据，
+    // 用户不会因此看到不同结果（两次压缩的输入相同）。
+    if (compactingSessions.has(session)) {
+      return { before: 0, after: 0, windowNumber: 0, reason: "压缩正在进行中，请稍候" };
+    }
+    compactingSessions.add(session);
     const controller = new AbortController();
     try {
       const { info } = await maybeCompact(session, safeMessages(messages), "manual", controller.signal);
       return info ?? { before: 0, after: 0, windowNumber: 0, reason: "未触发压缩" };
     } catch (error) {
       throw new Error(describeError(error, "压缩失败"));
+    } finally {
+      compactingSessions.delete(session);
     }
   });
 

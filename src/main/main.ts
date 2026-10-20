@@ -557,6 +557,8 @@ function registerIpc(
     compactionNotices: Array<{ reason: string; before: number; after: number }>;
     done: boolean;
     ok: boolean;
+    /** 本轮智能体失败、已自动回落普通对话（`ok` 仍为 true，但这一轮其实没干成）。 */
+    fellBack?: boolean;
     message?: string;
   }>();
   /**
@@ -939,6 +941,8 @@ function registerIpc(
       compactionNotices: Array<{ reason: string; before: number; after: number }>;
       done: boolean;
       ok: boolean;
+      /** 本轮智能体失败、已自动回落普通对话（`ok` 仍为 true，但这一轮其实没干成）。 */
+      fellBack?: boolean;
       message?: string;
     } = { fullText: "", taskIds: [], artifacts: [], toolSteps: [], compactionNotices: [], done: false, ok: true, message: undefined };
     sessionTurnState.set(session, turnState);
@@ -952,6 +956,7 @@ function registerIpc(
       turnState.done = true;
       turnState.ok = event.ok;
       turnState.message = event.message;
+      turnState.fellBack = event.fellBack === true;
       sendDone({ ...event, sessionId: session, fullText: turnText });
     };
     /**
@@ -1931,14 +1936,17 @@ ${tableNote}` : ""}`;
         const reason = describeError(agentError, "智能体请求失败");
         chunk({ seq: 1, delta: `（智能体模式请求失败：${reason}，已自动改用普通对话模式）\n\n` });
         await service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
-        done({ ok: true });
+        // **回落也要如实标记**（见 `LlmDoneEvent.fellBack`）：`ok` 仍是 true（确实拿到了一段
+        // 回复），但"这一轮想干的事"没干成。不标的话渲染端无从判断，
+        // 计划模式下的「继续执行」按钮就再也不回来（实测缺陷 probe-execute-plan-fail）。
+        done({ ok: true, fellBack: true });
         return;
       }
       if (agentSent === 0 && result.textLength === 0 && result.toolCalls === 0) {
         // 模型走了 agent 路径但没出文本也没出工具调用——基本就是不支持函数调用。自动回落普通对话。
         chunk({ seq: 1, delta: "（当前模型不支持工具调用，已自动改用普通对话模式）\n\n" });
         await service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
-        done({ ok: true });
+        done({ ok: true, fellBack: true });
         return;
       }
       if (agentSent === 0 && result.toolCalls > 0) {

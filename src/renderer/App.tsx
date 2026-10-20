@@ -1348,6 +1348,17 @@ const uiTaskIdBuffers = new Map<string, string[]>();
  */
 const uiPlanTurns = new Set<string>();
 
+/**
+ * 「刚点了继续执行」的计划消息 id（按会话）。
+ *
+ * `executePlan()` 在发请求前就把计划消息上的 `plan` 抹掉（避免按钮重复出现），
+ * 而这一轮**可能失败**（中转抖动是常态）。失败后要把标记还回去，
+ * 否则用户只剩一句"请求失败"，「继续执行」按钮再也不出现。
+ *
+ * 成功时清掉；失败（含"智能体回落普通对话"）时按这个 id 恢复 `plan: true`。
+ */
+const uiPlanMessageIds = new Map<string, string>();
+
 /** 工具名的中文标签。每个工具都必须有——否则界面会冒出英文标识符（违反「界面文案一律中文」）。 */
 const TOOL_LABELS: Record<string, string> = {
   web_search: "联网搜索",
@@ -1717,6 +1728,19 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       if (targetId) {
         setGeneratingIds((all) => all.filter((id) => id !== targetId));
         sendingRef.current.delete(targetId);
+        // **这一轮其实没干成时，把「继续执行」还给用户**（实测缺陷 probe-execute-plan-fail）。
+        //
+        // 两种"没干成"都要算：
+        // ① `!event.ok`（硬失败）；
+        // ② `event.fellBack`（智能体失败、已自动回落普通对话——`ok` 仍是 true，
+        //    但用户点「继续执行」想要的事情一件没做）。
+        // `executePlan` 在发请求前就把计划消息上的 `plan` 抹掉了，不恢复的话
+        // 按钮再也不出现，用户只剩一句错误文案。
+        const planMessageId = uiPlanMessageIds.get(targetId);
+        if (planMessageId) {
+          uiPlanMessageIds.delete(targetId);
+          if (!event.ok || event.fellBack) restorePlanMark(targetId, planMessageId);
+        }
       }
       if (!event.ok && event.message) onError(new Error(event.message));
     });
@@ -2181,6 +2205,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     setGeneratingIds((all) => all.includes(target.id) ? all : [...all, target.id]);
     streamBuffers.current.set(target.id, "");
     taskIdBuffers.current.delete(target.id);
+    // 记下这条计划消息的 id：这一轮若失败（含"智能体回落普通对话"），
+    // 由 `offDone` 把「待确认」标记还回去（详见 `uiPlanMessageIds` 的说明）。
+    uiPlanMessageIds.set(target.id, planMsg.id);
     // 与 send() 同理：IPC 抛异常时必须清守卫，否则该会话永久发不出消息。
     try {
       const result = await window.h3.chatLlm(history, webSearch, agentMode, target.id, browserSearch, "execute");
@@ -2188,13 +2215,32 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         setGeneratingIds((all) => all.filter((id) => id !== target.id));
         sendingRef.current.delete(target.id);
         setSessions((all) => patchLast(all, target.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
+        restorePlanMark(target.id, planMsg.id);
       }
     } catch (error) {
       setGeneratingIds((all) => all.filter((id) => id !== target.id));
       sendingRef.current.delete(target.id);
       setSessions((all) => patchLast(all, target.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${describeError(error, "未知错误")}` })));
+      restorePlanMark(target.id, planMsg.id);
       onError(error);
     }
+  }
+
+  /**
+   * 执行轮**失败**后把「待确认」标记还给计划消息。
+   *
+   * 实测缺陷 probe-execute-plan-fail：`executePlan` 在发请求**之前**就抹掉了 `plan`
+   * （为了"避免按钮重复出现"），而中转间歇性 ECONNRESET 是常态故障。
+   * 于是执行失败后按钮再也不出现，用户只剩一句"请求失败"，
+   * 唯一出路是手动再打一遍"按上面的计划执行"。
+   *
+   * 失败 = 这份计划还没被执行过，按钮理应还在；成功时才该把它永久去掉。
+   */
+  function restorePlanMark(sessionId: string, messageId: string) {
+    setSessions((all) => all.map((s) => s.id !== sessionId ? s : {
+      ...s,
+      messages: s.messages.map((m) => m.id === messageId ? { ...m, plan: true } : m)
+    }));
   }
 
   async function stop() {

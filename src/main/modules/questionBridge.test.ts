@@ -175,3 +175,48 @@ describe("formatAnswers：重复的问题 id", () => {
     expect(text).toContain("【画幅】用户未作答");
   });
 });
+
+/**
+ * `pendingFor` —— 切页后补回丢掉的选择题（实测缺陷 probe-question-while-away）。
+ *
+ * 渲染端切页会卸载 `PlaygroundPage`，那段时间 `llm:question` 事件没有订阅者、被丢弃，
+ * 而 `ask()` 仍在挂起等回答。渲染端挂载时经 IPC 调这个方法来补挂卡片，
+ * 所以它必须**不消耗**登记项（只是读，不能 settle），且按会话隔离。
+ */
+describe("QuestionBridge.pendingFor", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("能取到本会话挂起的问题与 requestId", () => {
+    const bridge = new QuestionBridge();
+    void bridge.ask("s1", "r1", QUESTIONS).catch(() => undefined);
+    expect(bridge.pendingFor("s1")).toEqual({ requestId: "r1", questions: QUESTIONS });
+  });
+
+  it("**只是读**：取过之后仍可正常作答（不能把登记项消费掉）", async () => {
+    const bridge = new QuestionBridge();
+    const promise = bridge.ask("s1", "r1", QUESTIONS);
+    bridge.pendingFor("s1");
+    bridge.pendingFor("s1"); // 多次调用也必须无害
+    expect(bridge.answer("r1", { duration: ["15"] })).toBe(true);
+    await expect(promise).resolves.toContain("15 秒");
+  });
+
+  it("按会话隔离：别的会话的问题取不到", () => {
+    const bridge = new QuestionBridge();
+    void bridge.ask("s1", "r1", QUESTIONS).catch(() => undefined);
+    expect(bridge.pendingFor("s2")).toBeUndefined();
+  });
+
+  it("没有挂起项时返回 undefined（不是空对象）", () => {
+    expect(new QuestionBridge().pendingFor("s1")).toBeUndefined();
+  });
+
+  it("答完之后取不到（登记项已落定）", async () => {
+    const bridge = new QuestionBridge();
+    const promise = bridge.ask("s1", "r1", QUESTIONS);
+    bridge.answer("r1", { duration: ["6"] });
+    await promise;
+    expect(bridge.pendingFor("s1")).toBeUndefined();
+  });
+});

@@ -1,18 +1,49 @@
 ---
 name: playground-branch-status
-description: v0.3.0 已发布（main c708747）；feature/pelican-exploration-2026-10-19 有 201 笔未推送
+description: v0.3.1 已发布（main HEAD = tag v0.3.1）；pelican 探索分支 202 笔已 squash 合入，逐笔历史也已推到远端
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-20T03:46:00.000Z
+  modified: 2026-10-20T10:40:00.000Z
 ---
 
-**当前状态（2026-10-20 11:46）：** `main` HEAD = `c708747`（v0.3.0 已发布）。
-探索分支 `feature/pelican-exploration-2026-10-19` HEAD = `cbd4068`，**`main..HEAD` 共 201 笔，未推送、未合并**
-（按 CLAUDE.md，合并前需先 squash；用户尚未指示合并）。
-本分支验证基线：`npm test` **789 项 / 43 文件**全绿；typecheck、build 通过；
+**当前状态（2026-10-20 18:40）：`v0.3.1` 已发布。`main` HEAD = tag `v0.3.1`（收尾只有一条
+`chore: bump version to 0.3.1`），与 `origin/main` 同步。**
+最新 Release 已从草稿转为正式；`releases/latest` 返回 `v0.3.1`（`2026-10-20T08:18:54Z`），
+`latest.yml` 指向 `0.3.1`，三件套齐全：
+
+- `latest.yml`
+- `minimax-h3-workbench-setup-0.3.1.exe`（96MB / 100375349 字节）
+- `minimax-h3-workbench-setup-0.3.1.exe.blockmap`
+
+`feature/pelican-exploration-2026-10-19` 的 **202 笔提交已 squash 成一条** `7000c62`
+（`merge: feature/pelican-exploration-2026-10-19 — 智能体产物闭环补全 + 一整类"静默跳过"缺陷`）
+合入 `main`；37 个文件，+5876 / −244。
+**原始逐笔历史也已推到远端**（`b457e80`，本地与远端一致，未改写）。
+
+**引用提交时不要写「HEAD = <sha>」**：本轮为了把收尾压成一条，`main` 尖端被 amend 过，
+写死的 sha 会立刻过期（而且写进文件本身就是自引用）。要么引用不可变的 tag（`v0.3.1`），
+要么引用不会被改写的提交（`7000c62`、feature 分支的 `b457e80`）。
+
+**CI**：这个 fork 的 `push` 事件**不会**自动跑 workflow（历史运行全是 `workflow_dispatch`，
+push 到 `main`、推 tag 都一样）。两次都是按 CLAUDE.md 手动 dispatch：
+
+- run `39368297085`（`7000c62` / `main`）：`test` ✅、`package (windows)` ✅、
+  `package (macos)` ✅、`release` **skipped**（`refs/tags/v` 守卫，未发版）。
+- run `39391708598`（`v0.3.1` 发版那次，跑在当时的 bump 提交上）：`test` ✅、`release` ✅、
+  `package (windows)` ✅、`package (macos)` ✅；生成草稿 Release 后手工转正式。
+  （该提交后来被 squash 进 `main` 尖端，SHA 不再存在；结论不变——同一份源码树。）
+
+验证基线：`npm test` **789 项 / 43 文件**全绿；typecheck、build 通过；
 E2E test-01…test-10 逐个复跑全过（21/12/5/5/23/12/20/16/10/11）。
+
+**发版踩到的两个新细节**：
+- `curl -d` 传中文 JSON 在 Git Bash 下容易转义出错，用 `--data-binary @file`；
+  且 `/tmp` 在 Git Bash 与 node 里解析不一致（node 会当成 `F:\tmp`），
+  临时 JSON 放仓库 `_scratch/`（已 gitignore）最稳。
+- 本地不会自动出现 `origin/feature/...` 这个 remote-tracking ref（仓库没配
+  `fetch = +refs/heads/*`），核对远端 SHA 要用 `git ls-remote --heads origin <branch>`。
 
 ---
 

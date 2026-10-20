@@ -1,7 +1,7 @@
 # Memory Index
 
 - [MiniMax H3 Workbench 项目](minimax-h3-workbench-project.md) — fork 仓库、自动更新发版流程（tag 即发布）、本机 RTX 5090 D 硬件
-- [游乐场分支状态](playground-branch-status.md) — `main` = v0.3.0（`c708747`）；`feature/pelican-exploration-2026-10-19` 201 笔**未推送**；789 项单测；含第八批「工具 schema 硬校验打死整轮」的系统化教训
+- [游乐场分支状态](playground-branch-status.md) — **v0.3.1 已发布**（`main` HEAD = tag `v0.3.1`）；pelican 探索分支 202 笔已 squash 合入、逐笔历史也推到远端；789 项单测；含「工具 schema 硬校验打死整轮」的系统化教训
 - [环境事实要走对话片段](codex-world-state-channel.md) — **环境事实拼进 system prompt 会被模型无视（实测 6 通道全失败），必须作为 user 片段注入**
 - [智能体差距在提示词工程](agent-prompt-engineering-leverage.md) — 模型对工具调用的信任远高于文字约定；产物能力必须工具化（create_file 实证）
 - [Codex harness 移植](codex-harness-port.md) — 8 笔提交落地：提示词分层/world state 差异注入/计划模式/历史规范化/每轮快照/错误恢复/token 层+暗色主题。含"建了模块≠接线了"的教训

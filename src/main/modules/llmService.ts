@@ -1235,7 +1235,11 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
 
 规则：整个清单里最多一项是 in_progress。步骤写完就不要改措辞（用户会对照着看），只改 status。`,
         inputSchema: z.object({
-          explanation: z.string().describe("一句话说明这次更新的原因（如'已完成搜索，开始整理数据'）。仅当状态变化需要解释时才写。").optional(),
+          // **`.optional()` 只允许 undefined，不允许 null**（实测同类坑第十九处）：
+          // 模型把可选字段写成 `explanation: null` 时，zod 会拒掉**整个对象**，
+          // `parseToolCall` 抛错 → 调用被静默跳过（与必填字段缺失同一后果）。
+          // 用 `.nullish()` 收下，再在 execute 里把 null 归一成 undefined。
+          explanation: z.string().nullish().describe("一句话说明这次更新的原因（如'已完成搜索，开始整理数据'）。仅当状态变化需要解释时才写。"),
           plan: z.array(z.object({
             // **`step` / `status` 也必须是可选**（实测同类坑第十七处）：
             // 模型很自然只写 `{ plan: [{ step: "搜索资料" }] }`——省略 status。
@@ -1285,7 +1289,9 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           });
           try {
             // `explanation` 要原样带上去：渲染端会显示"为什么更新这一步"。
-            return await callbacks.updatePlan({ plan, explanation: params.explanation });
+            // schema 放宽成 nullish 后，`null` 在这里归一成 `undefined`
+            // （下游类型是 `explanation?: string`，塞 null 会让界面渲染出 "null"）。
+            return await callbacks.updatePlan({ plan, explanation: params.explanation ?? undefined });
           } catch (error) {
             return `步骤清单更新失败：${describeError(error, "未知错误")}（不影响任务继续，请直接用文字说明进度）`;
           }
@@ -1315,7 +1321,9 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
             id: z.string().nullish().describe("问题标识（英文短名，如'video_duration'），用于回传答案时对应。"),
             header: z.string().nullish().describe("很短的中文标签，最多 12 个字（如'视频时长'）。"),
             question: z.string().nullish().describe("完整问题，一句话说清要用户在什么之间做选择。"),
-            multiSelect: z.boolean().describe("是否允许多选。只有确实可以同时选多个时才设为 true。").optional(),
+            // **`.optional()` 只允许 undefined，不允许 null**（同类坑第十九处）：
+            // 模型写 `multiSelect: null` 时 zod 会拒掉整个对象 → 调用被静默跳过。
+            multiSelect: z.boolean().nullish().describe("是否允许多选。只有确实可以同时选多个时才设为 true。"),
             // **不要在这里写 min(2).max(4)**（实测同类坑第五处）：模型只给 1 个选项时，
             // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
             // 整个调用被**静默跳过** → 模型收不到回执 → 反复重试 → 20 步预算烧光。
@@ -1361,7 +1369,10 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
               id: uniqueQuestionId(question.id?.trim() || `q${index + 1}`, usedIds, index),
               header: question.header?.trim() || `问题 ${index + 1}`,
               question: question.question?.trim() || question.header?.trim() || `请选择第 ${index + 1} 项的取值`,
-              multiSelect: question.multiSelect,
+              // `boolean | null` → `boolean | undefined`：下游 `AgentQuestion.multiSelect?: boolean`
+              // 与 `PgQuestionCard` 都按三态之外的二态判断，塞 null 会走"非 true"分支（能跑），
+              // 但类型上不干净，且在 IPC 里会序列化成 `null`。统一归成 undefined。
+              multiSelect: question.multiSelect ?? undefined,
               options: (question.options ?? []).slice(0, 4).map((option, optionIndex) => ({
                 id: option.id?.trim() || `opt${optionIndex + 1}`,
                 label: option.label?.trim() || option.id?.trim() || `选项 ${optionIndex + 1}`,

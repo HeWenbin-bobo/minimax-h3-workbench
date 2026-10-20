@@ -34,6 +34,25 @@ export function backendKindLabel(kind: BackendKind): string {
   return "MiniMax H3";
 }
 
+/**
+ * 用户这句话里有没有**明确**说要走哪个后端。
+ *
+ * 用途：有多个后端可用时，`generate_video` 要求模型先问用户；但如果用户自己已经说了
+ * 「用本机的」「走云端」，再拦着不让动手就是刁难。这里只认**明确的指名**，
+ * 不做任何推断——认不出来就返回 `undefined`（走"先问"那条路，宁多问一句）。
+ *
+ * 词表刻意保守：`云海`/`4K 云端渲染` 这类正文里的词不该被当成"选了云端"，
+ * 所以 minimax 只认 `minimax` / `云 api` / `云端` / `走云`，不认单个「云」字。
+ */
+export function backendMentionedInText(text: unknown): BackendKind | undefined {
+  if (typeof text !== "string" || !text) return undefined;
+  if (/瞬映|卡密|`rb`|\brb\b/i.test(text)) return "rb";
+  if (/minimax|云\s*api|云端|走云|云生成/i.test(text)) return "minimax";
+  if (/ssh|远程显卡/i.test(text)) return "ssh";
+  if (/本机|本地|comfy\s*ui|comfy/i.test(text)) return "local";
+  return undefined;
+}
+
 export interface BackendAvailability {
   kind: BackendKind;
   label: string;

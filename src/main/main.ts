@@ -16,7 +16,7 @@ import {
   shell,
   type IpcMainInvokeEvent
 } from "electron";
-import { AdapterRegistry, backendAvailability, backendKindLabel, normalizeBackendKind } from "./backends/adapterRegistry";
+import { AdapterRegistry, backendAvailability, backendKindLabel, backendMentionedInText, normalizeBackendKind } from "./backends/adapterRegistry";
 import { mediaMime, parseByteRange } from "./modules/mediaRange";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import { describeError, isNetworkError } from "../shared/errors";
@@ -1046,6 +1046,22 @@ function registerIpc(
         searchBaseUrl: turn.value.searchBaseUrl || undefined,
         searchApiKey: turn.value.searchApiKey
       };
+      /**
+       * 「这一轮到底问过用户没有」——`generate_video` 的准入闸门（见那里的说明）。
+       *
+       * 为什么需要它：真实模型会把 `backend:"local"` 直接写进参数，绕开"未指定才拦"的判定
+       * （真机实测 deepseek-v4.1-flash）。所以判据只能是"问没问过"，不是"传没传参"。
+       */
+      let backendSettled = false;
+      /** 用户自己在原话里点名、或答题卡片里选定的后端（优先级高于模型自己填的）。 */
+      let backendFromUser: BackendKind | undefined;
+      /**
+       * 本轮**用户自己说的话**（不含我们注入的环境事实）。
+       *
+       * 环境事实是最后追加的一条 user 消息（见 injectWorldState），里面有「视频生成后端」
+       * 清单——把它算进来会让"用户点名过"永远为真，闸门就形同虚设。
+       */
+      const userText = [...safeHistory].reverse().find((message) => message.role === "user")?.content ?? "";
       const agentCallbacks = {
         // 与普通对话共用同一条搜索链路：配了搜索 API 就优先用它，未配置则回落免 key 抓取 Bing/搜狗。
         // browserOnly（「浏览器搜索」联网项）时只用 Chromium 渲染，跳过 API 与 HTTP 直抓。
@@ -1070,7 +1086,38 @@ function registerIpc(
           if (requested && !normalizeBackendKind(requested)) {
             return `不认识的生成后端「${params.backend}」。可选：local（本机 ComfyUI）/ ssh（SSH 远程显卡）/ minimax（MiniMax 云 API）/ rb（瞬映 RB）。请向用户确认用哪一个再调用。`;
           }
-          const backend: BackendKind = normalizeBackendKind(requested) ?? turn.value.defaultBackend;
+          // **有多个后端可用时，模型必须先问用户，不许自己挑**（实测缺陷 probe-real-ask-first）。
+          //
+          // 为什么不能只靠提示词（真机实测 2026-10-20，deepseek-v4.1-flash）：本机配了
+          // ComfyUI 又有瞬映卡密，世界状态里已写明「用户没指定时不要自己挑——花费差别很大」，
+          // `generate_video` 的工具描述也写了「动手前必须先问后端/时长/数量」。真实模型拿到
+          // 用户那段小仙女描述后**一句没问**，直接 `generate_video({backend:"local"})` 建出了任务
+          // （步骤条只有「→ 正在创建视频生成任务…」「✓ 生成视频完成」两条）。
+          //
+          // 这正是 CLAUDE.md 那条规律的实例：模型更信"有没有这个工具"，不信提示词里的话。
+          // 第一版只拦"没传 backend"的情形，模型照样显式传了 `local` 绕过去——所以判据必须是
+          // **这一轮到底问过用户没有**（`backendSettled`）：没问过、用户原话里也没点名 → 一律不建任务。
+          const asked = normalizeBackendKind(requested);
+          const userSaid = backendMentionedInText(userText);
+          const usableBackends = (await videoBackendAvailability(turnSettings)).filter((entry) => !entry.reason);
+          if (usableBackends.length > 1 && !backendSettled) {
+            const userPick = userSaid ? usableBackends.find((entry) => entry.kind === userSaid) : undefined;
+            if (userPick) {
+              // 用户自己在消息里点名了 → 直接用，不必再问（"能动手就不问"）。
+              backendFromUser = userPick.kind;
+            } else {
+              return [
+                `**还没有确定用哪个后端，任务没有创建。** 现在有 ${usableBackends.length} 个可用的生成方式：`,
+                usableBackends.map((entry) => `- ${backendKindLabel(entry.kind)}（\`${entry.kind}\`）— ${entry.note}`).join("\n"),
+                `它们的花费差别很大（本机不额外计费、云端按秒计费、瞬映扣卡密次数），不能替用户默认挑一个。`,
+                userSaid
+                  ? `另外：你传了 \`backend="${requested}"\`，但用户这句话里并没有明确选定后端（或是你说要问的那一步还没做）。请先用 \`request_user_input\` 问清楚。`
+                  : `请先用 \`request_user_input\` 问用户用哪一个（选择题里把上面几个都列上），拿到答复后再带 \`backend\` 重新调用本工具。`,
+                `如果用户已经明确说了用哪个（如"用本机""走云端"），直接把那个值放进 \`backend\` 再调用。`
+              ].join("\n");
+            }
+          }
+          const backend: BackendKind = backendFromUser ?? asked ?? turn.value.defaultBackend;
           // **提交前必须确认这个后端此刻能不能用**（实测缺陷 probe-nocred-backend）：
           // `orchestrator.submit()` 只做参数校验、不查凭据，会先把任务建出来并返回成功，
           // 于是工具回执写"已创建 1 个视频生成任务"，随后 `runTask()` 异步抛
@@ -1569,7 +1616,13 @@ ${tableNote}` : ""}`;
           const requestId = randomUUID();
           // 先推事件再挂起：渲染端要拿到 requestId 才能回传答案。
           sendLlmQuestion({ requestId, questions: params.questions, sessionId: session });
-          return questionBridge.ask(session, requestId, params.questions, controller.signal);
+          const answer = await questionBridge.ask(session, requestId, params.questions, controller.signal);
+          // **用户答完就置位**：`generate_video` 的准入闸门看的就是这个。
+          // 只认"回答里出现了某个后端名"，不认问题内容——模型问的是时长、
+          // 而答案里恰好带了"本机"，那种情况不该被当成"用户选了后端"。
+          const picked = backendMentionedInText(answer);
+          if (picked) { backendSettled = true; backendFromUser = picked; }
+          return answer;
         }
       };
       let result: AgentRunResult | undefined;

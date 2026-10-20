@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backendAvailability, normalizeBackendKind } from "./adapterRegistry";
+import { backendAvailability, backendMentionedInText, normalizeBackendKind } from "./adapterRegistry";
 
 /**
  * 背景（实测真机，2026-10-20）：用户输入一段视频描述后，智能体**直接**用「连接设置」
@@ -103,5 +103,45 @@ describe("backendAvailability", () => {
       }
     );
     expect(list.filter((e) => !e.reason).map((e) => e.kind)).toEqual(["local"]);
+  });
+});
+
+/**
+ * 「用户这句话里有没有明确说用哪个后端」。
+ *
+ * 用途（实测 22f67da 的准入闸门）：有多个后端可用时，`generate_video` 要求模型先问；
+ * 但用户自己说了「用本机的」还拦着不让动手就是刁难。这里只认**明确指名**。
+ *
+ * 词表必须保守——认错方向的代价不对称：
+ * - 误判成"用户选了云端" → 跳过询问，可能按秒计费、扣卡密次数；
+ * - 漏判 → 多问一句，用户点一下就好。
+ * 所以宁可漏判。
+ */
+describe("backendMentionedInText", () => {
+  it("明确的指名都认得出来", () => {
+    expect(backendMentionedInText("用本机生成")).toBe("local");
+    expect(backendMentionedInText("走 ComfyUI 吧")).toBe("local");
+    expect(backendMentionedInText("用云端生成")).toBe("minimax");
+    expect(backendMentionedInText("走 MiniMax API")).toBe("minimax");
+    expect(backendMentionedInText("用瞬映，我有卡密")).toBe("rb");
+    expect(backendMentionedInText("ssh 那台机器")).toBe("ssh");
+  });
+
+  it("正文里的「云」「云端渲染」不算选了云端（这是关键的不误判）", () => {
+    // 用户的视频描述里常有「云海」「云端」，那是画面内容，不是后端选择。
+    expect(backendMentionedInText("小仙女悬浮在云海之上")).toBeUndefined();
+    expect(backendMentionedInText("远处是云海、仙山与明月")).toBeUndefined();
+    expect(backendMentionedInText("梦幻的云端效果")).toBe("minimax"); // 「云端」算——这是常见说法
+  });
+
+  it("完全没提后端时返回 undefined（走「先问」那条路）", () => {
+    expect(backendMentionedInText("帮我生成一个小仙女视频")).toBeUndefined();
+    expect(backendMentionedInText("")).toBeUndefined();
+  });
+
+  it("非字符串输入不抛错（答案来自 IPC，类型没有保证）", () => {
+    for (const value of [null, undefined, 42, {}, [], true]) {
+      expect(backendMentionedInText(value)).toBeUndefined();
+    }
   });
 });

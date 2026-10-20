@@ -87,7 +87,18 @@ export function App() {
     window.h3.checkForUpdates().then((response) => {
       if (!response.data) return;
       setUpdateInfo(response.data);
-      if (response.data.updateAvailable) setNotice({ text: `发现新版本 v${response.data.latestVersion}，点击左下角“下载更新”即可安装。` });
+      // **不能无条件覆盖当前提示**（实测缺口：探针里三次读到的是这条更新提示，
+      // 而不是它们各自触发的业务提示）。
+      //
+      // `checkForUpdates()` 走网络（GitHub API），可能比用户操作慢好几秒：
+      // 用户在挂载后很快点了某个按钮、拿到「AI 正在等你回答上面的选择题」
+      // 「该会话正在生成回复…」这类**业务提示**，几秒后更新检查回来把它顶掉——
+      // 用户还没读完就没了，而且这类提示往往是"为什么刚才那下没反应"的唯一解释。
+      // 底部侧栏本来就有「下载更新」入口，这条 toast 不是唯一告知渠道。
+      // 与下面框架更新那条保持同一口径（`current ?? …`）。
+      setNotice((current) => (!response.data!.updateAvailable ? current : current ?? {
+        text: `发现新版本 v${response.data!.latestVersion}，点击左下角“下载更新”即可安装。`
+      }));
     }).catch(() => undefined);
     // 智能体框架（Vercel AI SDK）随安装包分发，版本独立于应用本体——
     // 应用不更新时也该提示框架有新版本。此前主进程与 preload 都已就绪，

@@ -1200,11 +1200,18 @@ function registerIpc(
           // 这里自己收敛成数字（不引 `llmService` 的 `toFiniteNumber`：那是它的私有函数，
           // 而 `params.duration` 在本层已声明为 number，只需防运行时的非有限值）。
           const wantedDuration = Number.isFinite(Number(params.duration)) ? Math.round(Number(params.duration)) : undefined;
-          const clampedNote = wantedDuration !== undefined && wantedDuration !== request.duration
+          const durationNote = wantedDuration !== undefined && wantedDuration !== request.duration
             ? `（你要的是 ${wantedDuration} 秒，但这个后端只支持 ${request.duration} 秒，已按它调整。**对用户说明实际时长，不要复述原来的数字。**）`
             : "";
+          // **数量被夹同样要说**（实测缺陷 probe-count-clamp）：云端**按路计费**，
+          // 模型要 8 路、实际只建 4 路时，回执若只写"数量=4 路"，它可能对用户说
+          // "按你要的 8 条来"（实际 4 条），或者再调一次工具想补足（又一次计费）。
+          const wantedCount = Number.isFinite(Number(params.count)) ? Math.round(Number(params.count)) : undefined;
+          const countNote = wantedCount !== undefined && wantedCount !== request.count
+            ? `（你要的是 ${wantedCount} 路，单次最多 ${request.count} 路，已按它调整。**对用户说明实际条数，不要复述原来的数字。**）`
+            : "";
           // 返回文本带全量参数：模型据此在收尾时能准确复述任务细节（收尾质量），而不是含糊的"已创建"。
-          return `已创建 ${response.length} 个视频生成任务：后端=${backendKindLabel(request.backend)}，时长=${request.duration} 秒${clampedNote}，数量=${request.count} 路，画面描述="${params.prompt}"。任务卡片已实时显示在本会话气泡下方，完成后可直接预览与下载。请向用户简短确认这些任务参数（一两句话即可，不要重复长描述）。`;
+          return `已创建 ${response.length} 个视频生成任务：后端=${backendKindLabel(request.backend)}，时长=${request.duration} 秒${durationNote}，数量=${request.count} 路${countNote}，画面描述="${params.prompt}"。任务卡片已实时显示在本会话气泡下方，完成后可直接预览与下载。请向用户简短确认这些任务参数（一两句话即可，不要重复长描述）。`;
         },
         // open_page（让模型能真正"打开浏览器"）：复用 browserFetch 的 Chromium 渲染。
         // 安全边界：只允许 http/https，**且必须拒绝内网地址**——URL 由模型生成（还可能被它刚抓到的

@@ -599,3 +599,29 @@ describe("行内链接（URL 含括号）", () => {
     expect(html).toContain("标题");
   });
 });
+
+// 实测回归：逐行匹配用的是 `^…$` 形态的正则，而 JS 的 `.` 与 `$` 都不吃 `\r`——
+// CRLF 文本（用户在 Windows 上用记事本另存过的 `.md` 产物、或模型把产物原文回灌）
+// 一来，围栏/标题/表格**全部识别失败**，整篇退化成一堆带 ``` 字面的普通段落。
+describe("CRLF 换行的内容（Windows 另存 / 回灌）", () => {
+  const NL = String.fromCharCode(10);
+  const CRLF = String.fromCharCode(13) + NL;
+
+  it("围栏代码块照常渲染", () => {
+    const html = render(["```js", "const a = 1;", "```"].join(CRLF));
+    expect(html).toContain("md-code");
+    expect(html).toContain("const a = 1;");
+  });
+
+  it("标题与表格照常渲染", () => {
+    const html = render(["## 小标题", "| a | b |", "|---|---|", "| 1 | 2 |"].join(CRLF));
+    expect(html).toContain("<h4>");
+    expect(html).toContain("<table>");
+  });
+
+  it("产物提取照常认出 html / md / 表格围栏", () => {
+    expect(extractArtifact(["```html", "<!DOCTYPE html><html></html>", "```"].join(CRLF))?.kind).toBe("html");
+    expect(extractArtifact(["```md", "# T", "```"].join(CRLF))?.kind).toBe("doc");
+    expect(extractArtifact(["```csv", "a,b", "1,2", "```"].join(CRLF))?.kind).toBe("sheet");
+  });
+});

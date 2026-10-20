@@ -30,7 +30,12 @@ const MAX_PLAN_DEPTH = 8;
 
 export function renderMarkdown(text: string, depth = 0): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const lines = text.split("\n");
+  // **行尾必须归一化**（实测回归）：逐行匹配用的都是 `^…$` 形态的正则，
+  // 而 JS 的 `.` 与 `$` 都不吃 `\r`——CRLF 文本（用户在 Windows 上用记事本
+  // 另存过的 `.md` 产物）一来，围栏、标题、方案块**全部识别失败**，
+  // 整篇文档退化成一堆带 `` ``` `` 字面的普通段落。
+  // 在入口统一成 `\n` 最省事：下面所有逐行判断都不必再各自处理 `\r`。
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
   let index = 0;
   let key = 0;
 

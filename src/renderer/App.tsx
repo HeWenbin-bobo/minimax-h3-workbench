@@ -2240,7 +2240,11 @@ function clampDuration(duration: number, options: number[]): number {
  * 规则与渲染端 `markdown.tsx` 一致：开围栏 ≥3 个反引号，闭围栏长度必须 ≥ 开围栏。
  */
 function codeFences(content: string): Array<{ lang: string; body: string }> {
-  const lines = content.split("\n");
+  // **行尾归一化**（实测回归）：下面的 `^…$` 正则里 `.` 与 `$` 都不吃 `\r`，
+  // CRLF 内容（Windows 记事本另存过的 `.md`、或模型把产物原文回灌）会让开/闭围栏
+  // **全部匹配失败**，`extractArtifact` 直接返回 undefined——卡片一个都不出。
+  // 与 `markdown.tsx` 同一处理：入口统一成 `\n`。
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
   const out: Array<{ lang: string; body: string }> = [];
   for (let i = 0; i < lines.length; i += 1) {
     const open = /^(`{3,})(.*)$/.exec(lines[i].trimStart());

@@ -1855,6 +1855,32 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
               : { ...msg, toolSteps: state.toolSteps.map((step) => formatToolStep(step)) }
           )));
         }
+        // 步骤清单同理（同一根因的第六个实例）：切页期间 `llm:plan` 全丢，
+        // 用户切回来气泡上一条清单都没有。清单是常驻显示、"做得对不对"的主要依据。
+        if (state.planSteps && state.planSteps.length > 0) {
+          setSessions((all) => patchLast(all, target, (msg) => (
+            msg.planSteps && msg.planSteps.length > 0 ? msg : { ...msg, planSteps: state.planSteps }
+          )));
+        }
+        // 压缩提示同理（第七个实例）：历史被摘要过了却没有任何说明，用户会以为对话丢了。
+        if (state.compactionNotices.length > 0) {
+          setSessions((all) => all.map((session) => {
+            if (session.id !== target) return session;
+            // 已经有一条压缩提示就说明事件送达过，不重复插。
+            if (session.messages.some((m) => m.notice && /上下文已从约/.test(m.content))) return session;
+            const notices = state.compactionNotices.map((info) => ({
+              id: crypto.randomUUID(),
+              role: "assistant" as const,
+              notice: true,
+              content: `（${info.reason}：上下文已从约 ${formatTokens(info.before)} 压到约 ${formatTokens(info.after)}，保留最近对话 + 交接摘要；此前细节以摘要形式保留）`
+            }));
+            // 插在最后一条助手消息**之前**（与实时路径同一位置约定）。
+            const messages = session.messages;
+            const last = messages[messages.length - 1];
+            const insertAt = last?.streaming ? messages.length - 1 : messages.length;
+            return { ...session, messages: [...messages.slice(0, insertAt), ...notices, ...messages.slice(insertAt)] };
+          }));
+        }
         if (state.done) {
           setSessions((all) => patchLast(all, target, (msg) => {
             const base = state.fullText && state.fullText.length > (msg.content?.length ?? 0)

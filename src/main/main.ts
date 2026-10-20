@@ -538,6 +538,23 @@ function registerIpc(
      * 主进程复制一份必然会漂移。这里只记事实，由渲染端按同一套规则还原。
      */
     toolSteps: Array<{ phase: "start"; tool: string; input: string } | { phase: "end"; tool: string; result: string; ok: boolean }>;
+    /**
+     * 本轮的**步骤清单**（`update_plan` 的最新一份）。
+     *
+     * 同一根因的第六个实例（实测缺陷 probe-plansteps-while-away）：切页期间
+     * `llm:plan` 没有订阅者 —— 用户切回来时气泡上**一条清单都没有**，
+     * 而清单是常驻显示、用来判断"它做得对不对"的主要依据。
+     * 只留最新一份（`update_plan` 语义本来就是整份替换）。
+     */
+    planSteps?: Array<{ step: string; status: "pending" | "in_progress" | "completed" }>;
+    /**
+     * 本轮发生的**压缩提示**（自动/手动压缩时插进对话流的那条系统提示）。
+     *
+     * 同一根因的第七个实例：切页期间 `llm:compaction` 丢失 → 用户切回来发现
+     * "历史怎么被摘要过了"却没有任何说明。压缩改写历史是用户可感知的变化，
+     * 静默就等于隐瞒（CLAUDE.md「失败必须可见」的同一条纪律）。
+     */
+    compactionNotices: Array<{ reason: string; before: number; after: number }>;
     done: boolean;
     ok: boolean;
     message?: string;
@@ -918,10 +935,12 @@ function registerIpc(
       taskIds: string[];
       artifacts: Array<{ name: string; path: string; size: number; kind: "html" | "sheet" | "doc" }>;
       toolSteps: Array<{ phase: "start"; tool: string; input: string } | { phase: "end"; tool: string; result: string; ok: boolean }>;
+      planSteps?: Array<{ step: string; status: "pending" | "in_progress" | "completed" }>;
+      compactionNotices: Array<{ reason: string; before: number; after: number }>;
       done: boolean;
       ok: boolean;
       message?: string;
-    } = { fullText: "", taskIds: [], artifacts: [], toolSteps: [], done: false, ok: true, message: undefined };
+    } = { fullText: "", taskIds: [], artifacts: [], toolSteps: [], compactionNotices: [], done: false, ok: true, message: undefined };
     sessionTurnState.set(session, turnState);
     const chunk = (event: LlmStreamEvent) => {
       if (typeof event.delta === "string" && event.delta) turnText += event.delta;
@@ -956,7 +975,18 @@ function registerIpc(
     // controller 已在上面（并发守卫处）创建并登记，这里不再重复建。
     let effective = safeHistory;
     try {
-      effective = (await maybeCompact(session, safeHistory, "auto", controller.signal)).messages;
+      const compacted = await maybeCompact(session, safeHistory, "auto", controller.signal);
+      effective = compacted.messages;
+      // 压缩提示记进本轮状态：切页期间 `llm:compaction` 会丢，用户切回来只发现
+      // "历史怎么被摘要过了"却没有任何说明。历史被改写是用户可感知的变化，
+      // 静默就等于隐瞒（CLAUDE.md「失败必须可见」的同一条纪律）。
+      if (compacted.info && compacted.info.reason) {
+        turnState.compactionNotices.push({
+          reason: compacted.info.reason,
+          before: compacted.info.before,
+          after: compacted.info.after
+        });
+      }
     } catch (error) {
       // 压缩链路异常绝不阻断对话：如实记录后按原历史继续。
       console.warn("[llm] 上下文压缩失败，按原始历史继续：", describeError(error, "未知错误"));
@@ -1755,6 +1785,9 @@ ${tableNote}` : ""}`;
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。
         updatePlan: async (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => {
+          // 记进本轮状态：切页期间丢掉的 `llm:plan` 靠它补齐。
+          // 只留最新一份（`update_plan` 语义本来就是整份替换，不是增量）。
+          turnState.planSteps = params.plan;
           sendLlmPlan({ plan: params.plan, explanation: params.explanation, sessionId: session });
           const done = params.plan.filter((entry) => entry.status === "completed").length;
           return `步骤清单已更新（${done}/${params.plan.length} 已完成），用户能在对话里看到。继续执行下一步，不要在回复里重复整个清单。`;

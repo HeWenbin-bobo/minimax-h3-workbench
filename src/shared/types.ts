@@ -344,6 +344,10 @@ export interface WorkbenchApi {
       | { phase: "start"; tool: string; input: string }
       | { phase: "end"; tool: string; result: string; ok: boolean }
     >;
+    /** 本轮最新的步骤清单（`update_plan` 是整份替换）。切页期间 `llm:plan` 会丢，靠它补齐。 */
+    planSteps?: Array<{ step: string; status: "pending" | "in_progress" | "completed" }>;
+    /** 本轮发生的压缩提示。切页期间 `llm:compaction` 会丢，靠它补齐（历史被改写必须可见）。 */
+    compactionNotices: Array<{ reason: string; before: number; after: number }>;
     done: boolean;
     ok: boolean;
     message?: string;

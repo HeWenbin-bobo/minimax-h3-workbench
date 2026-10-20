@@ -11,6 +11,7 @@
 import type { ChatMessage } from "../../shared/types";
 import { sliceSafe } from "../../shared/text";
 import { estimateTokens, TOKENS_PER_IMAGE } from "./contextBudget";
+import { contextWindowFor } from "../../shared/modelWindows";
 import type { LlmServiceOptions } from "./llmService";
 import { resolveChatPath } from "./llmService";
 
@@ -103,8 +104,65 @@ export function buildCompactedHistory(
   return [...selected, { role: "user", content: body }];
 }
 
+/**
+ * 摘要在发送前对历史做一次**预算裁剪**。
+ *
+ * 为什么必须裁（实测推导的必然路径）：`summarizeHistory` 原本把整段历史原样发出，
+ * 而它被触发的**前提**恰恰是"历史已经太大"。于是超窗的那一轮：
+ * ① 主请求被上游拒绝 → 记 `forceCompact`；
+ * ② 压缩流程启动，摘要请求又发同一份超大历史 → **同样被拒** → 返回空串；
+ * ③ 上层写入「（无可用摘要：压缩时未能生成摘要，此前对话细节已丢失）」并提交——
+ *    用户的整段对话被永久换成一行字。
+ * 裁到窗口以内，至少能拿到一份"最近这段"的交接摘要，比全丢好。
+ *
+ * 保留策略：**从最新往回保留**（摘要的用途是"接着往下做"，越近越重要）；
+ * 单条装不下时截断它而不是整条丢弃（它仍带上下文）。
+ *
+ * @returns `droppedCount` 是被整条省略的消息数；`truncated` 表示有消息被截断。
+ *          两者**任一为真**都说明模型没看到完整历史，调用方必须在提示词里说清
+ *          （只判 `droppedCount` 会漏掉"只截断、没丢弃"这种情形——实测踩到）。
+ */
+export function capForSummary(
+  messages: ChatMessage[],
+  maxTokens: number
+): { messages: ChatMessage[]; droppedCount: number; truncated: boolean } {
+  if (maxTokens <= 0 || messages.length === 0) return { messages, droppedCount: 0, truncated: false };
+  const cost = (message: ChatMessage) => estimateTokens(message.content) + 4;
+  if (messages.reduce((sum, message) => sum + cost(message), 0) <= maxTokens) {
+    return { messages, droppedCount: 0, truncated: false };
+  }
+  const kept: ChatMessage[] = [];
+  let remaining = maxTokens;
+  let truncated = false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const tokens = cost(message);
+    if (tokens <= remaining) {
+      kept.unshift(message);
+      remaining -= tokens;
+      continue;
+    }
+    // 这条装不下：把它的**开头**截一段留下（与 buildCompactedHistory 同一口径），然后停。
+    const cut = truncateToTokens(message.content, remaining);
+    if (cut) kept.unshift({ ...message, content: cut });
+    truncated = true;
+    break;
+  }
+  return { messages: kept, droppedCount: messages.length - kept.length, truncated };
+}
+
 /** 摘要请求超时。压缩本身可能很慢（要把整段历史读进去），给足 90 秒。 */
 const SUMMARIZE_TIMEOUT_MS = 90_000;
+
+/**
+ * 摘要请求的输入预算：取模型窗口的 60%。
+ *
+ * 留出余量的理由：同一次请求还要带摘要提示词与最多 8000 输出 token；
+ * 而窗口表本身是**领域估计**（见 `shared/modelWindows.ts`），估大了就会把输入挤爆。
+ */
+export function summarizeInputBudget(model: string): number {
+  return Math.max(8_000, Math.floor(contextWindowFor(model) * 0.6));
+}
 
 /** 超时与调用方取消信号合并（同 comfyAdapter.requestSignal 的理由，见下面的调用处注释）。 */
 function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
@@ -132,7 +190,20 @@ export async function summarizeHistory(
     // **摘要请求只带文字**：图片以 data URL 存在 images 里（一张 1MB 的图 ≈ 100 万字符），
     // 摘要只是写交接说明，完全用不到图片。原样发送实测请求体达 0.95MB（probe-summarize-images），
     // 既浪费带宽，也可能撞上上游请求体上限导致压缩失败。
-    const textOnly = messages.map((message) => ({ role: message.role, content: message.content }));
+    //
+    // **还要按窗口裁一次**（见 `capForSummary` 的注释）：触发压缩的前提就是"历史太大"，
+    // 原样发出去等于让摘要请求去撞同一堵墙——那一轮会彻底拿不到摘要，
+    // 上层只能写入"此前对话细节已丢失"。裁到窗口内，至少能拿到最近这段的交接。
+    const capped = capForSummary(messages, summarizeInputBudget(options.model));
+    const textOnly = capped.messages.map((message) => ({ role: message.role, content: message.content }));
+    // 有省略/截断时**在提示词里说清**：否则模型会把这份摘要当成"从头讲起"，
+    // 而它其实只看到了后段——接手的模型可能因此重做前面已完成的工作。
+    // **两个标志都要判**：只判 `droppedCount` 会漏掉"单条被截断"的情形（实测踩到）。
+    const gapNote = capped.truncated
+      ? capped.droppedCount > 0
+        ? `\n\n（注意：上下文过长，前面 ${capped.droppedCount} 条消息未能提供给你。请在摘要里明确说明"更早的内容未包含在内"。）`
+        : `\n\n（注意：最早的一条消息因上下文过长被截断，未能完整提供给你。请在摘要里明确说明"更早的内容不完整"。）`
+      : "";
     const response = await fetch(`${base}${resolveChatPath(base)}`, {
       method: "POST",
       headers: {
@@ -141,7 +212,7 @@ export async function summarizeHistory(
       },
       body: JSON.stringify({
         model: options.model,
-        messages: [...textOnly, { role: "user", content: SUMMARIZATION_PROMPT }],
+        messages: [...textOnly, { role: "user", content: `${SUMMARIZATION_PROMPT}${gapNote}` }],
         stream: false,
         // 输出上限必须自己设（CLAUDE.md 纪律）：不设就用上游默认（实测该中转约 4096 token），
         // 大上下文的交接摘要可能被静默截断——而截断的摘要 = 丢信息，且用户毫不知情。

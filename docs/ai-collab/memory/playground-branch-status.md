@@ -1,11 +1,19 @@
 ---
 name: playground-branch-status
-description: v0.3.0 已发布；feature/agent-iteration 已 squash 合入 main 并推送（379 笔 → 一条 merge 提交）
+description: v0.3.0 已发布（main c708747）；feature/pelican-exploration-2026-10-19 有 201 笔未推送
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-18T15:50:00.000Z
+  modified: 2026-10-20T03:46:00.000Z
+---
+
+**当前状态（2026-10-20 11:46）：** `main` HEAD = `c708747`（v0.3.0 已发布）。
+探索分支 `feature/pelican-exploration-2026-10-19` HEAD = `cbd4068`，**`main..HEAD` 共 201 笔，未推送、未合并**
+（按 CLAUDE.md，合并前需先 squash；用户尚未指示合并）。
+本分支验证基线：`npm test` **789 项 / 43 文件**全绿；typecheck、build 通过；
+E2E test-01…test-10 逐个复跑全过（21/12/5/5/23/12/20/16/10/11）。
+
 ---
 
 **状态（2026-10-18）：`v0.3.0` 已发布。`feature/agent-iteration` 的 379 笔提交已**
@@ -331,3 +339,37 @@ SSRF 尾点 2 + 通配 DNS 5、SSH accept 竞态 1 + 迟到 close 1 + exec 超�
 
 
 
+
+## 第八批（365 → 201 笔；探索期 2026-10-19 22:20 → 10-20 11:46）
+
+主线是**「工具 schema 的硬校验把整轮静默打死」**——这一批把它从"逐个救火"变成"系统扫一遍"。
+
+**判据（写进注释与测试）**：*只要代码本来就能自动纠正（夹紧 / 截断 / 归一 / 补全），就不该做成 schema 硬校验。*
+AI SDK 在 `parseToolCall` 阶段校验失败时**只把 toolCall 记进历史、不执行**——
+`onToolExecutionStart/End` 都不触发，模型收不到回执，于是反复重试同一条，**20 步预算烧光**，
+而界面把原因归成"参数被上游截断"（完全误导）。mock 上游探针能稳定复现"连续 20 次没执行"。
+
+| 类型 | 具体问题 |
+|---|---|
+| **空/缺字段被拒** | 四个产物工具的 `name` 是 `z.string().min(1)`：模型说"刚才那个文件"时传空串 → 1 次 create + **19 次空转**、步骤条一片空白。改为放宽 + execute 回可纠正说明。同类：`create_file` 的 `content`/`name`/`kind`、`update_plan` 的 `step`/`status`/`plan`、`request_user_input` 的 `header`/`question`/`label`/`description`/`questions`、`open_page` 的 `url`、`edit_artifact_batch` 的 `edits` |
+| **`.optional()` 不收 null** | 只允许 `undefined`。`explanation: null` / `multiSelect: null` 会让 zod 拒掉**整个对象**。改 `.nullish()` + execute 归一 |
+| **带单位的数字** | `z.coerce.number()` 遇 `"8 秒"` / `"2 路"` / `"第 3 行"` 得 `NaN` → zod 拒 → `generate_video` 连续 20 次没执行。新增 `toFiniteNumber()`（取文本里第一个数字），schema 改 `z.union([number, string])` |
+| **拒绝被显示成成功** | 放宽后新增一类回执（"搜索关键词是空的…"），不含"失败"二字，`isToolFailure` 一律打勾、摘要编出「步骤清单已更新」等假成功。新增 `REJECTION_RE` 并**锚定回执开头**（裸 `/是空的/` 会把搜索结果标题 `[1] 为什么杯子是空的` 误判成失败——本会话自引入的误报，已修） |
+| **同 step 竞态** | `create_file` 的落盘在 `artifactWriteQueue` 里，而 `inspect_artifact`/`edit_artifact` 的**解析在队列外** → 并行时自检报「找不到产物」。`edit_artifact` 更隐蔽：解析与读改写是**两次排队**，中间可插入 `create_file` 落成新版本，于是改到旧版、界面无变化。两者都收进**同一个队列条目**（注意不能调 `resolveArtifactQueued`，会自己等自己） |
+| **编码探测漏了三处** | `attachment:read` 只认 UTF-8/GBK，记事本「Unicode」= UTF-16LE+BOM 会被 GB18030 解成乱码（不报错）。修完后发现**产物预览 / 智能体读写 / h3preview 三条路径各写了一遍**，共用 `modules/textFile.ts` 的 `decodeTextBytes` / `decodeTextPreview` |
+| **行数/行尾** | 文件以换行结尾时 `split("\n").length` 多算一行（回执"共 4 行"、编辑器里 3 行；恰好 400 行的文件被误报"还有 1 行没显示"）。新增 `countLines()`。CRLF 文件的按行读回把 `\r` 藏在行尾，模型照抄必 not-found → 新增 `splitLines()` 从源头去掉（`closestLines` 是第三处） |
+| **半截产物真的落盘** | 围栏只认三个反引号：四个反引号包住三个反引号（正文里教别人写代码块）会在内层提前闭合 → 一个含代码示例的 html 被截成 32 字符并**真的落盘**成坏卡片。`markdown.tsx` 与 `App.tsx` 的 `codeFences` 都改成「闭围栏长度 ≥ 开围栏」 |
+| **CRLF 整篇识别失败** | 新写的 `^…$` 围栏正则里 `.` 与 `$` 都不吃 `\r`（**本会话自引入的回归**）→ CRLF 内容下围栏/标题/表格全部不认。两处解析入口统一 `replace(/\r\n/g, "\n")` |
+| **其他** | 方案块紧跟段落（无空行）被并进段落 → 标签按字面显示、卡片不出；` ```xlsx ` 里放制表符数据判不出表格（卡片消失）；两道题同 `id` 时后一题顶用前一题的答案；`[x](https://…/Foo_(bar))` 链接被截断；搜索摘要截断切开 emoji；`isPathInside` 把 `..报告.html` 当越界（4 处同源）；产物已删除时说成"不在产物目录内"；空文件回"共 1 行 + 一行空白"；行号超末尾无提示；脏 `artifact.kind` 让预览面板一片空白；搜索 API 失败不回落浏览器渲染；`describeError` 把业务异常/HTML 错误页都说成"网络连接失败" |
+
+**结论**：`npm test` **789 项 / 43 文件**全绿；typecheck、build 通过；
+E2E test-01…test-10 逐个复跑全过；`probe-pelican-loop`（写→自检→读回→改→再自检）、
+`probe-same-step-create-inspect`、`probe-schema-question-field`、`probe-missing-content`、
+`probe-plan-missing`、`probe-schema-duration-str` 等 mock 上游探针全过。
+
+**探针经验（本批新增）**：
+- **断言要落在"上游收到的工具回执"上**，不是气泡文字：气泡默认折叠只显示摘要，中间回执看不到；
+  而"是否被静默跳过"正是由回执决定的。
+- **mock 收到回执后要能改口**：只重发同一条坏参数会让"修复后"看起来仍像失败（其实回执已送达）。
+- 探针里复刻产品逻辑时，**复刻的是"当前源码"而不是"记得的源码"**——
+  本批有一次用旧逻辑写探针，报出来的"失败"其实是探针没跟上改动。

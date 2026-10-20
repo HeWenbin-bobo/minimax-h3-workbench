@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { artifactSessionDirName } from "./artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback } from "./artifactDir";
 
 // 背景：`sessionId` 来自渲染端（可构造），而目录名同时用于落盘与 `artifact:purgeSession`。
 // 旧实现只把危险字符替换成 `_`，会产生**目录名碰撞**：
@@ -31,5 +31,149 @@ describe("artifactSessionDirName", () => {
       expect(/^\.+$/.test(name)).toBe(false);
       expect(name.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// 自检回落找"同主名最新版本"：模型修完 bug 会重写成 `名字 (2).html`，
+// 但自检时往往还传原名。选错版本 = 拿旧代码的结论给用户。
+describe("pickLatestVersion", () => {
+  it("选出版本号最大的那个", () => {
+    expect(pickLatestVersion(["报告.html", "报告 (2).html", "报告 (3).html"], "报告.html")).toBe("报告 (3).html");
+  });
+
+  it("版本号按数字比：(10) 必须胜过 (9)", () => {
+    expect(pickLatestVersion(["图.html", "图 (9).html", "图 (10).html"], "图.html")).toBe("图 (10).html");
+  });
+
+  it("拿带后缀的名字去查也能收敛到同一组", () => {
+    expect(pickLatestVersion(["图.html", "图 (2).html"], "图 (2).html")).toBe("图 (2).html");
+  });
+
+  it("只有无后缀的版本", () => {
+    expect(pickLatestVersion(["唯一.html"], "唯一.html")).toBe("唯一.html");
+  });
+
+  it("不同主名不串组", () => {
+    expect(pickLatestVersion(["图.html", "图表.html"], "图.html")).toBe("图.html");
+  });
+
+  it("扩展名大小写不敏感（Windows 同一文件）", () => {
+    expect(pickLatestVersion(["A.HTML", "A (2).html"], "A.html")).toBe("A (2).html");
+  });
+
+  it("一个都没有时返回 undefined", () => {
+    expect(pickLatestVersion(["别的.html"], "目标.html")).toBeUndefined();
+    expect(pickLatestVersion([], "目标.html")).toBeUndefined();
+  });
+
+  it("中间括号属于主名，不当版本后缀", () => {
+    expect(pickLatestVersion(["图表 (草稿).html", "图表 (草稿) (2).html"], "图表 (草稿).html")).toBe("图表 (草稿) (2).html");
+  });
+});
+
+// 实测工具契约不一致：create_file 要求"不含扩展名"，read/edit 要求"带扩展名"。
+// 模型按前者写后者时（read_artifact("科技新闻")）会找不到文件。
+describe("artifactNameCandidates（无扩展名补全）", () => {
+  it("有扩展名时只试它（尊重模型指定类型）", () => {
+    expect(artifactNameCandidates("报告.md")).toEqual(["报告.md"]);
+  });
+
+  // 实测死路：`create_file(kind:"csv", name:"data.csv")` 落盘会被强制改成 `data.xlsx`
+  // （工具层把 kind 改写为 xlsx，saveArtifactFile 再把名字里的 .csv 剥掉）。
+  // 模型随后 read_artifact("data.csv") 若只试 .csv，找的是一个**从来不存在**的文件，
+  // 而 data.xlsx 就躺在目录里——它只会收到"找不到产物"，然后重新生成一份重复的。
+  it("csv/tsv 顺带试 .xlsx（落盘时已被改写成 xlsx）", () => {
+    expect(artifactNameCandidates("data.csv")).toEqual(["data.csv", "data.xlsx"]);
+    expect(artifactNameCandidates("data.tsv")).toEqual(["data.tsv", "data.xlsx"]);
+  });
+
+  it("已经是 .xlsx 的名字不再多试（避免无谓 stat）", () => {
+    expect(artifactNameCandidates("data.xlsx")).toEqual(["data.xlsx"]);
+  });
+
+  // 同一类死路：`saveArtifactFile` 的正则是 `\.(html?|…)`，认 `.htm`，
+  // 于是 `create_file(html, "鹈鹕.htm")` 落成 `鹈鹕.html`。
+  // 而名字解析若按"有扩展名只试它"去 stat `鹈鹕.htm`，那个文件从来不存在。
+  it(".htm 顺带试 .html（落盘时已被改写成 html）", () => {
+    expect(artifactNameCandidates("鹈鹕.htm")[1]).toBe("鹈鹕.html");
+    expect(artifactNameCandidates("鹈鹕.html")).toEqual(["鹈鹕.html"]);
+  });
+
+  it("没有扩展名时按已知类型依次补全", () => {
+    const got = artifactNameCandidates("科技新闻");
+    expect(got[0]).toBe("科技新闻");
+    expect(got).toContain("科技新闻.html");
+    expect(got).toContain("科技新闻.md");
+    expect(got).toContain("科技新闻.xlsx");
+  });
+
+  it("空名/空白名返回空数组（不打无谓的 stat）", () => {
+    expect(artifactNameCandidates("")).toEqual([]);
+    expect(artifactNameCandidates("   ")).toEqual([]);
+  });
+
+  it("首尾空格被裁掉（模型常带空格）", () => {
+    expect(artifactNameCandidates("  报告  ")[0]).toBe("报告");
+  });
+
+  it("名字中间的点不算扩展名结束（v1.2 报告 仍会补全）", () => {
+    expect(artifactNameCandidates("v1.2 报告").length).toBeGreaterThan(1);
+  });
+});
+
+// 注入给模型的"本会话已产出的文件"清单只保留前 20 条。
+// 若同一份文件的每个历史版本都占一条，改得越多、限额被占得越满，
+// 别的文件反而被挤出清单——模型手里就"没有"它了。
+describe("foldArtifactNames（清单折叠同名多版本）", () => {
+  it("保留最先出现的那一个（输入已按 mtime 倒序 = 最新版在前）", () => {
+    expect(foldArtifactNames(["报告 (3).html", "报告 (2).html", "报告.html"]))
+      .toEqual(["报告 (3).html"]);
+  });
+
+  it("不同主名 / 不同扩展名各留一条", () => {
+    expect(foldArtifactNames(["报告 (2).html", "报告.md", "图表.html"]))
+      .toEqual(["报告 (2).html", "报告.md", "图表.html"]);
+  });
+
+  it("扩展名大小写不敏感（Windows 同一文件）", () => {
+    expect(foldArtifactNames(["A.HTML", "A (2).html"]).length).toBe(1);
+  });
+
+  it("中间括号属于主名，不当版本后缀折叠", () => {
+    const got = foldArtifactNames(["图表 (草稿) (2).html", "图表 (草稿).html"]);
+    expect(got).toEqual(["图表 (草稿) (2).html"]);
+  });
+
+  it("20 个旧版本不会挤掉别的文件", () => {
+    const versions = Array.from({ length: 25 }, (_, i) => (i === 0 ? "报告.html" : `报告 (${i + 1}).html`));
+    const got = foldArtifactNames([...versions, "笔记.md"]);
+    expect(got).toHaveLength(2);
+    expect(got).toContain("笔记.md");
+  });
+});
+
+// 同一句判定原先在 inspect/read/edit/batch 四处各写一遍。
+// 加"csv 顺带找 xlsx"时它们不会一起改：`.csv` 请求会落进 `ext` 分支，
+// 回一句"你写的「data.csv」没带扩展名"——可它明明带着，只是磁盘上叫 .xlsx。
+describe("describeArtifactFallback（名字回落的措辞）", () => {
+  it("csv 落成 xlsx 不能说成「没带扩展名」", () => {
+    const text = describeArtifactFallback("alias", "data.csv", "data.xlsx", "read");
+    expect(text).toContain("落成了");
+    expect(text).toContain("data.xlsx");
+    expect(text).not.toContain("没带扩展名");
+  });
+
+  it("真的没带扩展名时才那么说", () => {
+    expect(describeArtifactFallback("ext", "报告", "报告.html", "read")).toContain("没带扩展名");
+  });
+
+  it("三种动作各自用对动词", () => {
+    expect(describeArtifactFallback("stale", "a.html", "a (2).html", "read")).toContain("实际读的是");
+    expect(describeArtifactFallback("stale", "a.html", "a (2).html", "edit")).toContain("实际改的是");
+    expect(describeArtifactFallback("stale", "a.html", "a (2).html", "inspect")).toContain("上面检查的是");
+  });
+
+  it("正常命中时没有多余说明", () => {
+    expect(describeArtifactFallback(false, "a.html", "a.html", "read")).toBe("");
   });
 });

@@ -30,7 +30,12 @@ const MAX_PLAN_DEPTH = 8;
 
 export function renderMarkdown(text: string, depth = 0): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const lines = text.split("\n");
+  // **行尾必须归一化**（实测回归）：逐行匹配用的都是 `^…$` 形态的正则，
+  // 而 JS 的 `.` 与 `$` 都不吃 `\r`——CRLF 文本（用户在 Windows 上用记事本
+  // 另存过的 `.md` 产物）一来，围栏、标题、方案块**全部识别失败**，
+  // 整篇文档退化成一堆带 `` ``` `` 字面的普通段落。
+  // 在入口统一成 `\n` 最省事：下面所有逐行判断都不必再各自处理 `\r`。
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
   let index = 0;
   let key = 0;
 
@@ -58,16 +63,33 @@ export function renderMarkdown(text: string, depth = 0): ReactNode[] {
       continue;
     }
 
-    // 围栏代码块 ```lang ... ```
-    if (line.trimStart().startsWith("```")) {
-      const lang = line.trim().slice(3).trim();
+    // 围栏代码块 ```lang ... ```（**围栏长度可变**，见下面的说明）
+    //
+    // 实测缺陷：只认三个反引号时，用**四个反引号**包住三个反引号的代码块
+    // （官方 Markdown 用来"在正文里教别人写代码块"的标准写法）会渲染成两个空代码块，
+    // 中间那行 `const a = 1;` 落到外面变成普通段落：
+    //     ````md          →  <pre data-lang="`md"></pre>
+    //     ```js                <p>const a = 1;</p>
+    //     const a = 1;         <pre></pre>
+    //     ```
+    //     ````
+    // 而模型写"怎么用 markdown"这类文档时几乎一定会这么写，用户看到的是空白代码块。
+    // 规则（CommonMark）：开围栏至少 3 个反引号；闭围栏必须**不小于**开围栏长度。
+    const fenceOpen = /^(`{3,})(.*)$/.exec(line.trimStart());
+    if (fenceOpen) {
+      const fence = fenceOpen[1];
+      // 语言标记：`` ````md `` 的开围栏是 4 个，剩下的 `md` 才是语言。
+      const lang = fenceOpen[2].trim();
       const body: string[] = [];
       index += 1;
-      while (index < lines.length && !lines[index].trimStart().startsWith("```")) {
+      while (index < lines.length) {
+        const closing = /^(`{3,})\s*$/.exec(lines[index].trimStart());
+        // 闭围栏长度不够（内层那三个反引号）不算结束——它属于正文。
+        if (closing && closing[1].length >= fence.length) break;
         body.push(lines[index]);
         index += 1;
       }
-      index += 1; // 跳过闭合 ```
+      index += 1; // 跳过闭合围栏
       nodes.push(
         <pre className="md-code" key={key++} data-lang={lang || undefined}>
           <code>{body.join("\n")}</code>
@@ -138,9 +160,20 @@ export function renderMarkdown(text: string, depth = 0): ReactNode[] {
     // 普通段落（连续非空非特殊行合并）
     const paragraph: string[] = [line];
     index += 1;
-    while (index < lines.length && lines[index].trim() && !lines[index].trimStart().startsWith("```") && !/^\s*[-*]\s+/.test(lines[index]) && !/^\s*\d+[.、]\s+/.test(lines[index]) && !/^#{1,4}\s/.test(lines[index]) && !isTableRow(lines[index])) {
-      // 表格行不能并入段落：否则"说明文字：\n| a | b |\n|---|---|" 会把整张表
-      // 当成段落正文（实测：紧随其后的表格完全不渲染，用户看到的是一堆竖线）。
+    // **方案块的开标签也算"特殊行"**（实测缺陷）：`好的，方案如下：` 紧跟 `<proposed_plan>`
+    // （中间没有空行）时，旧条件不认它，于是整个块被并进段落 →
+    // 标签按字面文本显示成 `&lt;proposed_plan&gt;`，方案卡片彻底不出现。
+    // 模型在"先说一句、再给方案块"这种很自然的写法下必定踩到。
+    // 表格行同理不能并入（注释见下）：否则"说明文字：\n| a | b |\n|---|---|" 会把整张表吞进段落。
+    const isSpecialLine = (text: string) =>
+      !text.trim()
+      || text.trimStart().startsWith("```")
+      || text.trim() === PLAN_BLOCK_OPEN
+      || /^\s*[-*]\s+/.test(text)
+      || /^\s*\d+[.、]\s+/.test(text)
+      || /^#{1,4}\s/.test(text)
+      || isTableRow(text);
+    while (index < lines.length && !isSpecialLine(lines[index])) {
       paragraph.push(lines[index]);
       index += 1;
     }
@@ -197,7 +230,12 @@ function parseTableRow(line: string): string[] {
 // 比不可点更糟。这里的做法：匹配 `https?`，http 只输出标题文字。
 function inline(text: string, keyBase: number): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  // **URL 里可以有成对的括号**（实测缺陷）：维基百科的链接形如
+  // `https://zh.wikipedia.org/wiki/Foo_(bar)`，旧的 `[^)\s]+` 会在第一个 `)` 处停下，
+  // 于是 href 变成半截地址、多余的那个 `)` 被当成正文显示出来。
+  // 这里只放开**一层**配平括号（`(?:[^()\s]|\([^()\s]*\))*`）——够覆盖消歧义后缀这类真实写法，
+  // 又不至于让正则回溯失控。未配平的括号仍不匹配（按字面文本显示，比给出坏链接安全）。
+  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https?:\/\/(?:[^()\s]|\([^()\s]*\))*)\)/g;
   let last = 0;
   let match: RegExpExecArray | null;
   let key = keyBase * 1000;

@@ -86,3 +86,40 @@ describe("buildSystemPrompt 组装", () => {
     expect(out).not.toContain("# 联网状态");
   });
 });
+
+// 回归护栏：提示词里的工具清单**必须覆盖实际下发的工具**。
+// 实测踩过两次：加 edit_artifact_batch 时提示词没提（模型不知道它存在，
+// 继续一条条调单处编辑，白白吃掉步数预算）；加 read_artifact 的 keyword
+// 参数时也没提（模型仍分段读完整个文件）。
+// 工具存在但提示词不提 = 只做了一半。
+describe("提示词覆盖所有实际下发的工具", () => {
+  // 新增工具时：**同时**改这里和 TOOLS 层。这个列表故意手写——
+  // 它就是要逼你想起"还有个地方要改"。
+  const DELIVERED_TOOLS = [
+    "create_file",
+    "generate_video",
+    "read_artifact",
+    "edit_artifact",
+    "edit_artifact_batch",
+    "inspect_artifact",
+    "web_search",
+    "open_page",
+    "update_plan",
+    "request_user_input"
+  ];
+
+  it("每个下发的工具在提示词里都有对应条目", () => {
+    const text = defaultAgentPrompt();
+    // **必须匹配行首的列表项**（`- tool(`），不能只做子串匹配：
+    // 自检时我把条目改成 "XX_edit_artifact_batch(" 试护栏，子串断言照样 PASS——
+    // 又造了个假通过。行首锚定才真的能测到"这条被删了/改名了"。
+    const missing = DELIVERED_TOOLS.filter(
+      (tool) => !new RegExp(`^-\\s*${tool}\\(`, "m").test(text)
+    );
+    expect(missing).toEqual([]);
+  });
+
+  it("read_artifact 的 keyword 参数有说明（否则模型只会分段读完）", () => {
+    expect(defaultAgentPrompt()).toContain("keyword");
+  });
+});

@@ -158,3 +158,20 @@ describe("formatAnswers 入参容错", () => {
     expect(text).toContain("用户选择：a");
   });
 });
+
+// 实测缺陷：模型偶尔给两个问题同一个 id（复制粘贴，或干脆都写 `q`）。
+// 答案表是 `{ [id]: [optionId] }`，按 id 查表时**后一题会顶用前一题的答案**——
+// 用户只答了"时长 6 秒"，回执里"画幅"也变成了"用户选择：横屏"。
+// 入口（request_user_input）会去重；这里再兜一层：同一个 id 只用一次。
+describe("formatAnswers：重复的问题 id", () => {
+  const dup: AgentQuestion[] = [
+    { id: "q", header: "时长", question: "几秒？", options: [{ id: "a", label: "6 秒", description: "短" }] },
+    { id: "q", header: "画幅", question: "横还是竖？", options: [{ id: "a", label: "横屏", description: "" }] }
+  ];
+
+  it("同一个 id 的第二题按未作答处理（不能替用户编答案）", () => {
+    const text = formatAnswers(dup, { q: ["a"] });
+    expect(text).toContain("【时长】用户选择：6 秒");
+    expect(text).toContain("【画幅】用户未作答");
+  });
+});

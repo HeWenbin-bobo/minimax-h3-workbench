@@ -1,4 +1,5 @@
 import { describeError } from "../../shared/errors";
+import { sliceSafe } from "../../shared/text";
 
 /**
  * 联网搜索：优先走用户配置的第三方搜索 API；未配置时回落到免 key 直抓公开结果页。
@@ -40,7 +41,24 @@ export async function searchWeb(query: string, options: WebSearchOptions, signal
   const base = (options.apiBaseUrl || "").replace(/\/+$/, "");
   // 「浏览器搜索」模式：明确只走应用自带 Chromium 渲染，跳过 API 与 HTTP 直抓
   // （语义是用户点名"用浏览器搜"，而不是"随便什么方式搜到就行"）。
-  if (!options.browserOnly && base) return formatResults(await searchViaApi(base, options.apiKey, query, signal));
+  //
+  // **API 失败要能降级**（实测缺口）：旧写法是 `return formatResults(await searchViaApi(...))`——
+  // 只要用户配过搜索 API，它一旦失败（500 / 超时 / 额度用尽 / key 失效），整次搜索就抛错，
+  // **完全不回落**到明明可用的浏览器渲染链路。用户看到「搜索请求失败：500」，
+  // 以为是网络坏了，而应用其实有备用通道。
+  // 现在 API 只当"优先尝试"：请求本身失败就记进 failures 继续往下走
+  // （与"未配置 API"时的路径完全一致）；正常返回则用它的结果，空结果也算结果。
+  if (!options.browserOnly && base) {
+    try {
+      const results = await searchViaApi(base, options.apiKey, query, signal);
+      // **API 正常返回但没结果 → 保持既有语义：这就是"没搜到"，不降级。**
+      // （降级只针对"请求本身失败"；把空结果也降级会让一次查询多跑两轮浏览器渲染，
+      //  而第三方 API 的"确实无结果"通常是可信的。）
+      return formatResults(results);
+    } catch (error) {
+      failures.push(`搜索 API：${describeError(error, "请求失败")}`);
+    }
+  }
   // 免 key 路径：**浏览器渲染优先**。实测同一查询下，纯 fetch 拿到的 Bing 页面常是降级 SERP
   // （查"iPhone 18 Pro 1TB 京东自营 价格"却返回 Apple 官网/百科等泛化结果，0/6 相关），
   // 而真浏览器渲染稳定拿到正确结果（京东商品页，6/6 相关）。旧实现把 HTTP 放在前面且
@@ -234,7 +252,10 @@ export function parseBing(html: string): SearchResult[] {
     items.push({
       url: resolveHref(heading[1], "https://www.bing.com"),
       title: stripHtml(heading[2]),
-      snippet: snippet ? stripHtml(snippet[1]).slice(0, 200) : ""
+      // **用 sliceSafe**（实测）：裸 `slice(0, 200)` 会切开 emoji 的代理对，
+      // 留下一个孤立高代理项——拼进 `web_search` 回执后渲染成 `�`，模型读到的是坏字符。
+      // 中英混排的真实摘要切点不一定是偶数，这条一定会踩到（探针：末码元 d83d）。
+      snippet: snippet ? sliceSafe(stripHtml(snippet[1]), 200) : ""
     });
   }
   return items;

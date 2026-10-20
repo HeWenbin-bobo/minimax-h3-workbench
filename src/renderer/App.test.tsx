@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { renderMarkdown } from "./markdown";
-import { normalizeStoredSessions, extractArtifact } from "./App";
+import { normalizeStoredSessions, extractArtifact, foldArtifactVersions, stripTransientForPersist } from "./App";
 import { PLAN_BLOCK_CLOSE, PLAN_BLOCK_OPEN } from "../shared/planMode";
 
 const render = (text: string) => renderToStaticMarkup(createElement("div", null, renderMarkdown(text)));
@@ -28,6 +28,17 @@ describe("方案块渲染（<proposed_plan> 契约）", () => {
     const html = render(`${PLAN_BLOCK_OPEN}\n## 方案\n1. 第一步\n${PLAN_BLOCK_CLOSE}`);
     expect(html).toContain("md-plan");
     expect(html).not.toContain("proposed_plan");
+  });
+
+  // 实测缺陷：`好的，方案如下：` 紧跟 `<proposed_plan>`（中间没空行）时，
+  // 段落合并条件不认开标签 → 整个块被并进段落，标签按字面文本显示、
+  // 方案卡片彻底不出现。模型"先说一句、再给方案块"是最自然的写法。
+  it("方案块紧跟在段落后面（中间没有空行）也要渲染成卡片", () => {
+    const NL = String.fromCharCode(10);
+    const html = render(["好的，方案如下：", PLAN_BLOCK_OPEN, "## 方案", "1. 第一步", PLAN_BLOCK_CLOSE].join(NL));
+    expect(html).toContain("md-plan");
+    expect(html).not.toContain("proposed_plan");
+    expect(html).toContain("好的，方案如下：");
   });
 
   it("块内 markdown 照常渲染（标题与有序列表都不丢）", () => {
@@ -184,6 +195,27 @@ describe("normalizeStoredSessions 坏数据容错", () => {
     expect(result).toHaveLength(1);
     expect(result[0].messages).toEqual([]);
     expect(result[0].title).toBe("甲");
+  });
+
+  // 实测缺口：预览面板三个分支全是 `artifact.kind === "html" / "sheet" / "doc"` 的
+  // 精确比对，而读取侧只校验了 name/path。kind 是脏值（旧版本写错、手改 localStorage）
+  // 时三个分支全不命中 —— 用户点「预览」看到一片空白面板，没有任何报错。
+  it("产物的脏 kind 按扩展名归一（否则预览面板一个分支都不命中）", () => {
+    const result = normalizeStoredSessions([{
+      id: "a",
+      messages: [{
+        id: "m1", role: "assistant", content: "x",
+        artifacts: [
+          { name: "a.html", path: "/a/a.html", size: 1, kind: "???" },
+          { name: "b.xlsx", path: "/a/b.xlsx", size: 1, kind: 42 },
+          { name: "c.md", path: "/a/c.md", size: 1, kind: "doc" }
+        ]
+      }]
+    }]);
+    const kinds = result[0].messages[0].artifacts?.map((a) => a.kind);
+    expect(kinds).toEqual(["html", "sheet", "doc"]);
+    // 认得的合法值原样保留（不能被扩展名推断改掉）。
+    expect(kinds?.every((k) => k === "html" || k === "sheet" || k === "doc")).toBe(true);
   });
 
   it("残留 streaming 标记被清掉（重启后不留闪烁光标）", () => {
@@ -398,12 +430,198 @@ describe("extractArtifact 围栏语言别名", () => {
     expect(extractArtifact("```csv\n只有一行\n```")).toBeUndefined();
   });
 
+  // 实测缺陷：旧判据按 lang 猜分隔符（`tsv` → 制表符，其余 → 逗号），
+  // 于是 ```xlsx / ```csv 里放**制表符分隔**的数据时直接返回 undefined——
+  // **卡片完全不出**，而落盘路径（`saveArtifactFile` → `parseCsvRows`）本来就会自动识别。
+  it("```xlsx / ```csv 里放制表符分隔的数据也要认（不按 lang 猜分隔符）", () => {
+    for (const lang of ["xlsx", "excel", "csv", "tsv"]) {
+      expect(extractArtifact("```" + lang + "\n城市\t销量\n北京\t10\n```")?.kind, lang).toBe("sheet");
+    }
+  });
+
   it("```html 优先于其它围栏", () => {
     const text = "```csv\na,b\n1,2\n```\n\n```html\n<!DOCTYPE html><p>x</p>\n```";
     expect(extractArtifact(text)?.kind).toBe("html");
   });
 
+  // 实测缺陷：`extractArtifact` 原来也只用一条匹配三个反引号的正则，
+  // 于是**四个反引号**包住三个反引号的写法（正文里教别人写代码块）会在内层提前闭合，
+  // 一个含代码示例的 html 页面被截成半截、**真的落盘**成一张坏掉的卡片。
+  // 与 `markdown.tsx` 的围栏规则保持一致：闭围栏长度必须 ≥ 开围栏。
+  it("四个反引号包住的 html 围栏按完整内容提取（不提前闭合）", () => {
+    const body = "<!DOCTYPE html><html><body><pre>```js</pre></body></html>";
+    const text = "````html\n" + body + "\n````";
+    expect(extractArtifact(text)).toEqual({ kind: "html", content: body });
+  });
+
   it("没有围栏的纯文本不产生产物", () => {
     expect(extractArtifact("这是一段普通回答。")).toBeUndefined();
+  });
+});
+
+// 一次请求里模型「写→自检→修→重写」会留下多份同名文件（uniqueArtifactPath 加序号不覆盖）。
+// 默认只展示最新一版，别让用户去读回复猜哪个是最终版。
+describe("产物多版本折叠（foldArtifactVersions）", () => {
+  it("同名文件的 (2)(3) 折成一组，最新的是最后一个", () => {
+    const groups = foldArtifactVersions([
+      { name: "鹈鹕骑自行车_3D.html" },
+      { name: "鹈鹕骑自行车_3D (2).html" },
+      { name: "鹈鹕骑自行车_3D (3).html" }
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].latest.name).toBe("鹈鹕骑自行车_3D (3).html");
+    expect(groups[0].older.map((x) => x.name)).toEqual(["鹈鹕骑自行车_3D.html", "鹈鹕骑自行车_3D (2).html"]);
+  });
+
+  it("不同主名的文件不合并", () => {
+    const groups = foldArtifactVersions([{ name: "报告.md" }, { name: "数据.csv" }]);
+    expect(groups).toHaveLength(2);
+    expect(groups.every((g) => g.older.length === 0)).toBe(true);
+  });
+
+  it("同名但不是序号后缀的算不同文件（中间的括号属于文件名）", () => {
+    const groups = foldArtifactVersions([{ name: "图表 (草稿).html" }, { name: "图表.html" }]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it("只有一个版本时 older 为空（渲染端据此不显示展开按钮）", () => {
+    const groups = foldArtifactVersions([{ name: "单份.html" }]);
+    expect(groups[0].older).toEqual([]);
+    expect(groups[0].latest.name).toBe("单份.html");
+  });
+
+  it("分组顺序按首次出现，卡片位置不因新版本出现而跳动", () => {
+    const groups = foldArtifactVersions([
+      { name: "甲.html" },
+      { name: "乙.md" },
+      { name: "甲 (2).html" }
+    ]);
+    expect(groups.map((g) => g.latest.name)).toEqual(["甲 (2).html", "乙.md"]);
+  });
+
+  it("空列表返回空数组", () => {
+    expect(foldArtifactVersions([])).toEqual([]);
+  });
+});
+
+// 实测不一致：注释说 toolSteps / streaming 是"瞬态、读取时强制剥离"，
+// 但写入侧一直没剥离——每条消息的工具日志被原样写进 localStorage（配额只有 5–10MB）。
+describe("落盘前剥离瞬态字段（stripTransientForPersist）", () => {
+  const base = (over: Record<string, unknown>) => ({
+    id: "s1", title: "t", createdAt: "2026-10-19T00:00:00.000Z", updatedAt: "2026-10-19T00:00:00.000Z",
+    // `role` 必须窄成字面量类型，否则整个对象不满足 PlaygroundSession（TS2322）。
+    messages: [{ id: "m1", role: "assistant" as const, content: "hi", ...over }]
+  });
+
+  it("toolSteps 不落盘（内存态不动，只影响写的拷贝）", () => {
+    const out = stripTransientForPersist([base({ toolSteps: ["→ 正在搜索：x", "✓ 找到 3 条结果"] })]);
+    expect(out[0].messages[0].toolSteps).toBeUndefined();
+    expect(out[0].messages[0].content).toBe("hi");
+  });
+
+  it("streaming 标记不落盘", () => {
+    const out = stripTransientForPersist([base({ streaming: true })]);
+    expect(out[0].messages[0].streaming).toBeUndefined();
+  });
+
+  it("没有瞬态字段的消息**原样返回同一个引用**（避免无谓复制）", () => {
+    const input = [base({})];
+    expect(stripTransientForPersist(input)[0].messages[0]).toBe(input[0].messages[0]);
+  });
+
+  it("其它字段与 artifacts 完整保留", () => {
+    const artifacts = [{ name: "a.html", path: "p", size: 1, kind: "html" }];
+    const out = stripTransientForPersist([base({ artifacts, toolSteps: ["x"] })]);
+    expect(out[0].messages[0].artifacts).toEqual(artifacts);
+    expect(out[0].title).toBe("t");
+  });
+
+  // 实测形状：挂起的选择题靠主进程内存里的 questionBridge 兑现，
+  // 重启后 requestId 全部失效——卡片留在界面上，点了只会得到"已超时或结束"。
+  // 一个永远点不动的控件比没有更糟，所以两端都要剥。
+  it("questions 不落盘（重启后点不动的卡片）", () => {
+    const questions = { requestId: "r1", questions: [{ id: "q", header: "时长", question: "要几秒？", options: [{ id: "a", label: "6 秒", description: "短" }] }] };
+    const out = stripTransientForPersist([base({ questions })]);
+    expect(out[0].messages[0].questions).toBeUndefined();
+  });
+
+  it("读取侧也会剥掉旧版本写进去的 questions", () => {
+    const questions = { requestId: "r1", questions: [] };
+    const result = normalizeStoredSessions([{ id: "s", messages: [{ id: "m", role: "assistant", content: "x", questions }] }]);
+    expect(result[0].messages[0].questions).toBeUndefined();
+  });
+});
+
+// 实测缺陷：围栏只认三个反引号时，用**四个反引号**包住三个反引号的代码块
+// （官方 Markdown 用来"在正文里教别人写代码块"的标准写法）会渲染成两个空代码块，
+// 中间那行正文落到外面变成普通段落。模型写"怎么用 markdown"这类文档时几乎一定会这么写。
+describe("围栏代码块（长度可变）", () => {
+  it("四个反引号能包住三个反引号的示例", () => {
+    const html = render(["````md", "```js", "const a = 1;", "```", "````"].join("\n"));
+    expect(html).toContain("md-code");
+    expect(html).toContain("```js");
+    expect(html).toContain("const a = 1;");
+    // 不能渲染成两个空代码块
+    expect(html).not.toContain("<code></code>");
+  });
+
+  it("普通三个反引号行为不变（语言标记仍被识别）", () => {
+    const html = render("```js\nconst a = 1;\n```");
+    expect(html).toContain('data-lang="js"');
+    expect(html).toContain("const a = 1;");
+  });
+
+  it("未闭合的围栏（流式途中）照常按代码块渲染", () => {
+    const html = render("说明：\n```js\nconst a = 1;");
+    expect(html).toContain("md-code");
+    expect(html).toContain("说明：");
+  });
+});
+
+// 实测缺陷：链接地址里含**成对括号**很常见（维基百科的消歧义后缀就是
+// `.../Foo_(bar)`），旧的 `[^)\s]+` 会在第一个 `)` 处停下 ——
+// href 变成半截地址，多出来的那个 `)` 还被当成正文显示。
+describe("行内链接（URL 含括号）", () => {
+  it("URL 里的成对括号被完整保留", () => {
+    const html = render("见 [说明](https://zh.wikipedia.org/wiki/Foo_(bar))");
+    expect(html).toContain('href="https://zh.wikipedia.org/wiki/Foo_(bar)"');
+    expect(html).not.toContain("</a>)");
+  });
+
+  it("查询串与锚点不受影响", () => {
+    // 输入用原始 `&`：React 渲染 href 时会转义成 `&amp;`，断言里要按转义后的形态比。
+    expect(render("[a](https://x.com/p?q=1&r=2#sec)")).toContain("https://x.com/p?q=1&amp;r=2#sec");
+  });
+
+  it("http 链接仍退化为纯文本（不可点）", () => {
+    const html = render("[标题](http://example.com/a)");
+    expect(html).not.toContain("<a ");
+    expect(html).toContain("标题");
+  });
+});
+
+// 实测回归：逐行匹配用的是 `^…$` 形态的正则，而 JS 的 `.` 与 `$` 都不吃 `\r`——
+// CRLF 文本（用户在 Windows 上用记事本另存过的 `.md` 产物、或模型把产物原文回灌）
+// 一来，围栏/标题/表格**全部识别失败**，整篇退化成一堆带 ``` 字面的普通段落。
+describe("CRLF 换行的内容（Windows 另存 / 回灌）", () => {
+  const NL = String.fromCharCode(10);
+  const CRLF = String.fromCharCode(13) + NL;
+
+  it("围栏代码块照常渲染", () => {
+    const html = render(["```js", "const a = 1;", "```"].join(CRLF));
+    expect(html).toContain("md-code");
+    expect(html).toContain("const a = 1;");
+  });
+
+  it("标题与表格照常渲染", () => {
+    const html = render(["## 小标题", "| a | b |", "|---|---|", "| 1 | 2 |"].join(CRLF));
+    expect(html).toContain("<h4>");
+    expect(html).toContain("<table>");
+  });
+
+  it("产物提取照常认出 html / md / 表格围栏", () => {
+    expect(extractArtifact(["```html", "<!DOCTYPE html><html></html>", "```"].join(CRLF))?.kind).toBe("html");
+    expect(extractArtifact(["```md", "# T", "```"].join(CRLF))?.kind).toBe("doc");
+    expect(extractArtifact(["```csv", "a,b", "1,2", "```"].join(CRLF))?.kind).toBe("sheet");
   });
 });

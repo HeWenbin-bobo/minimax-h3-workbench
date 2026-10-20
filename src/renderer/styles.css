@@ -516,6 +516,11 @@ button { cursor: pointer; }
 .pg-artifact-name small { color: var(--muted); font-size: 11px; }
 .pg-artifact-card button { background: var(--surface); border: 1px solid var(--line); color: var(--purple); border-radius: 8px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
 .pg-artifact-card button:hover { border-color: var(--purple); background: #f6f2ff; }
+/* 同名产物的多版本折叠：默认只显示最新一版，旧版本收在下面这个小按钮后面。
+   模型修 bug 时会整份重写，一次请求能留下 3–5 份同名文件（见 App.tsx 的 foldArtifactVersions）。 */
+.pg-artifact-group { display: flex; flex-direction: column; }
+.pg-artifact-versions { align-self: flex-start; margin-top: 6px; padding: 2px 0; border: 0; background: transparent; color: var(--muted); font-size: 11px; text-decoration: underline; cursor: pointer; }
+.pg-artifact-versions:hover { color: var(--ink); }
 /* HTML 产物预览（对标 WorkBuddy）：嵌入页面 flex 布局，弹开时压缩聊天区而非悬浮其上；
    左缘细条可拖拽调宽；聊天区因 flex:1 自动收缩，分栏效果与截图一致。 */
 @keyframes pg-preview-in { from { opacity: 0; } to { opacity: 1; } }

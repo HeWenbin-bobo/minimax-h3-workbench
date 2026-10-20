@@ -5,16 +5,29 @@ import {
   PLAN_EXECUTION_PROMPT,
   PLAN_MODE_BLOCKED_TOOLS,
   PLAN_MODE_PROMPT,
+  PLAN_MODE_READONLY_TOOLS,
+  PLAN_MODE_TOOL_NOTE,
   extractProposedPlan,
   looksLikePlan,
   withPlanMode
 } from "./planMode";
 
 describe("计划模式提示词", () => {
-  it("明确要求不调用工具（否则模型会直接动手）", () => {
-    expect(PLAN_MODE_PROMPT).toContain("不调用任何工具");
+  it("明确要求不产生副作用（否则模型会直接动手）", () => {
+    expect(PLAN_MODE_PROMPT).toContain("不产生副作用");
+    // 被禁的工具必须**逐一点名**：只说"别动工具"模型会自己猜边界。
     for (const tool of PLAN_MODE_BLOCKED_TOOLS) {
-      expect(PLAN_MODE_PROMPT).toContain(tool);
+      expect(PLAN_MODE_TOOL_NOTE).toContain(tool);
+    }
+  });
+
+  // 实测矛盾：旧提示词第 1 条说「不调用任何工具」，后面又说「用 web_search 查完再写计划」，
+  // 而工具表里 web_search / open_page / read_artifact 其实是下发的。
+  // 模型只能二选一：该查的不查（凭记忆编参数），或者查了以后以为自己违规。
+  it("只读工具在提示词里明确写「可用」，与工具表同一套边界", () => {
+    expect(PLAN_MODE_PROMPT).toContain("只读工具照常可用");
+    for (const tool of PLAN_MODE_READONLY_TOOLS) {
+      expect(PLAN_MODE_TOOL_NOTE).toContain(tool);
     }
   });
 
@@ -30,8 +43,13 @@ describe("计划模式提示词", () => {
     expect(PLAN_EXECUTION_PROMPT).toContain("不要再复述计划");
   });
 
-  it("被禁工具就是不产生副作用的两个", () => {
-    expect([...PLAN_MODE_BLOCKED_TOOLS].sort()).toEqual(["create_file", "generate_video"]);
+  it("被禁工具就是全部会产生副作用的（含 edit / inspect / update_plan）", () => {
+    // 旧断言只列了 generate_video / create_file，而工具表其实还摘了
+    // edit_artifact / edit_artifact_batch / inspect_artifact / update_plan——
+    // 清单与实现不同步，测试就给了一个错的"事实"。
+    expect([...PLAN_MODE_BLOCKED_TOOLS].sort()).toEqual([
+      "create_file", "edit_artifact", "edit_artifact_batch", "generate_video", "inspect_artifact", "update_plan"
+    ]);
   });
 
   it("抄了 plan.md 的「用户催也不改」：催也不退出计划模式", () => {
@@ -96,6 +114,28 @@ describe("withPlanMode 拼接", () => {
 
   it("基础提示词为空时不产生前导空行", () => {
     expect(withPlanMode("", "plan").startsWith("# 本轮是")).toBe(true);
+  });
+
+  // 实测同类不一致：用户关掉「联网」时 web_search 根本不下发，
+  // 而计划模式的"可用工具"清单照旧写它可用——模型会去调一个不存在的工具，
+  // 然后为"我调不了搜索"道歉。清单必须是本轮**真实**的可用集合。
+  it("用户关掉联网时，计划模式不再宣称 web_search 可用", () => {
+    const result = withPlanMode("你是助手。", "plan", { webSearch: false });
+    expect(result).not.toContain("- web_search(query)");
+    expect(result).toContain("关闭了「联网」");
+    // 其它只读工具仍在清单里
+    expect(result).toContain("- open_page(url)");
+    expect(result).toContain("- read_artifact(name");
+  });
+
+  it("联网可用时清单照旧包含 web_search", () => {
+    const result = withPlanMode("你是助手。", "plan", { webSearch: true });
+    expect(result).toContain("- web_search(query)");
+    expect(result).not.toContain("关闭了「联网」");
+  });
+
+  it("不传 available 时按联网可用处理（向后兼容）", () => {
+    expect(withPlanMode("你是助手。", "plan")).toContain("- web_search(query)");
   });
 });
 

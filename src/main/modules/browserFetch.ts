@@ -17,6 +17,18 @@ const PARTITION = "persist:h3-browser-fetch";
 const DEFAULT_TIMEOUT_MS = 25_000;
 
 /**
+ * text 模式在 `dom-ready` 之后再等多久就收工。
+ *
+ * 为什么不全等 `did-finish-load`：那要等**所有子资源**（广告、统计、追踪像素、大图），
+ * 任何一个挂住就白等到 45 秒超时。实测（文档案例真机）：6 次 `open_page` 有 2 次
+ * 卡满 45 秒——而我们要的只是 `body.innerText`。
+ *
+ * 1.5 秒是给"客户端渲染出正文"留的窗口：多数页面的首屏内容在 DOMContentLoaded 后
+ * 一两秒内就位；再长的页面本来也该用 web_search 或换个更轻的来源。
+ */
+const TEXT_MODE_SETTLE_MS = 1_500;
+
+/**
  * 隐藏窗口加载的是**任意外部页面**（`open_page` 的 URL 由模型给出，`web_search` 抓的是公开搜索结果页），
  * 必须按不可信内容处理。
  *
@@ -139,6 +151,42 @@ function enqueue<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<
   return task;
 }
 
+/**
+ * Chromium 的 `net::ERR_*` 码 → 用户能理解的一句话。
+ *
+ * 为什么需要（实测，`probe-table-case` 真机跑出来的）：某些失败事件里
+ * **description 是空串**，于是错误文案退化成「浏览器加载失败：（-3）」——
+ * 用户只看到一个数字，既不知道发生了什么，也不知道能不能重试。
+ *
+ * 只收录最常见的十来个；认不出来时退回"错误码 + 通用建议"，
+ * 而不是把空描述原样拼出来（那等于没说）。
+ */
+const NET_ERROR_HINTS: Record<number, string> = {
+  [-2]: "网络请求失败（域名解析或连接被拒）",
+  [-3]: "加载被中断（该站点可能拒绝了自动化访问，或响应不完整）",
+  [-6]: "文件不存在",
+  [-7]: "连接超时",
+  [-20]: "连接被中断",
+  [-21]: "网络连接异常（可能是代理/防火墙）",
+  [-100]: "连接被关闭",
+  [-101]: "连接被重置",
+  [-102]: "服务器无响应",
+  [-105]: "域名解析失败",
+  [-106]: "网络已断开",
+  [-118]: "连接超时",
+  [-137]: "域名解析失败",
+  [-138]: "页面被安全策略拦截"
+};
+
+function describeNetError(code: number, description: string): string {
+  const detail = (description || "").trim();
+  const hint = NET_ERROR_HINTS[code];
+  if (detail && hint) return `${detail}（${hint}，错误码 ${code}）`;
+  if (detail) return `${detail}（错误码 ${code}）`;
+  if (hint) return `${hint}（错误码 ${code}）`;
+  return `页面没能加载（错误码 ${code}）。可以检查地址是否正确、该站点是否需要登录，或稍后重试。`;
+}
+
 async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text", signal?: AbortSignal): Promise<string> {
   const ses = session.fromPartition(PARTITION);
   const win = new BrowserWindow({
@@ -159,9 +207,13 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text",
   try {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`浏览器渲染超时（${timeoutMs / 1000} 秒）`)), timeoutMs);
+      /** text 模式的软截止计时器（dom-ready 之后启动）。 */
+      let softTimer: NodeJS.Timeout | undefined;
       const done = (error?: Error) => {
         clearTimeout(timer);
+        if (softTimer) clearTimeout(softTimer);
         win.webContents.removeListener("did-finish-load", onLoad);
+        win.webContents.removeListener("dom-ready", onDomReady);
         win.webContents.removeListener("did-fail-load", onFail);
         win.webContents.removeListener("will-redirect", onRedirect);
         win.webContents.removeListener("will-navigate", onNavigate);
@@ -169,14 +221,32 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text",
         error ? reject(error) : resolve();
       };
       const onLoad = () => done();
+      /**
+       * **text 模式不等全部子资源**（实测：文档案例 6 次 open_page 有 2 次卡满 45 秒超时）。
+       *
+       * `did-finish-load` 要等主框架**连同所有子资源**（广告、统计、图片、追踪像素）完成；
+       * 其中任何一个挂住，整次抓取就白等到超时——而我们只要 `body.innerText`。
+       * 所以 dom-ready 之后再静置一小段时间（给 JS 渲染留机会），先到先得。
+       *
+       * `html` 模式**保持等 did-finish-load**：搜索解析（parseBing/parseSogou）依赖完整 DOM 结构，
+       * 提前取会拿到没渲染完的结果页。
+       */
+      const onDomReady = () => {
+        if (mode !== "text") return;
+        softTimer = setTimeout(() => done(), TEXT_MODE_SETTLE_MS);
+      };
       // 只认**主框架**失败。子框架（iframe）加载失败不该连坐整页——真实网页（搜索结果页、
       // 开放平台文档）几乎都内嵌第三方 iframe（广告/统计/播放器），它们失败是常态。
       // 旧实现不看 isMainFrame，任何一个子框架报错就 reject 整个 renderHtml：
       // 主框架明明加载好了，却报"浏览器加载失败"（实测 probe-render-subframe 复现）。
       // 注意用 on 而非 once：子框架失败不落定，若用 once 会被第一个子框架事件消耗掉，
       // 之后真·主框架失败就漏判了。done() 里统一 removeListener。
+      //
+      // **description 可能为空**（实测：真实网页里出现「浏览器加载失败：（-3）」）——
+      // 那时用户只看到一个错误码，既不知道原因也不知道能不能重试。
+      // 补一张常见 Chromium net error 码的中文表，并把"description 为空"这个形态兜住。
       const onFail = (_event: unknown, code: number, description: string, _url: string, isMainFrame: boolean) =>
-        isMainFrame ? done(new Error(`浏览器加载失败：${description}（${code}）`)) : undefined;
+        isMainFrame ? done(new Error(`浏览器加载失败：${describeNetError(code, description)}`)) : undefined;
       /**
        * 重定向/后续导航守卫（SSRF 的第二跳）。
        *
@@ -210,6 +280,8 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text",
       const onNavigate = (details: Electron.Event<Electron.WebContentsWillNavigateEventParams>) =>
         guardNavigation(details, details.url, details.isMainFrame);
       win.webContents.once("did-finish-load", onLoad);
+      // text 模式的软截止：dom-ready 后静置一小段就收工，不等全部子资源（见 TEXT_MODE_SETTLE_MS）。
+      win.webContents.on("dom-ready", onDomReady);
       win.webContents.on("did-fail-load", onFail);
       win.webContents.on("will-redirect", onRedirect);
       win.webContents.on("will-navigate", onNavigate);
@@ -224,10 +296,22 @@ async function renderOnce(url: string, timeoutMs: number, mode: "html" | "text",
     });
     // 按调用方需要取两种视图：搜索解析要 HTML 结构，open_page 要可读正文。
     // `open_page` 用 HTML 的实测后果见 renderPageText 的注释（正文被脚本挤掉）。
+    //
+    // **必须带硬截止**（实测，探针 `_scratch/probe-render-hang.cjs`）：
+    // 上面的超时只覆盖"等 did-finish-load / dom-ready"，而这一步依赖页面主线程——
+    // 页面里有同步死循环时它**永不返回**，于是 open_page / 搜索全部永久挂住
+    // （而且共用同一条串行队列，后面的调用也会一起卡）。
+    // 实测：`renderPageText(url, 3_000)` 在 15 秒后仍未返回。
     const expression = mode === "text"
       ? "document.body ? document.body.innerText : ''"
       : "document.documentElement.outerHTML";
-    return (await win.webContents.executeJavaScript(expression, true)) as string;
+    const read = await deadline(win.webContents.executeJavaScript(expression, true) as Promise<string>, Math.max(SAMPLE_DEADLINE_MS, timeoutMs));
+    if (!read.ok) {
+      // 与自检那边同一套措辞：这不是"加载失败"，而是**脚本占死了主线程**。
+      // 用中文 throw（调用方 `describeError` 会原样透传），并给出可行的下一步。
+      throw new Error("页面脚本把主线程卡住了（同步死循环或长时间计算），无法读取页面内容。可以换一个页面，或让用户检查该页面里的循环/递归是否有可能永不结束。");
+    }
+    return read.value;
   } finally {
     if (!win.isDestroyed()) win.destroy();
   }
@@ -245,12 +329,65 @@ export interface HtmlProbeResult {
   title: string;
   /** 控制台 error/warning（含未捕获异常、CSP 拦截、WebGL 报错）。已去重并截断。 */
   consoleErrors: string[];
-  /** 画布实际状态：尺寸 + 是否真的拿到了 WebGL 上下文。 */
-  canvases: Array<{ width: number; height: number; webgl: boolean }>;
+  /**
+   * 去重后的**真实**条数（可能远大于 `consoleErrors.length`）。
+   *
+   * 为什么要单独报：数组被 `MAX_LOGS` 截到 12 条，而报告写的是"共 N 条"——
+   * 一个循环报错 40 次的页面会被说成"共 12 条"，模型以为已经掌握全部问题，
+   * 改完 12 条就宣布"自检通过"，用户打开还是报错。静默少给比多给更误导。
+   */
+  consoleErrorTotal?: number;
+  /**
+   * 画布实际状态：**缓冲区**尺寸（`width/height` 属性）、**布局**尺寸（CSS 像素）
+   * 与是否真的拿到了 WebGL 上下文。
+   *
+   * 为什么两个尺寸都要（实测真机）：模型连续 5 次修改都提示"画面是空的"，
+   * 它在回复里自己怀疑「canvas 尺寸为 0 导致 clientWidth=0」，但**无从验证**——
+   * 之前只报 `c.width/c.height`（缓冲区，通常有值），看不到 CSS 布局为 0 这种情况。
+   * 而"缓冲区正常、布局为 0"正是 WebGL 页面零报错全白的头号成因（画布没有可见面积）。
+   */
+  canvases: Array<{
+    width: number;
+    height: number;
+    clientWidth: number;
+    clientHeight: number;
+    /**
+     * 画布拿到了哪种上下文。
+     *
+     * **不能只报 boolean webgl**（实测真机）：一个真实产物用的是
+     * `getContext("2d", { alpha: false })`（纯 2D Canvas），旧字段 `webgl=false`
+     * 被渲染成"未取到 WebGL/2D 上下文"——把"用的是 2D"说成"没有上下文"，
+     * 模型据此去查一个根本不存在的问题。
+     */
+    context: "webgl" | "2d" | "none";
+  }>;
   /** 渲染后的可见文本长度（0 通常意味着脚本没跑起来或页面是纯 canvas）。 */
   textLength: number;
   /** 元素总数。与 textLength 一起用于判断"页面是不是空的"。 */
   elementCount: number;
+  /**
+   * 画面采样：把窗口截一张图，统计"主色占比"与平均亮度。
+   *
+   * **为什么需要**：只报"控制台没报错"会**假通过**——一个 WebGL 页面完全可以
+   * 一条错都不报、但什么都没画出来（清屏成背景色、画布尺寸为 0、整个场景被裁掉）。
+   * 这时说"自检通过"比不说更糟：模型会据此告诉用户"已验证"，用户打开却是白屏。
+   * 实测（probe-capture）：纯色页主色占比 100%、空白画布页 97.7%，能稳定区分。
+   *
+   * 拿不到截图时为 undefined（不影响其余结论）。
+   */
+  pixel?: { dominant: number; brightness: number; sampled: number };
+  /**
+   * 两帧之间的**变化比例**（0–1）。0 表示两次截图完全一样。
+   *
+   * **为什么需要**（实测真机）：模型连续 5 次改都判定"画面是空的"，
+   * 但它无法区分两种完全不同的情况：
+   * ① 渲染循环没跑起来 → 画面永远静止；
+   * ② 页面本来就是静止的（静态图、首帧还没动）。
+   * 抓两帧比一比就能定性：空白 + 零变化 = 几乎确定是循环没转。
+   *
+   * 拿不到截图时为 undefined。
+   */
+  motion?: number;
 }
 
 /** 单条日志的截断长度：着色器编译错误可能一次吐几千字符，全量回灌只会把上下文烧掉。 */
@@ -266,16 +403,31 @@ const MAX_LOGS = 12;
  * ② 着色器 `getShaderInfoLog` 末尾常带 NUL（实测 "…syntax error\n\u0000"），
  *    直接回传会在报告里留下一行空白。控制字符清掉，换行保留（多行报错要看得懂）。
  */
-export function formatConsoleLine(level: unknown, message: unknown): string | undefined {
+export function formatConsoleLine(level: unknown, message: unknown, lineNumber?: unknown): string | undefined {
   if (typeof message !== "string" || !message) return undefined;
   if (level !== "error" && level !== "warning") return undefined;
   if (message.includes("Electron Security Warning")) return undefined;
   const cleaned = message.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
-  return `${level === "warning" ? "警告" : "错误"}：${sliceSafe(cleaned.trim(), MAX_LOG_CHARS)}`;
+  // **行号必须带上**（实测真机）：模型拿到报错却不知道在哪一行，只能把 2100 行的文件
+  // 分 5 次读完再逐段比对（那一轮光读文件就吃掉 5 步，最终仍打满 20 步）。
+  // Chromium 早就把行号给了我们，之前丢掉了。
+  const where = typeof lineNumber === "number" && lineNumber > 0 ? `（第 ${lineNumber} 行）` : "";
+  // **截断必须留痕**（实测缺口）：着色器编译错误一次能吐几千字符，截到 400 字是对的，
+  // 但原样切掉末尾会让模型以为报错就这么多——它据此判断"这个错看起来不严重"，
+  // 或把半截的错误信息当成完整原文去搜索。加个尾巴成本为零。
+  const body = cleaned.trim();
+  const shown = body.length > MAX_LOG_CHARS ? `${sliceSafe(body, MAX_LOG_CHARS)}…（已截断）` : body;
+  return `${level === "warning" ? "警告" : "错误"}${where}：${shown}`;
 }
 
 /** 加载后额外等待的时长：让 requestAnimationFrame / 首帧初始化跑完，否则 canvas 采样必然为空。 */
 const PROBE_SETTLE_MS = 1_200;
+
+/**
+ * 两次截图之间隔多久。太短会被单帧抖动骗到，太长会让自检明显变慢。
+ * 500ms ≈ 30 帧（60fps），足够让"循环在转"的运动显现，也不会让整次自检多等一秒以上。
+ */
+const MOTION_GAP_MS = 500;
 
 /**
  * **产物自检**：用应用自带的 Chromium 真的把刚生成的 HTML 跑一遍，把控制台报错交回给模型。
@@ -296,6 +448,41 @@ export function probeHtmlArtifact(url: string, timeoutMs = 20_000, signal?: Abor
   return enqueue(() => probeOnce(url, timeoutMs, signal), signal);
 }
 
+/**
+ * 给一个 Promise 套上**硬截止**。
+ *
+ * 为什么必须有（实测，探针 `_scratch/probe-probe-hang.cjs`）：`probeOnce` 只给
+ * "等 did-finish-load" 设了超时；**之后的两步没有**——
+ * `executeJavaScript(SNAPSHOT_SCRIPT)` 与 `capturePage()` 都依赖页面主线程。
+ * 模型写的页面里只要有一个同步死循环（`while(true)`、着色器死等、无限递归前的巨大循环），
+ * 主线程就永远不回来 → 这两个 Promise **永不落定** → 自检永久挂住。
+ *
+ * 更糟的是 `renderHtml` / `renderPageText` / `probeHtmlArtifact` **共用同一个串行队列**，
+ * 一次挂住会把后面的搜索、open_page 全部拖死（用户看到的是"打开网页一直转圈"）。
+ * 实测：`probeHtmlArtifact(url, 3_000)` 在 15 秒后仍未返回。
+ *
+ * @returns `{ ok: true, value }` 或 `{ ok: false }`（超时/异常都算失败，调用方决定措辞）
+ */
+function deadline<T>(promise: Promise<T>, ms: number): Promise<{ ok: true; value: T } | { ok: false }> {
+  // **必须提前挂一个吞异常的处理器**：超时后窗口会被销毁，那时这个 Promise 会以
+  // "Object has been destroyed" 之类的错误 reject —— 没人接就是未处理拒绝。
+  const guarded = promise.then((value) => ({ ok: true as const, value }), () => ({ ok: false as const }));
+  const timer = new Promise<{ ok: false }>((resolve) => setTimeout(() => resolve({ ok: false }), ms));
+  return Promise.race([guarded, timer]);
+}
+
+/** 取快照/截图的硬截止。给足正常页面的余量（1.2s 静置 + 采样通常 <200ms）。 */
+const SAMPLE_DEADLINE_MS = 8_000;
+
+/**
+ * 「主线程被卡死」的日志前缀。
+ *
+ * **必须能被 `formatProbeReport` 识别成错误**（它以行首"错误"/"警告"区分）：
+ * 不带前缀会被归进「运行时警告（没有 error，只有 warning）」，
+ * 还会附一句「不必为了它们重写页面」——而真实情况是页面已经卡死，必须改。
+ */
+const MAIN_THREAD_HUNG_MARKER = "错误（主线程）";
+
 async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): Promise<HtmlProbeResult> {
   const win = new BrowserWindow({
     show: false,
@@ -307,12 +494,18 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
   // 应用默认 session，把全局权限改成一律拒绝会波及主窗口。
   hardenWindow(win);
   const logs: string[] = [];
+  /** 去重后的真实条数（不受 MAX_LOGS 限制）。报告里的"共 N 条"必须用它。 */
+  let logTotal = 0;
   // 新版 Electron 把参数合进了第一个 Event 对象（位置参数已 deprecated），两种都读。
   win.webContents.on("console-message", (event: Electron.Event<Electron.WebContentsConsoleMessageEventParams>) => {
     const level = (event as unknown as { level?: string }).level;
     const message = (event as unknown as { message?: string }).message;
-    const line = formatConsoleLine(level, message);
+    // 行号也传下去：模型据此能直接跳到出错那一段，而不是把整个文件分段读完。
+    const lineNumber = (event as unknown as { lineNumber?: number }).lineNumber;
+    const line = formatConsoleLine(level, message, lineNumber);
     if (!line || logs.includes(line)) return;
+    // **先计数再判断是否入数组**：只增不减才能反映"到底报了多少条"。
+    logTotal += 1;
     if (logs.length < MAX_LOGS) logs.push(line);
   });
   try {
@@ -329,7 +522,8 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
       const onLoad = () => finish(true);
       // 只认主框架失败：子框架（iframe）失败是常态，不该把整页判成"没跑起来"。
       const onFail = (_e: unknown, code: number, description: string, _u: string, isMainFrame: boolean) => {
-        if (isMainFrame) { logs.unshift(`页面加载失败：${description}（${code}）`); finish(false); }
+        // 与 `renderOnce` 同一套措辞（`description` 可能为空，别拼出「页面加载失败：（-3）」）。
+        if (isMainFrame) { logs.unshift(`页面加载失败：${describeNetError(code, description)}`); finish(false); }
       };
       if (signal?.aborted) { onAbort(); return; }
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -339,18 +533,102 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
     });
     if (signal?.aborted) throw new DOMException("自检已取消", "AbortError");
     if (!loaded) {
-      return { loaded: false, title: "", consoleErrors: logs, canvases: [], textLength: 0, elementCount: 0 };
+      return { loaded: false, title: "", consoleErrors: logs, consoleErrorTotal: logTotal, canvases: [], textLength: 0, elementCount: 0 };
     }
     // 等首帧：WebGL 页面在 load 时往往还没建好上下文，立刻采样会得到"没有画布"的假结论。
     await new Promise((resolve) => setTimeout(resolve, PROBE_SETTLE_MS));
-    const snapshot = (await win.webContents.executeJavaScript(SNAPSHOT_SCRIPT, true)) as {
-      title: string; textLength: number; elementCount: number;
-      canvases: Array<{ width: number; height: number; webgl: boolean }>;
+    // **取快照必须带硬截止**：页面主线程卡死（同步死循环）时 `executeJavaScript`
+    // 永不返回，会把整个串行队列一起拖死（见 `deadline` 的注释与探针）。
+    const snapshotResult = await deadline(
+      win.webContents.executeJavaScript(SNAPSHOT_SCRIPT, true) as Promise<{
+        title: string; textLength: number; elementCount: number;
+        canvases: Array<{ width: number; height: number; clientWidth: number; clientHeight: number; context: "webgl" | "2d" | "none" }>;
+      }>,
+      SAMPLE_DEADLINE_MS
+    );
+    if (!snapshotResult.ok) {
+      // **要如实说"页面卡住了"**：这不是"没加载起来"，也不是"没画出来"——
+      // 而是脚本把主线程占死了。两者的修法完全不同（后者查布局/渲染，前者查死循环）。
+      //
+      // **必须带「错误：」前缀**（实测）：`formatProbeReport` 按行首区分错误与警告，
+      // 不带前缀会被归成「运行时警告（没有 error，只有 warning）」并附一句
+      // 「不必为了它们重写页面」——与真实情况（页面已经卡死）恰好相反。
+      logs.unshift(`${MAIN_THREAD_HUNG_MARKER}：页面脚本把主线程卡住了（同步死循环或长时间计算），无法取到页面状态。请检查 while/for 循环与递归是否存在永不结束的分支。`);
+      return { loaded: true, title: "", consoleErrors: logs, consoleErrorTotal: logTotal, canvases: [], textLength: 0, elementCount: 0 };
+    }
+    const snapshot = snapshotResult.value;
+    // 截图采样：失败不能连坐整次自检（拿不到只是少一条证据，不该让工具报错）。
+    // 同样要带截止——`capturePage` 也依赖页面主线程。
+    const pixelResult = await deadline(samplePixels(win), SAMPLE_DEADLINE_MS);
+    const pixel = pixelResult.ok ? pixelResult.value : undefined;
+    // 两帧比对：空白 + 零变化 ≈ 渲染循环压根没转（与"本来就是静止画面"区分开）。
+    // 只在**画面是纯色**时多付这一帧的代价——正常页面不需要这条证据。
+    let motion: number | undefined;
+    if (pixel && pixel.dominant >= 0.97) {
+      await new Promise((resolve) => setTimeout(resolve, MOTION_GAP_MS));
+      const motionResult = await deadline(sampleMotion(win, pixel), SAMPLE_DEADLINE_MS);
+      motion = motionResult.ok ? motionResult.value : undefined;
+    }
+    return {
+      loaded: true, consoleErrors: logs, consoleErrorTotal: logTotal, ...snapshot,
+      ...(pixel ? { pixel } : {}),
+      ...(motion === undefined ? {} : { motion })
     };
-    return { loaded: true, consoleErrors: logs, ...snapshot };
   } finally {
     if (!win.isDestroyed()) win.destroy();
   }
+}
+
+/**
+ * 截一张图，统计主色占比与平均亮度——用来发现"没报错但什么都没画"。
+ *
+ * 稀疏采样（每 37 个像素取一个）足够判断"整屏是不是一个颜色"，全量扫 100 万像素
+ * 只会让自检多花几十毫秒却得不到更多信息。
+ * 主色按每个通道取高 3 位分桶，避免抗锯齿产生的微小明暗差把同一种颜色拆成几百桶。
+ */
+async function samplePixels(win: BrowserWindow): Promise<{ dominant: number; brightness: number; sampled: number; signature: number[] } | undefined> {
+  try {
+    const image = await win.webContents.capturePage();
+    if (image.isEmpty()) return undefined;
+    const bitmap = image.toBitmap(); // BGRA
+    const buckets = new Map<number, number>();
+    // 逐采样点的颜色桶序列：既是"主色占比"的统计来源，也是两帧比对的指纹。
+    const signature: number[] = [];
+    let sum = 0;
+    for (let i = 0; i + 3 < bitmap.length; i += 4 * 37) {
+      const b = bitmap[i];
+      const g = bitmap[i + 1];
+      const r = bitmap[i + 2];
+      const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
+      buckets.set(key, (buckets.get(key) ?? 0) + 1);
+      signature.push(key);
+      sum += (r + g + b) / 3;
+    }
+    const sampled = signature.length;
+    if (sampled === 0) return undefined;
+    let top = 0;
+    for (const count of buckets.values()) if (count > top) top = count;
+    return { dominant: top / sampled, brightness: sum / sampled, sampled, signature };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 再抓一帧，与第一帧的签名比对，返回"变了的采样点比例"（0–1）。
+ *
+ * 用途：区分「渲染循环没转」和「页面本来就是静止画面」——
+ * 空白 + 零变化 = 几乎确定循环没跑起来，模型据此直接查初始化，不用继续猜。
+ */
+async function sampleMotion(win: BrowserWindow, first: { signature: number[] }): Promise<number | undefined> {
+  const second = await samplePixels(win);
+  if (!second) return undefined;
+  // 画布尺寸可能在这一瞬间变化（resize），长度对不上就比前 N 个，避免误判成"全变了"。
+  const n = Math.min(first.signature.length, second.signature.length);
+  if (n === 0) return undefined;
+  let changed = 0;
+  for (let i = 0; i < n; i += 1) if (first.signature[i] !== second.signature[i]) changed += 1;
+  return changed / n;
 }
 
 /**
@@ -360,13 +638,26 @@ async function probeOnce(url: string, timeoutMs: number, signal?: AbortSignal): 
 const SNAPSHOT_SCRIPT = `(() => {
   const safe = (fn, fallback) => { try { return fn(); } catch { return fallback; } };
   const canvases = safe(() => Array.from(document.querySelectorAll("canvas")).slice(0, 8).map((c) => ({
+    // 缓冲区尺寸（绘制分辨率）——通常由 width/height 属性决定，几乎总是有值。
     width: c.width,
     height: c.height,
-    // 已经拿到 2d 上下文的画布再要 webgl 会返回 null —— 那不是错误，只是类型不同。
-    webgl: safe(() => {
-      if (c.getContext("2d")) return false;
-      return Boolean(c.getContext("webgl2") || c.getContext("webgl") || c.getContext("experimental-webgl"));
-    }, false)
+    // **布局尺寸（CSS 像素）**：这两个才是"用户到底看不看得见"的关键。
+    // 缓冲区 800×600 但 clientWidth=0 时，画布完全不占面积 → 屏幕上一片空白，
+    // 而且**没有任何报错**。实测真机里模型连续 5 次改都改不掉这个空白，
+    // 它自己怀疑"clientWidth=0"，但当时自检没报这个数字，它无从验证。
+    clientWidth: safe(() => Math.round(c.getBoundingClientRect().width), 0),
+    clientHeight: safe(() => Math.round(c.getBoundingClientRect().height), 0),
+    // 画布拿到了哪种上下文。**必须区分 webgl / 2d / none**（实测真机）：
+    // 一个真实产物用的是 getContext("2d", { alpha: false })（纯 2D Canvas），
+    // 旧字段只报 webgl=false，渲染成"未取到 WebGL/2D 上下文"——
+    // 把"用的是 2D"说成"没有上下文"，模型据此去查一个根本不存在的问题。
+    // 注意顺序：已经拿过 2d 的 canvas 再要 webgl 会返回 null，反之亦然，
+    // 所以只问一次，问到哪个算哪个。
+    context: safe(() => {
+      if (c.getContext("2d")) return "2d";
+      if (c.getContext("webgl2") || c.getContext("webgl") || c.getContext("experimental-webgl")) return "webgl";
+      return "none";
+    }, "none")
   })), []);
   return {
     title: safe(() => document.title || "", ""),
@@ -388,18 +679,117 @@ export function formatProbeReport(result: HtmlProbeResult): string {
     return `自检失败：页面没能加载起来（${reason}）。请检查 HTML 结构是否完整、是否有语法错误，改完重新生成后再自检一次。`;
   }
   const lines: string[] = [`自检结果：页面已在本机 Chromium 中真实运行（标题「${result.title || "无"}」，${result.elementCount} 个元素，可见文本 ${result.textLength} 字）。`];
+  // 整屏接近一种颜色 = 大概率什么都没画出来（清屏成背景色 / 画布尺寸为 0 / 场景被裁掉）。
+  // 这一条必须**先于**"控制台没报错"说出来，否则模型会把"无报错"当成"画面正常"。
+  const flatScreen = Boolean(result.pixel && result.pixel.dominant >= 0.97 && result.elementCount > 1);
   if (result.canvases.length > 0) {
-    const described = result.canvases.map((c, i) => `#${i + 1} ${c.width}×${c.height}${c.webgl ? "（WebGL 上下文正常）" : "（未取到 WebGL/2D 上下文）"}`).join("，");
+    const described = result.canvases.map((c, i) => {
+      // **布局尺寸必须单独报**：缓冲区 800×600、`clientWidth=0` 时画布不占面积，
+      // 屏幕一片空白且零报错——实测真机里模型卡在这个现象上改不动的正是这一类。
+      const layout = c.clientWidth === 0 || c.clientHeight === 0
+        ? `**布局尺寸为 0（clientWidth=${c.clientWidth}, clientHeight=${c.clientHeight}）——画布不占面积，屏幕上必然看不见**`
+        : `布局 ${c.clientWidth}×${c.clientHeight}`;
+      // 缓冲区停在 HTML 规范的默认值 300×150、而布局大得多 → 脚本多半**没跑到设置绘制分辨率
+      // 那一步就崩了**（先设 width/height 再初始化渲染，是这类页面的常规写法）。
+      // 实测真机：模型自己推断出"画布仍是 300×150，说明 resize() 执行前就崩溃了"，
+      // 但那花了它好几步；这个信号本来就在我们手上。
+      const defaultBuffer = c.width === 300 && c.height === 150 && (c.clientWidth > 400 || c.clientHeight > 300);
+      const bufferHint = defaultBuffer && flatScreen
+        ? "（缓冲区仍是 HTML 默认值 300×150，而布局大得多——脚本多半在设置绘制分辨率之前就中断了）"
+        : "";
+      const contextLabel = c.context === "webgl"
+        ? "（WebGL 上下文正常）"
+        : c.context === "2d"
+          ? "（2D Canvas 上下文正常）"
+          : "（**未取到任何绘制上下文**——这通常意味着渲染初始化没能完成）";
+      return `#${i + 1} 缓冲区 ${c.width}×${c.height}${bufferHint}，${layout}${contextLabel}`;
+    }).join("，");
     lines.push(`画布：${described}。`);
   } else if (result.textLength === 0) {
-    lines.push("页面既没有画布、也没有可见文本——脚本很可能压根没跑起来。");
+    // **主线程卡死时不要再说"脚本压根没跑起来"**（实测矛盾）：它是**跑起来了**
+    // （否则连 load 都不会完成），然后在某个同步循环里出不来了。
+    // 两种成因的修法相反：一种要查"为什么没执行"，另一种要查"哪个循环永不结束"。
+    const hung = result.consoleErrors.some((line) => line.startsWith(MAIN_THREAD_HUNG_MARKER));
+    if (!hung) lines.push("页面既没有画布、也没有可见文本——脚本很可能压根没跑起来。");
+  }
+  if (flatScreen) {
+    lines.push(`画面采样：整屏约有 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).dominant * 100)}% 是同一种颜色（平均亮度 ${Math.round((result.pixel as NonNullable<HtmlProbeResult["pixel"]>).brightness)}）。**这通常意味着页面上什么都没画出来**——画面被某个纯色元素盖满、画布尺寸为 0、或渲染循环根本没跑起来。请检查布局与首帧渲染。`);
+  }
+  // 两帧比对：把"循环有没有在转"这条定性结论直接给出来。
+  // 模型分不清"循环没启动"和"页面本来就静止"，只能反复改代码试（真机连改 5 次）。
+  //
+  // **不能塞在上面的 `flatScreen` 块里**（实测）：采样阶段只要 `pixel.dominant >= 0.97`
+  // 就会多等 500ms 算 motion，而 `flatScreen` 还额外要求 `elementCount > 1`。
+  // 整页只有一个 `<canvas>` 的产物（很常见）于是"算了却不用"——白等半秒，模型还少了
+  // 最有价值的那条结论（循环到底转没转）。
+  //
+  // 判据用 `dominant >= 0.97`（= 采样阶段真的算过 motion 的那个条件），**不是** `flatScreen`：
+  // 非纯色页面压根不会算 motion，那条数据不存在，也就不会有噪声。
+  if (typeof result.motion === "number" && result.pixel && result.pixel.dominant >= 0.97) {
+    const percent = Math.round(result.motion * 100);
+    lines.push(result.motion < 0.01
+      ? `画面变化：间隔 ${MOTION_GAP_MS}ms 的两帧**几乎完全相同**（变化 ${percent}%）。渲染循环很可能**根本没有在跑**——请检查 requestAnimationFrame 是否启动、初始化是否在绘制前就抛错/提前 return。`
+      : `画面变化：间隔 ${MOTION_GAP_MS}ms 的两帧有 ${percent}% 的像素不同——渲染循环**确实在运行**。那么空白更可能是画到了看不见的地方（尺寸/裁剪/相机矩阵），而不是没在画。`);
   }
   if (result.consoleErrors.length > 0) {
-    lines.push(`运行时报错（共 ${result.consoleErrors.length} 条，已去重）：`);
+    // **"共 N 条"必须用真实总数**：数组被 `MAX_LOGS` 截过，
+    // 一个循环报错 40 次的页面若说成"共 12 条"，模型会以为已经看到全部，
+    // 改完这 12 条就宣布通过——用户打开还是报错。
+    const total = Math.max(result.consoleErrorTotal ?? result.consoleErrors.length, result.consoleErrors.length);
+    const shown = result.consoleErrors.length;
+    // **区分"报错"与"警告"**（实测）：控制台只有一条 `警告（第 3 行）：deprecated API` 时，
+    // 报告写"运行时报错（共 1 条）"、摘要写"自检发现 1 条报错"——模型会去改一条
+    // 根本不阻断运行的警告，还可能在回复里告诉用户"修好了一个报错"。
+    //
+    // **但统计只能代表"列出来的这 12 条"**（实测矛盾）：数组被 `MAX_LOGS` 截过，
+    // 而同一句里的"共 N 条"用的是**真实总数**。40 条里确实有报错、只是前 12 条恰好
+    // 全是警告时，旧文案会写「运行时警告（没有 error，只有 warning；去重后共 40 条…）」——
+    // 模型据此告诉用户"只是警告，不影响运行"，而后面那些没列出来的里就有报错。
+    // 所以一旦发生截断且没看到 error，就不能断言"没有 error"。
+    const truncated = total > shown;
+    const errorCount = result.consoleErrors.filter((line) => line.startsWith("错误")).length;
+    const warnCount = result.consoleErrors.filter((line) => line.startsWith("警告")).length;
+    // **括号只能有一层**：摘要正则是"运行时X（…共 N 条"，嵌套括号会让它匹配不到，
+    // 摘要于是退回兜底（实测：`运行时警告（没有 error…）（共 1 条）` → 摘要显示"自检完成"）。
+    // 前缀必须自带开括号（`运行时报错（`），下面统一接 `共 N 条`——否则会拼出「（；共」。
+    const label = errorCount > 0 && warnCount > 0
+      ? `运行时问题（前 ${shown} 条里有 ${errorCount} 条错误、${warnCount} 条警告；`
+      : errorCount > 0
+        ? "运行时报错（"
+        : truncated
+          // 截断了且前 N 条全是警告：**不能替没看到的部分下结论**。
+          // 「还有没有 error」写成"无法确定"，模型才会去修根因、看剩余的那一批。
+          ? `运行时警告（前 ${shown} 条都是 warning，但还有 ${total - shown} 条没列出来，其中**可能有报错**；`
+          : "运行时警告（没有 error，只有 warning；";
+    const head = truncated
+      ? `${label}去重后共 ${total} 条，下面只列出前 ${shown} 条——同一类问题往往成片出现，修掉根因后重新自检看剩余）：`
+      : `${label}共 ${total} 条，已去重）：`;
+    lines.push(head);
     for (const entry of result.consoleErrors) lines.push(`- ${entry}`);
-    lines.push("请针对这些报错修改后重新生成，并在回复里说明修了什么。");
+    // 同理：截断时不能说"这些只是警告、不必重写"——没列出来的那批可能有真报错。
+    lines.push(errorCount > 0
+      ? "请针对这些报错修改后重新生成，并在回复里说明修了什么。"
+      : truncated
+        ? "没看到 error 只代表**列出来的这些**；其余条目尚未展开，请先修掉根因（同一类问题往往成片出现）再重新自检，不要据此宣布页面正常。"
+        : "这些只是警告、通常不影响运行：**不必为了它们重写页面**，如实告诉用户存在哪些警告即可。");
+  } else if (flatScreen) {
+    lines.push("控制台没有 error/warning，但上面的画面采样说明屏幕是空的——**不要**据此告诉用户页面正常。");
+  } else if (result.canvases.length === 0 && result.textLength === 0) {
+    // **既没有画布也没有文本**：这是"脚本压根没跑起来"的最强信号，
+    // 不能落进"未报错 = 通过"那一支（实测：3 个元素、0 字文本、无画布，
+    // 报告却在说"画面也不是纯色"，而截图采样其实没拿到——`pixel` 是 undefined，
+    // 那句"不是纯色"无据可依）。摘要也会跟着说"自检通过"。
+    lines.push("控制台没有 error/warning，但页面既没有画布也没有可见文本——**这不等于正常**：多半是脚本没跑起来、或内容没渲染出来。请检查 <script> 是否执行（初始化是否提前 return / 抛错后被吞）、内容是否依赖了不允许的外链资源。");
+  } else if (!result.pixel) {
+    // 拿不到截图采样时**不能替它下结论**（说"画面不是纯色"是没有证据的判断）。
+    lines.push("控制台没有任何 error/warning；本次**未能取得画面采样**（截图失败），所以无法判断画面是否为空——不要据此告诉用户页面正常，也不要声称看过画面效果。");
+  } else if (result.pixel.dominant >= 0.97) {
+    // 采样**确实是纯色**，但 `flatScreen` 因为元素太少（≤1）没敢下"什么都没画出来"的结论。
+    // 这时候**不能**说"画面也不是纯色"——那是与证据相反的事实错误。
+    // 元素极少通常意味着页面结构本身就不完整，纯色这件事仍然要如实报出来。
+    lines.push(`画面采样：整屏约有 ${Math.round(result.pixel.dominant * 100)}% 是同一种颜色，但这个页面只有 ${result.elementCount} 个元素——**不能据此确认画面正常**（页面结构可能不完整）。请检查 HTML 是否完整、内容是否真的渲染到了页面上。`);
   } else {
-    lines.push("控制台没有任何 error/warning。可以据此如实告诉用户页面已实际运行且未报错；但不要声称看过画面效果——你拿到的是运行状态，不是截图。");
+    lines.push("控制台没有任何 error/warning，画面也不是纯色。可以据此如实告诉用户页面已实际运行且未报错；但不要声称看过画面效果——你拿到的是运行状态，不是截图。");
   }
   return lines.join("\n");
 }

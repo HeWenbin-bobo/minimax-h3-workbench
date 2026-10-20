@@ -34,12 +34,26 @@ const TOOLS = `# 你的工具
 - create_file(kind, name, content)：生成文件产物。用户要**网页/页面/小工具/游戏/3D 场景**（kind=html）、**表格/Excel**（kind=csv/tsv）、**文档/报告**（kind=md）时用它——这几类是绝大多数"帮我做个 X"请求的答案。
 - generate_video(prompt, duration, count)：生成 AI 视频（4–15 秒、1–4 路）。**仅当用户要的就是视频本身时**才用。
 
+## 修改已有文件（Codex 的硬规矩：先读，再精确改一处）
+- read_artifact(name, startLine?, endLine?, keyword?)：读回你生成的产物。
+  **知道要找什么（函数名、报错里的标识符）时用 keyword**——一步定位到命中行及上下文；
+  只有想通读结构时才用 startLine/endLine 分段读（一次默认最多 400 行）。
+- edit_artifact(name, oldText, newText)：精确替换**一处**，写回同一个文件。
+  要求 oldText 与文件内容逐字符一致、且全文件**唯一**；找不到或多处命中都会被拒绝并告诉你在第几行。
+  改 bug 一律用它，**不要整份重写**——重写 40KB 只为改 3 个字符，既费 token 又容易在重排中引入新问题。
+- edit_artifact_batch(name, edits[])：一次改**多处**，全部成功才写盘。
+  有 2 处以上要改时**优先用它**——单处编辑每次都要占一步预算，连着改 5 处很容易撞上步数上限。
+
 ## 交付前自检
-- inspect_artifact(name)：在应用自带浏览器里**真实运行**刚生成的 html 页面，返回控制台报错、画布尺寸与 WebGL 状态。生成 html 之后**必须跑一次**；有报错就改，改完重新生成、再自检，直到没有报错再交付。
+- inspect_artifact(name)：在应用自带浏览器里**真实运行**刚生成的 html 页面，返回控制台报错、画布尺寸与 WebGL 状态。生成 html 之后**必须跑一次**；有报错就 read_artifact 读回那一行、edit_artifact 改掉、再自检，直到没有报错再交付。
 
 ## 辅助工具（按需用来支撑上面的产出，不是必做步骤）
 - web_search(query)：联网搜索实时资料。涉及价格、新闻、时效信息、具体事实核查时调用。
-- open_page(url)：打开指定网页并返回内容。需要看某个具体页面、抓取详情时调用（比搜索更精准）。`;
+- open_page(url)：打开指定网页并返回内容。需要看某个具体页面、抓取详情时调用（比搜索更精准）。
+- update_plan(plan)：3 步以上、或要连续调多个工具时，动手前先列一遍，之后每完成一步更新状态。
+  它是给用户看进度的，**不是回答本身**——一步能做完的事别列清单。
+- request_user_input(questions)：卡在一两个关键取舍（时长、格式、风格）且不同选择会导致明显不同产出时用它问，
+  比猜一个再做省事。能从上下文合理推断的就直接做，别问。`;
 
 const ARTIFACTS = `# 文件产物（你的核心能力——界面自动把代码块变成可预览、可保存的文件卡片）
 - Excel/表格数据：kind=csv/tsv，首行表头。保存为 .xlsx，Excel 可直接打开。

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, writeFile, symlink, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { resolveWithinRoot } from "./safePath";
+import { resolveWithinRoot, resolveWithinRootDetailed } from "./safePath";
 
 let root: string;
 let outside: string;
@@ -104,5 +104,43 @@ describe("resolveWithinRoot", () => {
       return; // 这一条是补充覆盖，非核心断言，建不出就跳过
     }
     expect(await resolveWithinRoot(linkedRoot, path.join(root, "inside.html"))).not.toBeNull();
+  });
+
+  // **以两个点开头的合法文件名**（实测缺陷）：旧判定是 `relative.startsWith("..")`，
+  // 它把 `..报告.html` 当成"往上跳一层"——产物目录里真有这种文件时，
+  // 预览 / 读回 / 在文件夹中显示 / 清理全部失效，而报错是「不在产物目录内」，
+  // 用户看着一个完全正常的文件名，根本查不出原因。
+  it("以两个点开头的文件名仍算根内（.. 只在整段等于 .. 时才是越界）", async () => {
+    const dotted = path.join(root, "..报告.html");
+    await writeFile(dotted, "<html>ok</html>", "utf8");
+    expect(await resolveWithinRoot(root, dotted)).not.toBeNull();
+  });
+
+  it("真正的 .. 越界仍被拒（放宽后不能漏）", async () => {
+    expect(await resolveWithinRoot(root, path.join(root, "..", "nope.html"))).toBeNull();
+  });
+
+  // **"文件没了"与"越界"必须能分开**（实测缺口）：两者在旧实现里都返回 null，
+  // 于是产物预览在文件被删除时对用户说「不在产物目录内」——
+  // 那是安全提示，用户只会去怀疑路径被拦，而真实原因是最常见的那种：文件没了。
+  it("Detailed：根内但不存在 → missing（不是 outside）", async () => {
+    const result = await resolveWithinRootDetailed(root, path.join(root, "deleted.md"));
+    expect(result).toEqual({ ok: false, reason: "missing" });
+  });
+
+  it("Detailed：真正越界 → outside", async () => {
+    const result = await resolveWithinRootDetailed(root, path.join(outside, "secret.html"));
+    expect(result).toEqual({ ok: false, reason: "outside" });
+  });
+
+  it("Detailed：存在且在根内 → ok + 真实路径", async () => {
+    const result = await resolveWithinRootDetailed(root, path.join(root, "inside.html"));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.path.endsWith("inside.html")).toBe(true);
+  });
+
+  it("Detailed：根目录本身不存在 → missing（不能当成越界）", async () => {
+    const result = await resolveWithinRootDetailed(path.join(root, "not-yet-created"), path.join(root, "not-yet-created", "a.md"));
+    expect(result).toEqual({ ok: false, reason: "missing" });
   });
 });

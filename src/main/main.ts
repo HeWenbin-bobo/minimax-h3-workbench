@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
-import { readFile, stat, writeFile, unlink, mkdir, rm, realpath, open } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink, mkdir, rm, realpath, open, readdir, rename } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -24,7 +24,7 @@ import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequ
 import { downloadAndInstall, onDownloadProgress } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
 import { checkLocalModels } from "./modules/localModels";
-import { LlmService, chatAgent, type AgentQuestion, type AgentRunResult } from "./modules/llmService";
+import { LlmService, chatAgent, MAX_AGENT_STEPS, type AgentQuestion, type AgentRunResult } from "./modules/llmService";
 import { SettingsStore } from "./modules/settingsStore";
 import { inspectEnvironment } from "./modules/systemInspector";
 import { TaskStore } from "./modules/taskStore";
@@ -34,9 +34,10 @@ import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
-import { artifactSessionDirName } from "./modules/artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, SHEET_REQUEST_EXTS } from "./modules/artifactDir";
+import { applyExactEdit, applyExactEdits, countLines, findMatchingLines, MAX_READ_CHARS, sliceWithLineNumbers } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
-import { resolveWithinRoot } from "./modules/safePath";
+import { isPathInside, resolveWithinRoot, resolveWithinRootDetailed } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
 import { normalizeHistory } from "./modules/historyNormalize";
 import { freezeTurn } from "./modules/stepSnapshot";
@@ -58,6 +59,7 @@ import { buildCompactedHistory, summarizeHistory } from "./modules/compaction";
 import { withPlanMode } from "../shared/planMode";
 import { contextWindowFor } from "../shared/modelWindows";
 import { sliceSafe } from "../shared/text";
+import { decodeTextBytes, decodeTextPreview } from "./modules/textFile";
 
 /**
  * 每个会话的上下文预算状态（按 sessionId 隔离，对齐 Codex 的 per-thread window）。
@@ -150,7 +152,7 @@ app.whenReady().then(async () => {
     // 先解析符号链接再判白名单：只比对 path.resolve 的结果挡不住"目录内放一个软链指向外部"。
     const resolved = await resolveWithinRoot(await allowedMediaRoot(), requestedPath);
     // 用户改过输出目录后，历史结果仍留在原目录——按任务记录放行，否则整个历史都变成打不开的死链。
-    if (!resolved && !knownOutputPaths(orchestrator).has(normalizeForCompare(requestedPath))) {
+    if (!resolved && !(await knownOutputPaths(orchestrator)).has(normalizeForCompare(requestedPath))) {
       return new Response("Path outside output directory", { status: 403 });
     }
     const filePath = resolved ?? path.resolve(requestedPath);
@@ -207,14 +209,35 @@ app.whenReady().then(async () => {
   const artifactRoot = () => path.join(app.getPath("userData"), "artifacts");
   protocol.handle("h3preview", async (request) => {
     const requestedPath = new URL(request.url).searchParams.get("path");
-    if (!requestedPath || !path.isAbsolute(requestedPath)) return new Response("Invalid preview path", { status: 400 });
+    // 错误响应体**会被 iframe 原样渲染给用户看**（预览面板打不开时，用户看到的就是这段文字）。
+    // 所以一律用中文、并说清下一步——英文技术串（"Preview file not found"）对用户等于没说。
+    const explain = (message: string, status: number) =>
+      new Response(`<!DOCTYPE html><meta charset="utf-8"><body style="font:14px/1.7 system-ui;padding:24px;color:#444">${message}</body>`, {
+        status,
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+      });
+    if (!requestedPath || !path.isAbsolute(requestedPath)) return explain("预览地址无效：缺少产物路径。请从对话里的文件卡片重新点「预览」。", 400);
     // 符号链接安全的白名单校验：realpath 后比对，软链指向外部一律拒绝。
-    const resolved = await resolveWithinRoot(artifactRoot(), requestedPath);
-    if (!resolved) return new Response("Path outside artifacts directory", { status: 403 });
+    //
+    // **失败原因要分清**（实测缺口）：旧实现两种失败都回 403「不在产物目录内」，
+    // 而最常见的那种其实是**文件已经不在了**（会话被删 / 回收站清理 / 换过目录）。
+    // 用户看到"越界"只会去怀疑路径被拦，然后反复重试。区分后给出可操作的提示。
+    const resolution = await resolveWithinRootDetailed(artifactRoot(), requestedPath);
+    if (!resolution.ok) {
+      return resolution.reason === "missing"
+        ? explain("这个产物已经不存在了（可能已被删除、随会话清理，或所在目录被移动）。请重新生成一份，或从对话里的文件卡片重新点「预览」。", 404)
+        : explain("这个文件不在产物目录内，已拒绝预览。请从对话里的文件卡片重新打开。", 403);
+    }
+    const resolved = resolution.path;
     // 只服务 HTML：预览 iframe 仅用于 html 产物，限制扩展名把暴露面压到最小。
-    if (!/\.html?$/i.test(resolved)) return new Response("Only HTML preview is served", { status: 403 });
+    if (!/\.html?$/i.test(resolved)) return explain("只有网页（.html）产物能在预览面板里打开。表格与文档请直接在卡片上查看。", 403);
     try {
-      const body = await readFile(resolved, "utf8");
+      // **与其它三条读产物路径共用同一个解码函数**（见 `modules/textFile.ts`）：
+      // 产物是模型写的（UTF-8），但用户完全可能用记事本把 .html 另存成 ANSI/UTF-16 再回来预览。
+      // 直接 `readFile(…, "utf8")` 会得到一片 `���` 并当成 HTML 渲染——白屏或满屏乱码。
+      // 解码后再以 UTF-8 送出（响应头已声明 charset=utf-8，按规范优先于页面内的 <meta>），
+      // 因此内层 `<meta charset="gbk">` 不会造成二次错解。
+      const body = decodeTextBytes(await readFile(resolved));
       // CSP 由**响应头**下发（权威，内容无法构造影响），不注入 <meta>。
       // 内联脚本照跑（否则游戏动不了），但网络出口全封——产物由模型生成，按不可信内容对待。
       // nosniff：避免响应体内 content-type 被当成别的类型解释。
@@ -222,11 +245,16 @@ app.whenReady().then(async () => {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Content-Security-Policy": PREVIEW_CSP,
-          "X-Content-Type-Options": "nosniff"
+          "X-Content-Type-Options": "nosniff",
+          // **必须禁缓存**（与 h3media 对齐）：URL 里只有 path，没有版本号——
+          // 模型用 edit_artifact 改完文件后，预览面板靠 `revision` 换 key 重新请求，
+          // 但同一个 URL 若命中 HTTP 缓存，拿到的仍是**改动前**的页面。
+          // 实测症状和"改完没生效"一模一样，而磁盘上的文件其实早就变了。
+          "Cache-Control": "no-store"
         }
       });
     } catch {
-      return new Response("Preview file not found", { status: 404 });
+      return explain("预览文件读不出来：可能已被删除，或刚好在写入中。请在文件卡片上重新点「预览」；如果一直失败，点卡片上的 📁 用系统默认程序打开。", 404);
     }
   });
 
@@ -899,8 +927,19 @@ function registerIpc(
       // 或重新 getSecret()——那样读到的是"此刻"的值，会与轮开始时用的不一致。
       let agentSent = 0;
       let agentTaskCount = 0; // 本轮已建任务数：非 0 时不得整轮重试（否则会重复建任务）
+      let agentArtifactCount = 0; // 本轮已落盘产物数：用于收尾文案（见下面 1243 行附近）
+      /** 本轮**改动过**的文件数（编辑已有产物，不新建）。单独计数才能把收尾文案说对。 */
+      let agentEditCount = 0;
       const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
       const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
+      // 编辑产物后推一条"更新"事件：渲染端就地刷新卡片大小与已打开的预览。
+      // 为什么需要（实测缺口）：此前只有 create_file 会推事件，于是模型改完文件后，
+      // 卡片上的大小停在旧值、**已打开的预览面板也不会重载**——用户对着旧画面
+      // 判断"还是坏的"，而模型那边已经改好了。两边看到的是两个不同的文件。
+      const notifyArtifactUpdated = (absolutePath: string, name: string, size: number) => {
+        const kind: LlmArtifactEvent["kind"] = /\.html?$/i.test(name) ? "html" : /\.xlsx$/i.test(name) ? "sheet" : "doc";
+        sendLlmArtifact({ name, path: absolutePath, size, kind, updated: true, sessionId: session });
+      };
       // world state：每轮都注入**完整**的环境事实（时间/联网/产物/余量）。
       //
       // **必须作为 user 消息片段注入，不能拼进 system prompt**（真实 key A/B 实测，见
@@ -920,12 +959,35 @@ function registerIpc(
       // 避免"界面说还剩 30%、模型以为还剩 90%"这种自相矛盾。
       const modelLimit = contextWindowFor(turn.value.model);
       const activeTokens = activeContextTokens(effective, budgetFor(session).sample);
+      // **把本会话已产出的文件名注入环境事实**（实测缺口）：history 只传
+      // `{ role, content }`，工具结果不跨轮保留——用户第二轮说"把刚才那个改一下"时，
+      // 模型手里没有任何文件名，只能猜（这一轮一半的补丁都在替它兜这个底）。
+      //
+      // **必须按修改时间倒序**：下游只保留前 20 条（worldState 的 slice），
+      // 字母序截断会把刚生成的文件挤掉——而"刚生成的那个"恰恰是模型最常引用的。
+      // 读不到目录就当空清单，不能让整轮失败。
+      const artifactRoot = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+      const artifactFiles = await readdir(artifactRoot)
+        .then(async (entries) => {
+          const wanted = entries.filter((name) => /\.(html?|md|xlsx)$/i.test(name));
+          const withTime = await Promise.all(wanted.map(async (name) => {
+            const info = await stat(path.join(artifactRoot, name)).catch(() => undefined);
+            return { name, mtime: info?.mtimeMs ?? 0 };
+          }));
+          // **必须折叠同名多版本**：渲染端只展示最新一版，清单却全量列出来——
+          // 模型每修一次就多一个 `报告 (2)` `(3)`…，20 条限额被同一份文件占满后，
+          // 别的文件（比如那份 .md）直接被挤出清单，模型就"没有"它了。
+          // 折叠口径与渲染端 `foldArtifactVersions` 一致（同主名 + 同扩展名 = 同一份）。
+          return foldArtifactNames(withTime.sort((a, b) => b.mtime - a.mtime).map((entry) => entry.name));
+        })
+        .catch(() => [] as string[]);
       const worldDiff = diffWorldState(
         buildSections({
           webSearch: turn.value.webSearch,
           browserSearch: turn.value.browserOnly,
           searchApiReady: Boolean(turn.value.searchBaseUrl),
           artifactKinds: turn.value.planMode === "plan" ? [] : ["html（网页/小工具）", "xlsx（表格，由 csv/tsv 生成）", "md（文档）"],
+          artifactFiles,
           contextBudget: { remainingTokens: Math.max(0, modelLimit - activeTokens), modelLimitTokens: modelLimit }
         }),
         sessionWorldState.get(session)
@@ -941,10 +1003,12 @@ function registerIpc(
         //   ② 历史使用习惯（从既有任务提炼，用户自定义提示词时仍追加）
         // 环境事实**不放这里**（实测被忽略），改由 injectWorldState 拼成 user 片段。
         // 最后再套 withPlanMode：本轮规则是强约束，放最末才不被稀释。
+        // **要传真实的联网开关**：用户关掉「联网」时 web_search 不下发，
+        // 而计划模式的"可用工具"清单若照旧写它可用，模型会去调一个不存在的工具。
         systemPrompt: withPlanMode(buildSystemPrompt({
           custom: turn.value.systemPrompt,
           memoryHint: buildAgentMemoryHint(orchestrator.list())
-        }), planArg),
+        }), planArg, { webSearch: Boolean(webSearch || browserOnly) }),
         searchBaseUrl: turn.value.searchBaseUrl || undefined,
         searchApiKey: turn.value.searchApiKey
       };
@@ -1005,6 +1069,13 @@ function registerIpc(
           if (!text) {
             return `已打开该网页，但页面上没有可提取的正文（可能是纯图片/画布/PDF 页面）。可以改用 web_search 搜索相关信息，或换一个以文字为主的链接。`;
           }
+          // **正文过短也要提示**（实测真机，表格案例）：两次 open_page 分别只拿到
+          // 35 字和 45 字（撞上登录墙 / 纯 JS 空壳页），工具却报告成功，模型以为
+          // 拿到了资料、继续往下走，实际手里什么也没有——最后只能再搜一次，白烧步骤。
+          // 阈值取 200 字：正常的技术文档/新闻页正文都在千字以上，200 以下基本是空壳。
+          if (text.length < 200) {
+            return `已打开该网页，但只提取到 ${text.length} 字正文（可能是登录墙、纯 JS 空壳页或被反爬拦截）。这点内容通常不足以支撑结论——请换一个以文字为主的链接，或改用 web_search。以下是提取到的全部内容：\n\n${text}`;
+          }
           // 用 sliceSafe：裸 slice 会切开 emoji 的代理对（实测 "a😀" 重复时切在 80000
           // 正好落在高代理项上），留下一个渲染成 � 的坏字符并回传给模型。
           return text.length > 80_000 ? `${sliceSafe(text, 80_000)}\n\n（页面过长已截断）` : text;
@@ -1020,6 +1091,7 @@ function registerIpc(
           const renderKind: "html" | "sheet" | "doc" =
             /\.html?$/i.test(saved.name) ? "html" : /\.xlsx$/i.test(saved.name) ? "sheet" : "doc";
           sendLlmArtifact({ name: saved.name, path: saved.path, size: saved.size, kind: renderKind, sessionId: session });
+          agentArtifactCount += 1;
           return `文件已生成并保存：${saved.name}（${saved.size >= 1024 * 1024 ? `${(saved.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(saved.size / 1024))}KB`}）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。**不要**把文件内容重复贴进回复——卡片已经承载了它。请用一两句话说明文件内容概要即可。`;
         },
         // inspect_artifact：把刚生成的网页**真的跑一遍**。
@@ -1032,15 +1104,392 @@ function registerIpc(
         //
         // 只接受**文件名**（不接受路径）：让模型自己解析任意路径等于给它开一个读文件的口子。
         // 会话目录由 `artifactSessionDirName` 决定，仍走 resolveWithinRoot 再做一次白名单。
+        //
+        // **名字对不上时必须回落找同主名的最新版本**（实测真机踩到）：模型修完 bug 会重新
+        // `create_file` 同名文件，而 `uniqueArtifactPath` 不覆盖，落成 `名字 (2).html`。
+        // 模型接着自检时往往还传原名——按精确匹配就会**跑旧版本**，然后回一句"自检通过"。
+        // 那是静默的错误答案：模型据此告诉用户"已验证"，用户点开的却是仍带 bug 的上一版。
+        // 这里的回落规则与渲染端 `foldArtifactVersions` 一致（同主名视为同一份文件的不同版本），
+        // 并且**明确告知实际检查的是哪个文件**，让模型自己发现名字没对上。
         inspectArtifact: async (params: { name: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
-          if (!/\.html?$/i.test(safeName)) throw new Error("只能自检 html 产物（csv/md 没有可运行的脚本）。");
-          const resolved = await resolveWithinRoot(dir, path.join(dir, safeName));
-          if (!resolved) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          // **先解析、再判类型**（实测：两者顺序反了会误拒）。
+          // `create_file` 的参数说明是"不含扩展名"，模型照此调用 `inspect_artifact("鹈鹕")`
+          // 时，若先按 `safeName` 判扩展名 → 没有 `.html` → 直接报"只能自检 html 产物"，
+          // 而文件其实就在那里、也确实能跑。解析器已支持无扩展名补全，先让它找出实际文件。
+          const found = await resolveArtifactQueued(dir, safeName);
+          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          if (!/\.html?$/i.test(found.name)) throw new Error(`「${found.name}」不是 html 产物，无法自检（csv/md 没有可运行的脚本）。`);
+          const resolved = found.path;
+          const actualName = found.name;
           // 与渲染端预览面板拼的是同一个 URL 形状：同一协议、同一 CSP。
           const url = `h3preview://artifact/?path=${encodeURIComponent(resolved)}`;
-          return formatProbeReport(await probeHtmlArtifact(url, 20_000, controller.signal));
+          const report = await formatProbeReport(await probeHtmlArtifact(url, 20_000, controller.signal));
+          // **必须声明检查的是哪个文件**（实测真机：模型在自检反复报同一条错时，
+          // 因为不知道工具到底加载了哪一份，花 4 步去怀疑"是不是命中了缓存/旧文件"，
+          // 而我们事后核对磁盘——报错是真的，它自己的新文件里确实还留着那行）。
+          // 报出文件名 + 文件大小 + 修改时间，模型就能自己判断"检的是不是我刚写的那份"。
+          const info = await stat(resolved).catch(() => undefined);
+          const stamp = info
+            ? `（${info.size >= 1024 * 1024 ? `${(info.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(info.size / 1024))}KB`}，修改于 ${new Date(info.mtimeMs).toLocaleTimeString("zh-CN", { hour12: false })}）`
+            : "";
+          // 标题必须按**实际成因**措辞：同一个判定在 inspect/read/edit/batch 四处共用
+          // `describeArtifactFallback`——此前四处各写一遍，加"csv 落成 xlsx"时必然漏改。
+          const why = describeArtifactFallback(found.fellBack, safeName, actualName, "inspect");
+          // **身份说明放在报告之后**（实测踩到）：步骤条的成败判定与摘要都只看回执**开头**
+          // （`isToolFailure` 取第一句、`humanizeToolOutput` 按前缀匹配）。把
+          // "本次检查的文件：…" 拼在前面时，`自检失败：…` 落到第二句——
+          // 自检明明失败，步骤条却打勾、摘要显示「自检完成」。
+          const header = `本次检查的文件：${actualName}${stamp}。${why ? `\n${why}` : ""}\n\n`;
+          return `${report}\n\n---\n${header.trimEnd()}`;
+        },
+        // read_artifact / edit_artifact：改之前先读，改的时候只改那一处。
+        //
+        // 真机证据（鹈鹕案例）：模型为改一行 `M.identity`→`M.ident` 整份重写 40KB，
+        // 结果新文件里**仍然留着那一处**；随后它断言"我重写后的文件里并没有这个写法"，
+        // 把锅推给自检工具。根因是它**读不回**自己的文件，只能凭记忆改。
+        // 这两个工具对齐 Codex `apply_patch`：给行号让人看得见，要求精确且唯一才写。
+        // **读也要排进写队列**（实测竞态，probe-read-write-race）：AI SDK 在同一个 step 里
+        // 会**并行执行多个 tool call**，而 read 原本在写队列之外。模型一次调用
+        // "edit_artifact + read_artifact" 时的真实顺序是：
+        //     修改文件（入队） → 读取文件（不入队，立即执行） → 读取完成（旧内容） → 修改完成
+        // 于是模型读到的是**改动前**的文件，接着会基于旧内容做下一步决策。
+        // 读取本身很快，串进同一个队列的代价可以忽略。
+        readArtifact: async (params: { name: string; startLine?: number; endLine?: number; keyword?: string }) => artifactWriteQueue.run(async () => {
+          const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+          const safeName = path.basename(String(params.name || "").trim());
+          const found = await resolveArtifactForTool(dir, safeName);
+          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          const resolved = found.path;
+          // xlsx 是二进制，但**不能因此拒绝**（实测真机，表格案例）：模型好不容易
+          // 生成出 xlsx，却完全无法核验内容——`read_artifact` 抛"二进制"、
+          // `inspect_artifact` 又只收 html，于是"文件已生成"对它来说是个从未看过的黑盒。
+          // 用 SheetJS 反解成 CSV 再按文本读（与预览面板同一套转换，不新增依赖）。
+          let raw: string;
+          // xlsx 被截断时的**真实总行数**。标题里的"共 N 行"必须用它——
+          // 否则会出现自相矛盾的回执：标题按 `raw.split("\n").length` 算成 2002，
+          // 正文末尾的说明却写着"表格共 5001 行"（实测 5000 行表格）。
+          let realRowCount: number | undefined;
+          // 表格被截断时**真正载入的行数**（即 MAX_ROWS）。不能拿 `slice.totalLines - 1` 代替：
+          // `raw` 末尾还拼了一段说明，算出来会多一行（实测 5000 行表格 → "只有前 2001 行能读"，
+          // 而正文里明说只给了 2000 行，两个数字又打架）。
+          let readableRows: number | undefined;
+          /**
+           * 表格截断的说明。**必须与 `raw` 分开**（实测复现）：
+           * 原先把它拼在 `raw` 末尾，于是 `read_artifact(keyword)` 会**在我们自己的说明里命中**——
+           * 搜「表格」「行」会返回一个带假行号的"命中行"，模型据此以为那是文件内容，
+           * 甚至把它当 oldText 去改（当然改不动）。我们自己写的说明不是文件内容。
+           */
+          let tableNote = "";
+          if (/\.xlsx$/i.test(resolved)) {
+            const XLSX = await loadXlsx();
+            try {
+              const book = XLSX.readFile(resolved);
+              const first = book.SheetNames[0];
+              if (!first) raw = "";
+              else {
+                const sheet = book.Sheets[first];
+                // **必须自己限行**（与预览面板同一口径 2000 行，实测对齐）：
+                // `sheet_to_csv` 没有上限选项，一个十万行表格会整张塞进模型上下文——
+                // 那不是"能核验"，那是把上下文一次烧光。预览路径早有这个限制，
+                // 智能体路径漏了（同一类判断写两处、只改一处）。
+                const range = XLSX.utils.decode_range(sheet["!ref"] || "A1");
+                const MAX_ROWS = 2_000;
+                const rowCount = range.e.r - range.s.r + 1;
+                if (rowCount > MAX_ROWS) {
+                  const capped = {
+                    ...sheet,
+                    "!ref": XLSX.utils.encode_range({ s: range.s, e: { r: range.s.r + MAX_ROWS - 1, c: range.e.c } })
+                  };
+                  // 截断说明走**单独一行**并明确标出，但要**说对能怎么办**。
+                  //
+                  // 旧文案写的是"需要看后面的，用 keyword 定位"——**这是个死路**：
+                  // keyword 与 startLine/endLine 都作用在 `raw` 上，也就是这前 2000 行，
+                  // 后面那些行压根不在字符串里。模型照做，注定搜不到，只会怀疑是关键词写错了。
+                  realRowCount = rowCount;
+                  readableRows = MAX_ROWS;
+                  // **说明不拼进 `raw`**：`raw` 是"文件内容"，keyword 搜索与按行读都作用在它上面。
+                  // 拼进去会让模型在自己写的说明里搜到"命中行"（实测：搜「表格」返回第 7 行）。
+                  raw = XLSX.utils.sheet_to_csv(capped);
+                  tableNote = `（表格共 ${rowCount} 行，这里只给了前 ${MAX_ROWS} 行。注意：keyword 与 startLine/endLine 都只能在这前 ${MAX_ROWS} 行里找，看不到后面的内容。要看后面，请在回复里说明具体要哪几行/哪一列，或让用户直接在 Excel 里打开这份文件。）`;
+                } else {
+                  raw = XLSX.utils.sheet_to_csv(sheet);
+                }
+              }
+            } catch (error) {
+              throw new Error(`表格文件已损坏或格式不受支持，无法读取（${error instanceof Error ? error.message : "未知错误"}）。`);
+            }
+          } else {
+            // 与附件 / 预览共用一个解码函数（见 `modules/textFile.ts`）：
+            // 用户完全可能用记事本把产物另存成 GBK/UTF-16 再让模型读；
+            // 按 utf8 硬读只会把乱码喂给模型，它据此改出来的东西必然是坏的。
+            raw = decodeTextBytes(await readFile(resolved));
+          }
+          // **空文件/空表格要单独说**（实测缺口）：`raw` 是空串时
+          // `sliceWithLineNumbers` 会回「共 1 行，本次显示第 1–1 行」+ 一行空白——
+          // 模型据此以为文件里真有一行内容（或者以为读到的是空行），
+          // 接着去 edit_artifact 找一个不存在的片段，白烧一两步。
+          // 空表格尤其常见：`create_file(kind:"csv")` 内容只有表头以外的空白时，
+          // SheetJS 转出来的就是空串。
+          if (!raw.trim()) {
+            const nameNote = describeArtifactFallback(found.fellBack, safeName, found.name, "read");
+            const nameLead = nameNote ? `${nameNote}\n` : "";
+            return `${nameLead}文件：${found.name}（**这个文件是空的**，没有任何内容可读）。${
+              /\.xlsx$/i.test(found.name)
+                ? "表格里没有数据行——如果你本来要生成内容，请用 create_file(kind=\"csv\") 重新生成，并在 content 里给出完整表头与数据行。"
+                : "如果你本来就该写入内容，请用 create_file 或 edit_artifact 补上。"
+            }`;
+          }
+          // **按关键词定位优先**（实测真机）：模型要找某个函数却不知道在哪，
+          // 于是把 2118 行的文件按 400 行一段连读 5 次，光找位置就吃掉 5 步。
+          const keyword = String(params.keyword ?? "");
+          // 回落说明必须**在分支之前**算好：keyword 分支会提前 return，
+          // 若把它放在后面，用 keyword 定位时模型永远看不到"实际读的是哪一份"。
+          // 后面紧跟正文，所以这里补一个换行（共享函数本身不带尾随换行，
+          // 因为 inspect 把它放在"本次检查的文件：…"后面的独立一行）。
+          const nameNote = describeArtifactFallback(found.fellBack, safeName, found.name, "read");
+          const nameLead = nameNote ? `${nameNote}\n` : "";
+          if (keyword) {
+            // **范围参数会被忽略，必须说出来**（实测缺口）：`keyword` 分支是全文搜索、
+            // 提前 return，所以同时给了 `startLine/endLine` 时那两个参数**完全没起作用**。
+            // 不说的话模型会以为"我在第 100–200 行里搜的"，然后对着范围外的命中困惑
+            // （它甚至会据此判断"这个函数不在这段里"）。
+            const ignoredRange = params.startLine !== undefined || params.endLine !== undefined
+              ? "\n（注意：你同时给了 keyword 和行号范围。**范围被忽略了**——keyword 是全文搜索。只按范围读请不要给 keyword。）"
+              : "";
+            // **不能叫 `found`**：外层 `found` 是"解析出的实际文件"，同名会遮蔽它，
+            // 下面回执就会退回用请求名（`safeName`），模型看到的名字与实际读的文件对不上。
+            const hits = findMatchingLines(raw, keyword);
+            // 模型把整行（含 `    42| ` 行号栏）当关键词抄进来时，`findMatchingLines` 已替它剥掉。
+            // 必须说出来，否则它下次还会照抄（oldText/newText 两条路都已这么提示）。
+            const keywordGutterNote = hits.strippedGutter
+              ? "\n（注意：你给的 keyword 带着 read_artifact 的行号前缀，我已自动剥掉后再搜。以后只给要搜的那段文字，不要带行号。）"
+              : "";
+            if (hits.total === 0) {
+              // **只是大小写不同**时直接说破（实测：模型常把 `SPEED` 写成 `speed`）。
+              // 只说"换个更短或更准确的片段试试（区分大小写）"，它只会换个词再搜一次。
+              const caseHint = hits.caseOnly > 0
+                ? `\n（忽略大小写时有 ${hits.caseOnly} 行能命中——你要找的应该是它，只是大小写不同。请按文件里的实际写法再搜一次。）`
+                : "";
+              // 行数同样以真实行数为准（大表格被截到 2000 行时，
+              // `raw.split("\n").length` 只有 ~2002，与正文里的"表格共 5001 行"打架）。
+              // "只载入了前 N 行"也用 `readableRows`（= MAX_ROWS），
+              // 不能拿 `raw 的行数 - 1` 反推——`raw` 末尾还拼着说明段，会多算一行。
+              // 用 `countLines`：文件通常以换行结尾，`split` 会多算一行（回执说"共 4 行"、
+              // 用户在编辑器里看到 3 行）。
+              const keywordTotal = realRowCount ?? countLines(raw);
+              const readableNote = realRowCount !== undefined && readableRows !== undefined ? `，只载入了前 ${readableRows} 行` : "";
+              return `${nameLead}在 ${found.name}（共 ${keywordTotal} 行${readableNote}）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}${keywordGutterNote}${ignoredRange}${tableNote ? `
+${tableNote}` : ""}`;
+            }
+            const more = hits.total > hits.matches.length ? `\n（共 ${hits.total} 处命中，只显示前 ${hits.matches.length} 处。）` : "";
+            // 命中行本身可能极长（压缩过的 HTML 一行几十万字符），`findMatchingLines`
+            // 已按行截断并再兜一道字符上限——必须告诉模型"你看到的是节选"，
+            // 否则它会以为原文就是这么短，照抄 oldText 时必然匹配不上。
+            //
+            // **分情况给下一步**：整个文件就是一行时（压缩 HTML 的常见形态），
+            // 用 startLine/endLine 读第 1 行同样会撞 `MAX_READ_CHARS` 被截在行首——
+            // 照样拿不到中间那段。那种情况下唯一可靠的办法是给**更短、更独特的 oldText**。
+            const oneLineFile = !raw.includes("\n");
+            const capped = hits.lineCapped || hits.charCapped
+              ? `\n（上面的命中行过长了，已做**节选**：行内首尾的「…」表示省略，**不要直接把节选当 oldText**。${
+                  oneLineFile
+                    ? "这个文件整个就是一行（压缩过的 HTML），startLine/endLine 也读不回整行——请直接用你刚才看到的这一小段（去掉首尾「…」）作为 oldText，必要时再带上紧邻的字符让它唯一。"
+                    : "要精确的 oldText，请用 startLine/endLine 读那一段原文；keyword 只用来定位。"
+                }）`
+              : "";
+            // **大表格只载入了前 2000 行时，命中结果也要说明这一点**（实测缺口）：
+            // 未命中的分支已经写了"只载入了前 N 行"，命中分支却没有——
+            // 而模型的真实风险恰恰在命中这边：它找到 1 处就以为"全文只有这一点"，
+            // 后面的 3000 行根本没参与搜索。
+            const partialNote = realRowCount !== undefined && readableRows !== undefined
+              ? `\n（注意：这个表格共 ${realRowCount} 行，但搜索只在**前 ${readableRows} 行**里进行。${realRowCount > readableRows ? "后面的行没有载入，可能还有别的命中。" : ""}）`
+              : "";
+            return `${nameLead}在 ${found.name} 里找到 ${hits.total} 处「${keyword}」：\n${hits.body}${more}${capped}${partialNote}\n需要改哪一处，就把那一段连同上下文一起作为 oldText。${keywordGutterNote}${ignoredRange}${tableNote ? `
+${tableNote}` : ""}`;
+          }
+          const slice = sliceWithLineNumbers(raw, params.startLine, params.endLine);
+          // **显示用的总行数**：大表格被截到 2000 行后，`raw.split("\n")` 只有 ~2002 行，
+          // 而正文末尾的说明写着"表格共 5001 行"——同一个回执里两个数字互相矛盾（实测）。
+          // 有真实行数时一律以它为准，行号区间仍按 `raw` 的实际内容算。
+          const displayTotal = realRowCount ?? slice.totalLines;
+          // **必须说明被截断了**（实测真机）：模型不带范围读 1651 行全文，紧接着又读一遍，
+          // 白烧几十 KB 还挤掉后续修改步骤。默认上限 400 行，并告诉它还剩多少、怎么继续读。
+          //
+          // **但"还能读多少"与"文件共多少行"是两件事**（实测）：大表格只有前 2000 行进了
+          // `raw`，往后 startLine/endLine 与 keyword 都够不着。旧文案写"还有 4601 行没显示，
+          // 用 startLine/endLine 分段读"，是让模型去读一段不存在的内容——它照做只会拿到夹紧后的末尾。
+          const more = slice.truncated
+            ? realRowCount !== undefined
+              ? `\n（本次显示第 ${slice.from}–${slice.to} 行。这个表格共 ${realRowCount} 行，但**只有前 ${readableRows ?? realRowCount} 行能读**——后面的行没有载入，startLine/endLine 与 keyword 都够不到。要看后面请在回复里说明要哪几行/哪一列，或让用户直接用 Excel 打开；继续读前面的，用 startLine/endLine 分段。）`
+              : `\n（只显示前 ${slice.to - slice.from + 1} 行；文件共 ${displayTotal} 行，还有 ${Math.max(0, displayTotal - slice.to)} 行没显示。需要更多就用 startLine/endLine 分段读，或者用 keyword 直接定位。）`
+            : "";
+          // **按字符截断也要说**（否则是静默丢失）：超长单行文件（压缩过的 HTML）
+          // 会先撞 `MAX_READ_CHARS`，行数看起来"全给了"，实际内容被切在半路。
+          // 模型不知道就会基于残缺内容下结论（比如以为某个函数只有一半）。
+          //
+          // **建议要分情况**（与本文件里 keyword 分支同一处坑）：整个文件只有一行时，
+          // "缩小 startLine/endLine 范围"是死路——第 1 行就是全部，再窄也还是同一行，
+          // 照样被截在行首。那种文件只能用 keyword 定位。
+          const oneLineFile = !raw.includes("\n");
+          const charNote = slice.charCapped
+            ? oneLineFile
+              ? `\n（这一段总长超限，已按 ${MAX_READ_CHARS} 字符截断。**这个文件整个就是一行**（压缩过的 HTML 常见），所以 startLine/endLine 帮不上忙——要定位具体内容，用 keyword；要改它，直接用你读到的这一小段作为 oldText。）`
+              : `\n（这一段总长超限，已按 ${MAX_READ_CHARS} 字符截断——单行很长的文件常见。请用 keyword 精确定位，或缩小 startLine/endLine 范围。）`
+            : "";
+          // **范围写反要明说**：`endLine < startLine` 会被夹成一行，而下面的 `more`
+          // 会说"还有 N 行没显示"——那 N 行其实在范围**之前**。
+          // 模型据此以为自己没读到结尾，会反复换范围重读（实测 8–3 → 一行 + “还有 2 行没显示”）。
+          const reversedNote = slice.reversed
+            ? `\n（注意：你给的 startLine=${params.startLine} 大于 endLine=${params.endLine}，范围是反的。已按起始行显示一行。要看这一段，把两个数字对调；要从某行读到结尾，只给 startLine。）`
+            : "";
+          // **起点超出文件末尾也要说**（实测缺口）：模型要读第 9999 行、而文件只有 8 行时，
+          // 回执是「共 8 行，本次显示第 8–8 行」——没有任何"你要的范围不存在"的提示。
+          // 它据此以为自己拿到了想要的那段（其实是文件的最后一行），
+          // 于是基于错误内容继续改，还会困惑"为什么第 9999 行是这个"。
+          const beyondNote = Number.isFinite(params.startLine) && Number(params.startLine) > slice.totalLines
+            ? `\n（注意：你请求从第 ${params.startLine} 行开始，但${realRowCount !== undefined ? "本次能读到的" : "这份文件"}只有 ${slice.totalLines} 行。上面给的是**最后一行**。要读结尾附近的内容，用 startLine=${Math.max(1, slice.totalLines - 19)} 之类靠近末尾的行号，或用 keyword 定位。）`
+            : "";
+          // **标题必须用"实际读到的那个文件"**：`nameNote` 已在上方（keyword 分支之前）
+          // 算好——那里提前返回，放这里就看不到回落说明了。
+          //
+          // **不再追加 `tableNote`**（实测重复）：这条路径的 `more` 在「大表格被截断」时
+          // 已经解释过"共 N 行、只有前 M 行能读、后面怎么读"，再拼一句同样的说明
+          // 等于同一条回执里说两遍。`tableNote` 只留给 keyword 分支（那里没有 `more`）。
+          return `${nameLead}文件：${found.name}（共 ${displayTotal} 行，本次显示第 ${slice.from}–${slice.to} 行）\n${slice.body}${more}${charNote}${reversedNote}`;
+        }),
+        editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
+          const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+          const safeName = path.basename(String(params.name || "").trim());
+          // **解析与读改写必须在同一个队列条目里**（实测竞态）。
+          //
+          // 旧写法是 `await resolveArtifactQueued(...)` 之后再 `artifactWriteQueue.run(...)`——
+          // 那是**两次排队**，中间允许别的条目插进来。真实序列（AI SDK 同 step 并行调用）：
+          //
+          //   A: 解析 → 命中「报告.html」（当前最新）
+          //   B: create_file 落盘「报告 (2).html」（新的最新）
+          //   C: 读改写「报告.html」  ← 改的是**上一版**
+          //
+          // 而界面把同名多版本折叠成只显示最新一版，于是用户看到的那份**一点没变**，
+          // 模型却回一句"已修改"——两边看的是两个文件（与 `probe-name-fallback` 同一类，
+          // 只是这里由"两次排队"引入）。
+          //
+          // 收进一个条目后，解析必然排在它前面所有落盘之后，`create_file` 也就总能被看见。
+          // 注意：这里**必须**调 `resolveArtifactForTool` 而不是 `resolveArtifactQueued`——
+          // 后者会再排一次队，等于自己等自己，永久挂起（与 `readArtifact` 那条注释同理）。
+          return artifactWriteQueue.run(async (): Promise<string> => {
+            const found = await resolveArtifactForTool(dir, safeName);
+            if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+            const resolved = found.path;
+            // 下落必须说出来，且**分清成因**（名字不存在 / 已过期 / 没写扩展名 / csv 落成 xlsx）。
+            // 不说的话模型以为改的就是自己点的那份（界面上同名只展示最新版）。
+            const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
+            if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
+            // 与 read_artifact / 预览共用同一个解码函数（见 `modules/textFile.ts`）。
+            // **这条路径更要紧**：按 utf8 硬读 GBK 文件会得到一堆 `�`，`applyExactEdit`
+            // 拿着这份乱码去匹配必然 not-found；即便匹配上，写回时也是把乱码落盘——
+            // 用户的原文被彻底覆盖。写回统一成 UTF-8（内容不变、只换编码），这是可接受的取舍。
+            const before = decodeTextBytes(await readFile(resolved));
+            const outcome = applyExactEdit(before, params.oldText, params.newText);
+            if (!outcome.ok) {
+              // 失败要说清**为什么**、**在哪**，并给下一步动作——只说"失败"模型会盲目重试。
+              if (outcome.reason === "empty-old") throw new Error("oldText 不能为空。");
+              if (outcome.reason === "not-found") {
+                // 附上**最接近的几行**：只说"找不到"，模型只能再读一次再猜一次
+                // （真机上它这样重复了 4 次，20 步预算全烧在这上面）。
+                const hint = (outcome.hints ?? []).length > 0
+                  ? `\n文件里跟它最接近的行是：\n${outcome.hints!.map((h) => `  第 ${h.line} 行：${sliceSafe(h.text, 160)}`).join("\n")}\n请直接照抄其中合适的片段（含缩进）作为 oldText。`
+                  : "";
+                throw new Error(`在文件里找不到 oldText（内容必须逐字符一致，含缩进与空格）。${hint}`);
+              }
+              const where = outcome.lines.slice(0, 6).join("、");
+              throw new Error(`oldText 在文件里出现了 ${outcome.count} 次（第 ${where} 行）。为了不改错位置，我拒绝执行。请把 oldText 连同上下各一行一起贴进去，让它只匹配一处。`);
+            }
+            await atomicWriteText(resolved, outcome.text);
+            const after = await stat(resolved);
+            // 让模型知道改完共几行 / 多大——据此判断是不是真的只动了那一处。
+            // 用 `countLines` 而不是 `split("\n").length`：文件通常以换行结尾，
+            // 后者会多算 1 行（回执说"共 8 行"、用户在编辑器里看到 7 行）。
+            const totalLines = countLines(outcome.text);
+            // **必须推一次"更新"事件**（实测缺口）：此前只有 create_file 会推，
+            // 于是卡片上的大小停在旧值，已打开的预览面板也不会重载——
+            // 用户对着旧画面判断"还是坏的"，模型却说改好了。
+            notifyArtifactUpdated(resolved, found.name, after.size);
+            agentEditCount += 1;
+            // **只有 html 才建议自检**（实测契约）：`inspect_artifact` 只接受 .html，
+            // 改 .md/.xlsx 时无条件写"建议立刻自检"，模型照做必然吃一次"只能自检 html"，
+            // 白烧一步预算——而步数本来就紧。
+            const sizeKb = `${Math.max(1, Math.round(after.size / 1024))}KB`;
+            const nextStep = /\.html?$/i.test(found.name)
+              ? "建议立刻 inspect_artifact 自检一次，确认没有引入新报错。"
+              : "改完可直接告诉用户，或用 read_artifact 复核。";
+            // 模型把**读回结果的行号前缀**一起抄进 oldText 时，
+            // 这里替它剥掉了。必须说出来：否则它下次还会照抄
+            // （并且不知道自己抄错了，只是"这次居然成功了"）。
+            const gutterNote = outcome.strippedGutter
+              ? "\n（注意：你给的 oldText 带着 read_artifact 的行号前缀（`  42| `），我已自动剥掉后再匹配。以后写 oldText 时不要带行号那一栏。）"
+              : "";
+            return `已修改 ${found.name}（第 ${outcome.line} 行，文件现为 ${totalLines} 行 / ${sizeKb}）${fellBackNote}。${nextStep}${gutterNote}`;
+          });
+        },
+        // 批量编辑：一次调用应用多处修改，**全部成功才写盘**。
+        //
+        // 实测动因：模型一次修 5 处 bug，单处 edit 消耗 5 步工具预算，
+        // 叠加步数上限（`MAX_AGENT_STEPS`）后任务被打断（真机那一轮最后一句就是"已达上限"）。
+        // 合成一次调用后，同样的工作只占 1 步，剩下的预算能留给自检与验证。
+        editArtifactBatch: async (params: { name: string; edits: Array<{ oldText: string; newText: string }> }) => {
+          const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+          const safeName = path.basename(String(params.name || "").trim());
+          // **同 editArtifact：解析与读改写放进同一个队列条目**，否则两次排队之间
+          // 允许 `create_file` 插进来落成新版本，而这里改的仍是上一版——
+          // 界面只展示最新版，用户看到"一点没变"。
+          return artifactWriteQueue.run(async (): Promise<string> => {
+            const found = await resolveArtifactForTool(dir, safeName);
+            if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+            const resolved = found.path;
+            const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
+            if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
+            // 同单处编辑：与 read_artifact / 预览共用同一个解码函数。
+            const before = decodeTextBytes(await readFile(resolved));
+            const outcome = applyExactEdits(before, params.edits);
+            if (!outcome.ok) {
+              // 失败必须指明是**第几条**、为什么——否则模型不知道从哪一条开始修。
+              const nth = `${outcome.index + 1}/${params.edits.length}`;
+              if (outcome.reason === "empty-old") throw new Error(`第 ${nth} 条修改的 oldText 为空（整批未写入）。`);
+              if (outcome.reason === "not-found") {
+                // 与单处编辑同理：附带最接近的行，避免模型反复重读整个文件。
+                const hint = (outcome.hints ?? []).length > 0
+                  ? `\n文件里跟它最接近的行是：\n${outcome.hints!.map((h) => `  第 ${h.line} 行：${sliceSafe(h.text, 160)}`).join("\n")}\n请照抄其中合适的片段（含缩进）作为该条 oldText，然后重试整批。`
+                  : "";
+                throw new Error(`第 ${nth} 条修改在文件里找不到原文（整批未写入，文件没有任何改动）。内容必须逐字符一致（含缩进）。${hint}`);
+              }
+              const where = outcome.lines.slice(0, 6).join("、");
+              throw new Error(`第 ${nth} 条修改的 oldText 出现了 ${outcome.count} 次（第 ${where} 行），无法确定改哪一处（整批未写入）。请把那条 oldText 连同上下各一行一起贴进去，让它在文件里只匹配一处。`);
+            }
+            await atomicWriteText(resolved, outcome.text);
+            const after = await stat(resolved);
+            // 同单处编辑：用 `countLines`（末尾换行不算额外一行）。
+            const totalLines = countLines(outcome.text);
+            const at = outcome.lines.join("、");
+            // 事件与回执都用 **found.name**（实际改的那份）：用请求名会让卡片标签被打回旧名，
+            // 模型也会以为改的是自己点名的那份（`8dc8c3b` 在单处编辑里修过，批量这条漏了）。
+            notifyArtifactUpdated(resolved, found.name, after.size);
+            agentEditCount += 1;
+            const sizeKb = `${Math.max(1, Math.round(after.size / 1024))}KB`;
+            // 同 `f4b9ca7`：只有 html 才建议自检——`inspect_artifact` 只收 .html，
+            // 对 md/xlsx 建议自检必然吃一次失败调用、白烧一步预算。
+            const nextStep = /\.html?$/i.test(found.name)
+              ? "建议立刻 inspect_artifact 自检一次，确认没有引入新报错。"
+              : "改完可直接告诉用户，或用 read_artifact 复核。";
+            // 同单处编辑：模型把读回结果的行号前缀一起抄进 oldText 时，
+            // `applyExactEdit` 已替它剥掉。批量版原本**丢掉了这条信息**——
+            // 整批都抄行号却全部成功，模型毫不知情，下一批还会继续抄。
+            const gutterNote = outcome.strippedGutter
+              ? "\n（注意：这批 oldText 里带着 read_artifact 的行号前缀（`  42| `），我已自动剥掉后再匹配。以后写 oldText 时不要带行号那一栏。）"
+              : "";
+            return `已应用 ${params.edits.length} 处修改（第 ${at} 行；文件现为 ${totalLines} 行 / ${sizeKb}）${fellBackNote}。${nextStep}${gutterNote}`;
+          });
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。
         updatePlan: async (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => {
@@ -1088,8 +1537,8 @@ function registerIpc(
           // 放在循环内：内容过滤重试会往 effective 追加改写指引，须基于最新历史注入。
           result = await chatAgent(agentOptions, injectWorldState(effective, worldStateText), agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
             sendLlmTool({ tool, input, phase: "start", sessionId: session });
-          }, (tool, summary) => {
-            sendLlmTool({ tool, input: "", phase: "end", result: summary, sessionId: session });
+          }, (tool, summary, ok) => {
+            sendLlmTool({ tool, input: "", phase: "end", result: summary, ok, sessionId: session });
           }, planArg === "plan");
           break;
         } catch (error) {
@@ -1106,12 +1555,19 @@ function registerIpc(
           // 本轮若已经通过 generate_video 建过任务，重试会**把任务再建一遍**——
           // 云端按次计费时等于替用户重复扣费（RB 还会重复扣卡密次数）。
           // 已建任务时不再重试，直接走下面的失败收尾，让用户看到真实原因。
-          if (isContentFilterError(error) && attempts < 3 && agentSent === 0 && agentTaskCount === 0) {
+          // **产物也是副作用，同样不能重放**（与上面 `agentTaskCount` 同一理由）。
+          // 整轮重试会把模型从头再跑一遍，而它这一轮已经 create_file / edit_artifact 过了：
+          // - create_file 会再落一份 `名字 (2).html`（磁盘多一份、卡片多一个旧版本）；
+          // - edit_artifact 更糟——oldText 已经被改掉，重放必然 not-found，
+          //   模型于是开始怀疑自己、换片段重试，把预算烧在"修一个已经修好的东西"上。
+          // 已经产出东西的这一轮，直接如实报错 + 回落普通对话，比悄悄重放更可控。
+          const producedSideEffects = agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0;
+          if (isContentFilterError(error) && attempts < 3 && agentSent === 0 && !producedSideEffects) {
             chunk({ seq: 0, delta: contentFilterNotice(attempts, 3) });
             effective = [...effective, { role: "user", content: CONTENT_FILTER_GUIDANCE }];
             continue;
           }
-          const retryable = attempts < 3 && agentSent === 0 && agentTaskCount === 0 && isNetworkError(error);
+          const retryable = attempts < 3 && agentSent === 0 && !producedSideEffects && isNetworkError(error);
           if (!retryable) break;
         }
       }
@@ -1135,8 +1591,50 @@ function registerIpc(
         return;
       }
       if (agentSent === 0 && result.toolCalls > 0) {
-        // 工具调成功了（任务卡片已经推给渲染端）但模型没再输出收尾文本：不能留空气泡让用户看到"（空回复）"。
-        chunk({ seq: 1, delta: "已按你的要求创建视频生成任务，结果卡片在下方实时显示，也可到「生成工作台」查看。" });
+        // 模型只调了工具、没输出收尾文本：不能留空气泡让用户看到"（空回复）"。
+        //
+        // **文案必须按"本轮实际发生了什么"来说**（实测真机踩到）：原来无条件写
+        // "已按你的要求创建视频生成任务，结果卡片在下方实时显示"，而那一轮模型
+        // 全程只在改 HTML（create_file / edit_artifact_batch），**一个视频任务都没建**——
+        // 用户被告知去下方看根本不存在的卡片。收尾文案说错事，比空着更糟。
+        const outcomes: string[] = [];
+        if (agentTaskCount > 0) outcomes.push(`${agentTaskCount} 个视频生成任务`);
+        if (agentArtifactCount > 0) outcomes.push(`${agentArtifactCount} 个文件`);
+        // **编辑已有产物也必须算进来**（实测复现，probe-edit-only-close）：
+        // `agentArtifactCount` 只在 create_file 里自增，模型"只改文件、不说正文"的一轮
+        // 于是命中 outcomes 为空的分支，对用户说"没有产生可展示的产物"——
+        // 而文件确实被改了、卡片确实更新了。收尾文案说错事比空着更糟。
+        const edits = agentEditCount > 0 ? `改动了 ${agentEditCount} 次文件` : "";
+        const delta = outcomes.length > 0
+          ? `本轮已产出 ${outcomes.join("、")}${edits ? `，并${edits}` : ""}，卡片在下方显示。`
+          : edits
+            ? `本轮${edits}，卡片已同步更新。`
+            : "本轮工具调用已结束，没有产生可展示的产物。";
+        chunk({ seq: 1, delta });
+      }
+      // 撞上工具步数上限：模型还想继续干（最后一步 finishReason 仍是 tool-calls），是上限把它掐断的。
+      // 不说明的话，用户看到的是一段**戛然而止**的回答，会以为软件卡了或模型答完了
+      // （实测 probe-step-limit：打满上限后气泡停在"正在做第 N 步。"，没有任何提示）。
+      // **数字必须来自同一个常量**：上一版在这里写死 10，后来把预算提到 20 时文案就撒了谎。
+      if (result.hitStepLimit) {
+        chunk({ seq: 1, delta: `\n\n---\n（本轮工具调用已达 ${MAX_AGENT_STEPS} 步上限，任务可能还没做完。回复「继续」我就接着往下做；如果已经有可用的产物，也可以直接先看那个。）` });
+      }
+      // **工具调用被整批跳过**：SDK 只把 toolCall 记进历史、**不执行**它
+      // （`onToolExecutionStart/End` 都不触发），于是工具步骤一片空白、步数耗尽。
+      //
+      // 成因有两种，**不能只写一种**（实测踩到）：原先这里一律说"参数被上游截断"，
+      // 但本轮用 mock 复现的三次实际情况都是**参数不符合 schema**（edits 只给 1 条、
+      // duration 给 20 秒、url 没带协议）——按原话术，用户会去做完全无效的补救
+      // （把任务拆小、换输出上限更高的模型），而真正该改的是调用参数。
+      // 现在两条成因都列出来，并把"工具描述里有参数要求"这条可行的检查放在前面。
+      if (result.skippedToolCalls > 0) {
+        // **说出是哪个工具**（实测需求）：只报总数时，模型下一轮不知道该改哪一处参数。
+        const names = result.skippedToolNames ?? [];
+        const which = names.length > 0 ? `（涉及：${names.join("、")}）` : "";
+        chunk({
+          seq: 1,
+          delta: `\n\n---\n（本轮有 ${result.skippedToolCalls} 次工具调用**没有真正执行**${which}。常见原因有两种：① 模型给出的参数不满足工具要求；② 单次输出被上游截断、参数 JSON 不完整。可以回复「继续」让我重试——如果反复出现，就把任务拆小一点（先要一个小样式的页面，再逐步加功能），或换一个输出上限更高的模型。）`
+        });
       }
       // 服务端 usage 落账：本轮实测的输入 token 数 + 当时的消息条数，作为下次压缩判定的锚点。
       // 拿不到 usage 时不写样本——下一轮自动回落到字符估算（估算值不覆盖已有的服务端样本）。
@@ -1250,7 +1748,11 @@ function registerIpc(
     }
     if ([".txt", ".md", ".json", ".csv", ".srt", ".vtt", ".log"].includes(extension)) {
       if (info.size > 2 * 1024 * 1024) throw new Error("文本附件超过 2MB 上限，请只粘贴相关片段。");
-      const raw = await readFile(filePath, "utf8");
+      // **必须容忍非 UTF-8 编码**（GBK / UTF-16，见 `modules/textFile.ts` 的文件头说明）：
+      // 直接按 UTF-8 读不会报错，只会给出一片乱码——用户看不出原因（文件在自己电脑上明明正常），
+      // 模型拿到的也是噪声，只会答非所问。**产物预览走同一个函数**：
+      // 两处各写一遍的话，只会修其中一处（本项目已经因此踩过多次）。
+      const raw = decodeTextBytes(await readFile(filePath));
       // 截断必须**如实上报**：原实现静默 `.slice(0, 100_000)`，用户以为整份文件都发给了模型，
       // 模型也只看到前一段——文件更长时两边都不知道（违反「出错/取舍必须让人看见」）。
       // 同样用 sliceSafe：这段正文会发回模型，不能留孤立代理项。
@@ -1263,16 +1765,28 @@ function registerIpc(
     if (!isAbsolutePath(filePath)) throw new Error("文件路径无效。");
     // 与 h3media 同类防护：只允许在输出目录、ComfyUI 模型目录或本应用产出过的结果路径内定位。
     const settings = await settingsStore.get();
-    const roots = [settings.outputDirectory, settings.comfyuiRoot, path.join(app.getPath("userData"), "artifacts")]
+    const logicalRoots = [settings.outputDirectory, settings.comfyuiRoot, path.join(app.getPath("userData"), "artifacts")]
       .filter((value): value is string => Boolean(value))
       .map((value) => path.resolve(value));
-    const resolved = path.resolve(filePath);
-    const insideRoot = roots.some((rootDir) => {
-      const rel = path.relative(rootDir, resolved);
-      return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-    });
+    /**
+     * **每个根都要同时认"拼接路径"和"realpath"两种写法**（实测回归）：
+     * 产物事件里的 `path` 现在统一是 realpath（见 `saveArtifactFile`），
+     * 而根是用 `app.getPath("userData")` / 设置项**拼接**出来的。当它们本身就在
+     * 符号链接/junction 下（macOS `/var`→`/private/var`、Windows 把 AppData 挪盘）时，
+     * `path.relative(拼接根, realpath候选)` 会算出 `..\..\real\…` → 被判越界，
+     * 用户点 📁「在文件夹中显示」直接报错。
+     *
+     * 两侧都补齐后仍是**包含性校验**（不放宽任何边界）：只接受"解析后确实落在该根之下"。
+     */
+    const roots = [...new Set([
+      ...logicalRoots,
+      ...(await Promise.all(logicalRoots.map((root) => realpath(root).catch(() => root))))
+    ])];
+    // 候选也解析一次（路径可能不存在 → 回落到 resolve，后续的存在性检查会给中文错误）。
+    const resolved = await realpath(filePath).catch(() => path.resolve(filePath));
+    const insideRoot = roots.some((rootDir) => isPathInside(rootDir, resolved));
     // 同 h3media：改过输出目录后，历史结果仍应能"在文件夹中显示"。
-    if (!insideRoot && !knownOutputPaths(orchestrator).has(normalizeForCompare(resolved))) {
+    if (!insideRoot && !(await knownOutputPaths(orchestrator)).has(normalizeForCompare(resolved))) {
       throw new Error("只能打开输出目录或 ComfyUI 模型目录中的位置。");
     }
     // `showItemInFolder` 对**已不存在的路径是静默空操作**：渲染端拿到 ok:true、
@@ -1329,8 +1843,16 @@ function registerIpc(
   // 读取已落盘产物的文本内容：表格/文档预览用（html 走 h3preview 协议，不需要读文本）。
   // 路径白名单与协议一致——只允许 userData/artifacts/ 内、且 realpath 后仍在根内的文件。
   handle("artifact:read", async (_event, filePath: string) => {
-    const resolved = await resolveWithinRoot(path.join(app.getPath("userData"), "artifacts"), String(filePath || ""));
-    if (!resolved) throw new Error("只能读取产物目录内的文件。");
+    // **"文件没了"与"越界"必须分开说**（实测缺口）：旧实现两种都抛
+    // 「只能读取产物目录内的文件」——而最常见的那种是文件已被删除/随会话清理，
+    // 用户看到"权限/路径被拒"只会反复重试或怀疑白名单，永远查不到真实原因。
+    const resolution = await resolveWithinRootDetailed(path.join(app.getPath("userData"), "artifacts"), String(filePath || ""));
+    if (!resolution.ok) {
+      throw new Error(resolution.reason === "missing"
+        ? "这个产物已经不存在了（可能已被删除、随会话清理，或所在目录被移动）。请重新生成一份再预览。"
+        : "只能读取产物目录内的文件。");
+    }
+    const resolved = resolution.path;
     // xlsx 是二进制：表格产物落盘时转成了真 Excel（用户要"能双击打开"）。
     // 预览要的是表格文本，故用同一套 SheetJS 反向转回 CSV——避免"存得下、看不了"。
     if (/\.xlsx$/i.test(resolved)) {
@@ -1356,10 +1878,13 @@ function registerIpc(
           const capped = { ...sheet, "!ref": XLSX.utils.encode_range({ s: range.s, e: { r: range.s.r + MAX_ROWS - 1, c: range.e.c } }) };
           return {
             text: XLSX.utils.sheet_to_csv(capped),
+            // **真实总行数也要回给渲染端**（实测矛盾）：只说"预览仅解析前 2000 行"，
+            // 而表格下方的说明按 `text` 算成"共 2000 行"——用户同时看到 5001 与 2000 两个数字。
+            totalRows: rowCount,
             note: `表格共 ${rowCount} 行，预览仅解析前 ${MAX_ROWS} 行；完整内容可在文件夹中打开`
           };
         }
-        return { text: XLSX.utils.sheet_to_csv(sheet) };
+        return { text: XLSX.utils.sheet_to_csv(sheet), totalRows: rowCount };
       } catch (error) {
         // SheetJS 对损坏文件抛的是英文内部错误（实测 "Unsupported ZIP encryption"）。
         // 预览面板会把它原样显示成"读取失败：Unsupported ZIP encryption"，
@@ -1379,8 +1904,11 @@ function registerIpc(
       try {
         const buffer = Buffer.alloc(MAX_PREVIEW_BYTES);
         const { bytesRead } = await handle.read(buffer, 0, MAX_PREVIEW_BYTES, 0);
-        // 只截到完整字符边界：末尾可能被砍在多字节字符中间。
-        const head = buffer.subarray(0, bytesRead).toString("utf8").replace(/�+$/, "");
+        // **同一个解码函数**（见 `modules/textFile.ts`）：产物是模型写的（UTF-8），
+        // 但用户完全可能用记事本把它另存成 GBK/UTF-16 再回来预览。旧实现直接
+        // `toString("utf8")`，那样存过的 .md/.csv 预览出来是一整片乱码。
+        // 截断只落在完整字符边界上（函数内部处理了末尾的半个字符）。
+        const { text: head } = decodeTextPreview(buffer.subarray(0, bytesRead), MAX_PREVIEW_BYTES);
         // 同 xlsx：截断说明走 `note`。表格预览拿 `text` 直接解析，拼进去会变成一行假数据。
         return {
           text: head,
@@ -1390,7 +1918,7 @@ function registerIpc(
         await handle.close();
       }
     }
-    return { text: await readFile(resolved, "utf8") };
+    return { text: decodeTextBytes(await readFile(resolved)) };
   });
   /**
    * 会话被彻底删除（用户点「彻底删除」或回收站 7 天到期）时清掉它的产物目录。
@@ -1412,10 +1940,13 @@ function registerIpc(
     const root = path.join(app.getPath("userData"), "artifacts");
     const target = path.join(root, artifactSessionDirName(id));
     // 再兜一层：resolve 后必须仍在 artifacts 根之下（规则若被改动，这里也不会越界）。
-    const relative = path.relative(root, path.resolve(target));
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
-    await rm(target, { recursive: true, force: true }).catch(() => undefined);
-    return true;
+    if (!isPathInside(path.resolve(root), path.resolve(target))) return false;
+    // **必须排在写队列里**（实测竞态）：`saveArtifactFile` 也在队列里建目录，
+    // 不串行的话"删目录 → 落盘又建回来"会留下孤儿目录（记录已删、界面打不开、磁盘占着）。
+    return artifactWriteQueue.run(async () => {
+      await rm(target, { recursive: true, force: true }).catch(() => undefined);
+      return true;
+    });
   });
 }
 
@@ -1426,6 +1957,23 @@ function registerIpc(
 
 /** 产物落盘共享逻辑（artifact:save IPC 与 create_file 工具两路复用）：
  * 存 userData/artifacts/<sessionId>/，kind 白名单 html/csv/tsv/md/xlsx；xlsx 走 SheetJS 转 Excel 二进制。 */
+/**
+ * **原子写文本**：先写 `<file>.tmp` 再 rename 覆盖。
+ *
+ * 为什么编辑产物不能用就地 `writeFile`（实测风险，不是理论问题）：
+ * 就地写是"先截断、再写内容"。磁盘满、进程被用户强杀、或机器断电时，
+ * 文件会停在**被截断**的状态——而那是用户唯一的产物副本（界面里没有任何备份版本）。
+ * `settingsStore` / `taskStore` 早就是"先写 .tmp 再 rename"，产物编辑这条路漏了。
+ *
+ * 串行性由调用方保证（`artifactWriteQueue`），这里不重复加锁；
+ * 但仍先把上一次崩溃残留的 `.tmp` 覆盖掉（`writeFile` 默认就是覆盖）。
+ */
+async function atomicWriteText(filePath: string, text: string): Promise<void> {
+  const temporary = `${filePath}.tmp`;
+  await writeFile(temporary, text, "utf8");
+  await rename(temporary, filePath);
+}
+
 async function saveArtifactFile(sessionId: string, name: string, content: string, kind: string): Promise<{ name: string; path: string; size: number }> {
   const extByKind: Record<string, string> = { html: ".html", csv: ".csv", tsv: ".tsv", md: ".md", xlsx: ".xlsx" };
   // **未知 kind 必须明确拒绝，不能静默落成 .html**。
@@ -1447,7 +1995,31 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   const safeName = `${base || "artifact"}${ext}`;
   // 目录名规则与清理共用同一函数（见 artifactDir.ts 的注释）。
   const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(sessionId));
-  await mkdir(dir, { recursive: true });
+  /**
+   * **`mkdir` 必须放进写队列**（实测竞态）：它在队列**之前**执行，而
+   * `artifact:purgeSession` 删目录**不经过队列**。两者交错时：
+   * 删目录 → `mkdir` 又把目录建回来 → 落盘写进一个"会话已经被删掉"的目录，
+   * 于是留下一个**没人认领的孤儿目录**（记录不在，界面打不开，磁盘一直在）。
+   * 把「建目录 + 取路径 + 落盘」整段串起来，删除也进同一条队列即可根治。
+   */
+  const createDir = async () => {
+    await mkdir(dir, { recursive: true });
+    return { dir, realDir: await realpath(dir).catch(() => dir) };
+  };
+  /**
+   * **落盘后统一用 realpath 回报路径**（实测，跨平台真实缺陷）：
+   *
+   * `edit_artifact` 走 `resolveWithinRoot`，它内部 `realpath` 过——所以「更新」事件里的
+   * `path` 是真实路径；而 `create_file` 原本回报的是 `path.join(userData, …)`（**拼接路径**）。
+   * 渲染端按 `a.path === event.path` 精确比对，两者不相等时更新事件**静默匹配不上**：
+   * 卡片大小停在旧值、已打开的预览不重载。
+   *
+   * 什么时候会不相等：userData 落在符号链接/junction 下——
+   * macOS 的 `os.tmpdir()` 就是 `/var/folders/…` → `/private/var/…`，
+   * Windows 把 AppData 挪到别的盘、或在沙箱/容器里跑都很常见。
+   * 探针 `_scratch/probe-artifact-path-form.mjs` 用 junction 稳定复现：
+   * 改动后卡片仍是「1 KB」（应为 20 KB）。
+   */
   // 同名不覆盖：同一会话里连着生成两份"报告.md"时，后者会把前者顶掉，
   // 于是**两张卡片指向同一个文件**、都显示第二版内容（实测 probe-dup-artifact）。
   // 这里探测重名并加 " (2)" / " (3)" 后缀，保证每次落盘都是独立文件。
@@ -1457,22 +2029,34 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   // 前者被静默覆盖，两张卡片显示同一份内容（与 probe-dup-artifact 的现象一样，
   // 只是成因不同）。串行化范围只需覆盖"取路径 + 落盘"这一小段。
   return artifactWriteQueue.run(async () => {
-    const filePath = await uniqueArtifactPath(dir, safeName);
+    // **建目录也在队列里**（见上面 `createDir` 的注释）：否则与删除会话交错，
+    // 会留下"记录已删、目录又活过来"的孤儿产物目录。
+    const { dir: actualDir, realDir } = await createDir();
+    const filePath = await uniqueArtifactPath(actualDir, safeName);
     // 返回的 name 必须取**实际落盘文件名**（可能带 " (2)" 序号）。
     // 用 safeName 会让卡片显示"报告.md"、磁盘上却是"报告 (2).md"——用户按卡片名去找
     // 文件会找不到（实测 probe-dup-xlsx）。
     const finalName = path.basename(filePath);
+    // 回报路径统一成 realpath（见上面 realDir 的注释）：写盘仍用拼接路径（等价），
+    // 但事件里给渲染端的必须是**与 edit_artifact 同一种写法**，否则更新事件匹配不上。
+    const reportedPath = path.join(realDir, finalName);
     if (kind === "xlsx") {
       // SheetJS：CSV 文本 → 工作簿 → xlsx 二进制。用户点名要"能保存成 .xlsx"，纯 CSV 落盘达不到。
       const XLSX = await loadXlsx();
       const book = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(parseCsvRows(content)), "Sheet1");
-      XLSX.writeFile(book, filePath);
+      // **也要原子写**（与 `atomicWriteText` 同理）：`writeFile` 走到一半失败/被杀，
+      // 目标路径上会留下一个**打不开的半截 xlsx**——而这个坏文件已经占住了名字，
+      // 卡片会挂上去、预览会报"表格文件已损坏"，用户以为是我们生成错了。
+      // SheetJS 默认按扩展名判格式，故显式指定 `bookType` 写到 `.tmp`，再 rename。
+      const temporary = `${filePath}.tmp`;
+      XLSX.writeFile(book, temporary, { bookType: "xlsx" });
+      await rename(temporary, filePath);
       const info = await stat(filePath);
-      return { name: finalName, path: filePath, size: info.size };
+      return { name: finalName, path: reportedPath, size: info.size };
     }
-    await writeFile(filePath, content, "utf8");
-    return { name: finalName, path: filePath, size: Buffer.byteLength(content, "utf8") };
+    await atomicWriteText(filePath, content);
+    return { name: finalName, path: reportedPath, size: Buffer.byteLength(content, "utf8") };
   });
 }
 
@@ -1523,6 +2107,108 @@ async function uniqueArtifactPath(dir: string, fileName: string): Promise<string
 }
 
 /**
+ * 四个产物工具（inspect / read / edit / editBatch）共用的**文件名解析**。
+ *
+ * 规则：**同一主名下永远操作最新版本**（与界面折叠规则保持一致）。
+ *
+ * 为什么不能"精确命中优先"（实测真机 + 探针 probe-name-fallback）：
+ * 模型修完 bug 会重新 `create_file` 同名文件，落成 `名字 (2).html`；
+ * 而界面把同名多版本**折叠成只显示最新一版**。模型手里往往还留着旧名字：
+ *
+ *     模型：edit_artifact("回落测试.html", "v2", "v3")
+ *     实际：精确命中旧文件 → 改了旧版
+ *     界面：同名折叠只显示 "回落测试 (2).html" → **毫无变化**
+ *
+ * 用户对着没变的文件判断"还是坏的"，模型坚信自己改好了——两边看的是两个文件。
+ * 所以只要同主名存在更新的版本，就操作那一份，它才是界面上展示给用户的那份。
+ *
+ * `fellBack` 让调用方明确告知模型实际发生了什么，且**必须区分四种成因**
+ * （措辞统一在 `artifactDir.describeArtifactFallback`）：
+ * - `"missing"`：名字根本不存在（模型记错了文件名）；
+ * - `"stale"`：名字存在，但同主名有更新的版本（模型拿着旧名字）；
+ * - `"ext"`：名字没写扩展名，补全后才找到（`科技新闻` → `科技新闻.html`）；
+ * - `"alias"`：写的是 .csv/.tsv，磁盘上落成了 .xlsx（表格统一存 xlsx）。
+ * 四者的建议完全不同：前者该核对文件名、中者该说"那份已过期"、
+ * 后两者只需告诉它"我给你补了/换成了哪个扩展名"，**不能**说成"不存在"——
+ * 模型点名的那份明明就在，说"不存在"只会让它去重新生成一份重复产物。
+ */
+async function resolveArtifactForTool(
+  dir: string,
+  requestedName: string
+): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" | "ext" | "alias" } | undefined> {
+  // **不带扩展名也要能解析**（实测契约不一致）：`create_file` 的参数说明是
+  // "文件名，不含扩展名（如'科技新闻'）"，而 read/edit 的说明是"带扩展名"。
+  // 模型按前者的写法调用后者时（read_artifact("科技新闻")），精确匹配与同主名回落
+  // 都按空扩展名比对 → 必然返回 undefined → 报"本会话里找不到产物"。
+  // 一份文件明明在，却被说成不存在，模型只会去重新 create_file 生成重复产物。
+  // 候选生成规则（含"有扩展名就只试它"）抽在 artifactDir.artifactNameCandidates，可单测。
+  const candidates = artifactNameCandidates(requestedName);
+
+  let staleMatch: { name: string; path: string } | undefined;
+  for (const candidate of candidates) {
+    const exact = await resolveWithinRoot(dir, path.join(dir, candidate));
+    const latest = await latestSiblingArtifact(dir, candidate);
+    // 最新版优先于精确命中：改旧版等于改给幽灵看（界面根本不展示它）。
+    if (latest && (!exact || latest.path !== exact)) {
+      if (!staleMatch) staleMatch = { name: latest.name, path: latest.path };
+      continue;
+    }
+    if (exact) {
+      // 命中的是补全/别名后的候选 → 必须区分成因，不要说成"名字不存在"。
+      // `alias`：请求写的是 .csv/.tsv，实际落成 .xlsx（表格统一存 xlsx）——
+      // 这时说"没带扩展名"是错的（模型写对了扩展名，只是落盘时被改写）。
+      if (candidate === requestedName) return { name: candidate, path: exact, fellBack: false };
+      const requestedExt = path.extname(requestedName).toLowerCase();
+      const isAlias = (SHEET_REQUEST_EXTS as readonly string[]).includes(requestedExt)
+        && path.extname(candidate).toLowerCase() === ".xlsx";
+      return { name: candidate, path: exact, fellBack: isAlias ? "alias" : "ext" };
+    }
+  }
+  // 只有在**没有任何精确命中**时才回落到"同主名最新版"。
+  if (staleMatch) return { ...staleMatch, fellBack: "stale" };
+  return undefined;
+}
+
+/**
+ * 解析产物文件，但**排进写队列**。
+ *
+ * 为什么必须排队（实测竞态，`probe-same-step-create-inspect`）：AI SDK 在**同一个 step**
+ * 里并行执行多个 tool call，而模型很自然地写成"写完立刻自检"——一次响应里同时给出
+ * `create_file` 与 `inspect_artifact`。`create_file` 的「建目录 + 落盘」在
+ * `artifactWriteQueue` 里，解析原本在队列**之外**，于是自检可能先跑：
+ * 目录里还没有那个文件 → 回执「自会话里找不到产物」，而紧接着 create_file 却成功了。
+ * 模型只能多花一步重试（预算本就紧），或干脆放弃自检。
+ *
+ * 排进同一条队列后，解析必然排在落盘之后。解析本身很快，占队列时间可以忽略。
+ */
+function resolveArtifactQueued(
+  dir: string,
+  requestedName: string
+): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" | "ext" | "alias" } | undefined> {
+  return artifactWriteQueue.run(() => resolveArtifactForTool(dir, requestedName));
+}
+
+/**
+ * 找不到精确文件名时，找回**同一主名的最新版本**（`报告.html` → `报告 (3).html`）。
+ *
+ * 选版规则在 `artifactDir.pickLatestVersion`（纯函数、可单测，按数字比版本号）；
+ * 这里只负责读目录 + 过白名单。**必须过白名单**：文件名是从目录列举出来的，
+ * 仍要防"目录里被放了软链指向外部"。
+ */
+async function latestSiblingArtifact(dir: string, fileName: string): Promise<{ name: string; path: string } | undefined> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return undefined;
+  }
+  const name = pickLatestVersion(entries, fileName);
+  if (!name) return undefined;
+  const resolved = await resolveWithinRoot(dir, path.join(dir, name));
+  return resolved ? { name, path: resolved } : undefined;
+}
+
+/**
  * 加载 SheetJS（xlsx）。
  *
  * **必须取 default**：`await import("xlsx")` 返回的命名空间里，cjs-module-lexer 只识别出
@@ -1538,11 +2224,22 @@ async function loadXlsx(): Promise<typeof import("xlsx")> {
 
 // h3media / showItem 白名单的补充放行集合：本应用自己产出过的结果路径。// 用户改过输出目录后，历史结果仍留在旧目录；只认当前目录会让历史视频全部变成打不开的死链。
 // 安全性不降：放行的只是任务记录里记着的、由本应用写出的文件，渲染端仍无法随意读本地文件。
-function knownOutputPaths(orchestrator: GenerationOrchestrator): Set<string> {
+//
+// **必须同时收录"拼接路径"与"realpath"两种写法**（实测回归）：任务记录里存的是当时
+// `path.join(outputDirectory, …)` 的结果；而调用方现在可能拿 realpath 来比
+// （产物事件已统一成 realpath，`showItem` 的候选也 realpath 过）。
+// 当输出目录本身在符号链接/junction 下（macOS `/var`→`/private/var`、Windows 挪盘）时，
+// 两种写法不相等 → 历史文件被判越界，📁 与 h3media 都会拒绝。放行集合本身仍然只含
+// 任务记录里的那些文件，安全性不变。
+async function knownOutputPaths(orchestrator: GenerationOrchestrator): Promise<Set<string>> {
   const paths = new Set<string>();
-  for (const task of [...orchestrator.list(), ...orchestrator.listDeleted()]) {
-    if (task.outputPath) paths.add(normalizeForCompare(task.outputPath));
-  }
+  const recorded = [...orchestrator.list(), ...orchestrator.listDeleted()]
+    .map((task) => task.outputPath)
+    .filter((value): value is string => Boolean(value));
+  for (const filePath of recorded) paths.add(normalizeForCompare(filePath));
+  // realpath 只在文件仍存在时成功；已删除的历史文件退回拼接写法即可。
+  const real = await Promise.all(recorded.map((filePath) => realpath(filePath).catch(() => undefined)));
+  for (const filePath of real) if (filePath) paths.add(normalizeForCompare(filePath));
   return paths;
 }
 
@@ -1589,8 +2286,7 @@ async function unlinkIfInside(roots: string[], filePath: string): Promise<void> 
     } catch {
       continue; // 该根目录不存在（用户删了旧目录）：跳过
     }
-    const relative = path.relative(rootReal, targetReal);
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    if (!isPathInside(rootReal, targetReal)) continue;
     await unlink(targetReal).catch(() => undefined);
     return;
   }

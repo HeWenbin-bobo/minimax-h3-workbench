@@ -3,10 +3,12 @@ import type { ChatMessage } from "../../shared/types";
 import {
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   buildCompactedHistory,
+  capForSummary,
   isSummaryMessage,
   SUMMARY_PREFIX,
   SUMMARIZATION_PROMPT,
-  summarizeHistory
+  summarizeHistory,
+  summarizeInputBudget
 } from "./compaction";
 
 const user = (content: string): ChatMessage => ({ role: "user", content });
@@ -142,6 +144,85 @@ describe("summarizeHistory 超时纪律", () => {
     expect(text).toBe("摘要");
     expect(seen).toBeDefined();
     expect(seen).not.toBe(caller.signal);
+    vi.unstubAllGlobals();
+  });
+});
+
+// 实测推导的必然路径：摘要请求原本把**整段历史**原样发出，而触发压缩的前提
+// 恰恰是"历史太大"——于是超窗那一轮：主请求被拒 → 记 forceCompact → 压缩启动 →
+// 摘要请求发同一份超大历史 → 同样被拒 → 返回空串 → 上层写入"此前对话细节已丢失"。
+describe("摘要请求的输入裁剪（capForSummary）", () => {
+  it("超预算时从最新往回保留，并标记 truncated", () => {
+    const messages = [user("x".repeat(4_000)), user("y".repeat(4_000)), user("最新的一条")];
+    const out = capForSummary(messages, 1_500);
+    // 最后一条一定保住（摘要的用途是"接着往下做"）
+    expect(out.messages[out.messages.length - 1].content).toBe("最新的一条");
+    // 装不下的是**截断**而非整条丢弃，所以 droppedCount 可能是 0——
+    // 但 `truncated` 必须为真，否则调用方不会在提示词里说明"历史不完整"。
+    expect(out.truncated).toBe(true);
+    expect(out.messages.length).toBeGreaterThan(0);
+  });
+
+  it("整条装不下时才计入 droppedCount（省略了多少条）", () => {
+    // 多条小消息：只保留最后两条，前面的整条被丢弃
+    const messages = Array.from({ length: 10 }, (_, i) => user(`第 ${i + 1} 条`.repeat(200)));
+    const out = capForSummary(messages, 400);
+    expect(out.droppedCount).toBeGreaterThan(0);
+    expect(out.truncated).toBe(true);
+    expect(out.messages[out.messages.length - 1].content).toContain("第 10 条");
+  });
+
+  it("预算够时原样返回（droppedCount = 0、truncated = false）", () => {
+    const messages = [user("短"), assistant("也短")];
+    const out = capForSummary(messages, 10_000);
+    expect(out.droppedCount).toBe(0);
+    expect(out.truncated).toBe(false);
+    expect(out.messages).toBe(messages);
+  });
+
+  it("单条就超预算时截断它而不是返回空", () => {
+    const out = capForSummary([user("z".repeat(100_000))], 1_000);
+    expect(out.messages).toHaveLength(1);
+    expect(out.messages[0].content.length).toBeLessThan(100_000);
+    expect(out.messages[0].content).toContain("（已截断）");
+    expect(out.truncated).toBe(true);
+  });
+
+  it("输入预算按模型窗口缩放，且不低于 8000", () => {
+    expect(summarizeInputBudget("deepseek-v4")).toBeGreaterThanOrEqual(8_000);
+    expect(summarizeInputBudget("gpt-5")).toBeGreaterThan(summarizeInputBudget("deepseek-v4"));
+  });
+
+  // 两种"没看到完整历史"都要在提示词里说清：① 整条被丢弃（前面 N 条）；
+  // ② 单条被截断（最早那条只给了一半）。只判 droppedCount 会漏掉 ②。
+  it("整条被丢弃时提示词说明「前面 N 条未能提供」", async () => {
+    let body: { messages?: Array<{ role: string; content: string }> } = {};
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: "摘要" } }] }), { status: 200 });
+    }));
+    // deepseek 预算 38400 token；构造 60 条各约 1000 token → 必然丢弃前面的
+    await summarizeHistory(
+      { baseUrl: "https://llm.test/v1", apiKey: "k", model: "deepseek-v4", provider: "custom", systemPrompt: "" } as never,
+      Array.from({ length: 60 }, (_, i) => user(`消息 ${i} ` + "x".repeat(4_000)))
+    );
+    const prompt = body.messages?.[body.messages.length - 1]?.content ?? "";
+    expect(prompt).toContain("未能提供给你");
+    vi.unstubAllGlobals();
+  });
+
+  it("只有单条被截断时，提示词也要说明「最早的内容不完整」", async () => {
+    let body: { messages?: Array<{ role: string; content: string }> } = {};
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: "摘要" } }] }), { status: 200 });
+    }));
+    await summarizeHistory(
+      { baseUrl: "https://llm.test/v1", apiKey: "k", model: "deepseek-v4", provider: "custom", systemPrompt: "" } as never,
+      [user("x".repeat(400_000)), user("最近")]
+    );
+    const prompt = body.messages?.[body.messages.length - 1]?.content ?? "";
+    expect(prompt).toContain("不完整");
     vi.unstubAllGlobals();
   });
 });

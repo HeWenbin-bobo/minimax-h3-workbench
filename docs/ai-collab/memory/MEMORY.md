@@ -1,7 +1,7 @@
 # Memory Index
 
 - [MiniMax H3 Workbench 项目](minimax-h3-workbench-project.md) — fork 仓库、自动更新发版流程（tag 即发布）、本机 RTX 5090 D 硬件
-- [游乐场分支状态](playground-branch-status.md) — **v0.3.0 已发布**（2026-10-18）；`feature/agent-iteration` 379 笔已 squash 合入 `main` 并推送；549 项单测；含换机脱敏约定
+- [游乐场分支状态](playground-branch-status.md) — `main` = v0.3.0（`c708747`）；`feature/pelican-exploration-2026-10-19` 201 笔**未推送**；789 项单测；含第八批「工具 schema 硬校验打死整轮」的系统化教训
 - [环境事实要走对话片段](codex-world-state-channel.md) — **环境事实拼进 system prompt 会被模型无视（实测 6 通道全失败），必须作为 user 片段注入**
 - [智能体差距在提示词工程](agent-prompt-engineering-leverage.md) — 模型对工具调用的信任远高于文字约定；产物能力必须工具化（create_file 实证）
 - [Codex harness 移植](codex-harness-port.md) — 8 笔提交落地：提示词分层/world state 差异注入/计划模式/历史规范化/每轮快照/错误恢复/token 层+暗色主题。含"建了模块≠接线了"的教训
@@ -10,3 +10,4 @@
 - [RB 后端实测](minimax-h3-real-backend-testing.md) — 瞬映 RB 云生成的真实连通性与超时特性
 - [安装包体积预算](minimax-h3-size-budget.md) — 评估新依赖时的体积基线
 - [RB 后端进行中](rb-backend-wip.md) — RB 适配器的未完成事项
+- [智能体自检自己写的网页](agent-self-check-design.md) — 必须报文件身份 / 采样像素堵白屏假通过 / 同一判定写两处会漏一处（鹈鹕案例真机）

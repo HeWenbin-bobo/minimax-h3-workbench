@@ -143,6 +143,26 @@ describe("searchWeb", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("blocked", { status: 403 })));
     await expect(searchWeb("查询", {})).rejects.toThrow(/免 key 搜索未取到结果[\s\S]*配置搜索 API/);
   });
+
+  // 实测缺口：旧实现是 `return formatResults(await searchViaApi(...))`——只要用户配过搜索 API，
+  // 它一旦失败（500 / 超时 / 额度用尽 / key 失效），整次搜索就直接抛错，
+  // **完全不回落**到明明可用的浏览器渲染链路。用户看到「搜索请求失败：500」以为网络坏了，
+  // 而应用其实有备用通道。API 只该是"优先尝试"。
+  it("搜索 API 请求失败时，回落到浏览器渲染", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    const text = await searchWeb("查询", {
+      apiBaseUrl: "https://search.test",
+      apiKey: "k",
+      renderHtml: async () => bingHtml
+    });
+    expect(text).toContain("科技新闻_央视网 (cctv.com)");
+  });
+
+  it("搜索 API 失败且无其它通道时，错误里说明是 API 失败", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    await expect(searchWeb("查询", { apiBaseUrl: "https://search.test", apiKey: "k" }))
+      .rejects.toThrow(/搜索 API/);
+  });
 });
 
 // 回归：Bing 实际输出常用**复合 class**（b_algo b_algoBorder）或单引号。
@@ -201,6 +221,18 @@ describe("parseBing class 匹配稳健性", () => {
     expect(items).toHaveLength(1);
     expect(items[0].url).toBe("https://x.com");
     expect(items[0].title).toBe("标题");
+  });
+
+  // 实测：摘要截断用裸 `slice(0, 200)` 会切开 emoji 的代理对，
+  // 留下孤立高代理项——拼进 web_search 回执后渲染成 `�`，模型读到的是坏字符。
+  // 中英混排的真实摘要切点不一定是偶数，这条一定会踩到（探针：末码元 d83d）。
+  it("摘要截断到 200 字符时不切开 emoji 的代理对", () => {
+    const body = `摘${"😀".repeat(200)}`; // 前置一个单码元字符，把切点挪成奇数
+    const html = `<ol><li class="b_algo"><h2><a href="https://x.com">标题</a></h2><p>${body}</p></li></ol>`;
+    const snippet = parseBing(html)[0]?.snippet ?? "";
+    const last = snippet.charCodeAt(snippet.length - 1);
+    expect(last >= 0xd800 && last <= 0xdbff, `末码元 ${last.toString(16)} 是孤立高代理项`).toBe(false);
+    expect(snippet.length).toBeLessThanOrEqual(200);
   });
 });
 

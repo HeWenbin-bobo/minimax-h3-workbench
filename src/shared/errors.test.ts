@@ -28,6 +28,27 @@ describe("describeError", () => {
     expect(text).toContain("请检查地址");
   });
 
+  // **cause 非空 ≠ 网络错误**（实测缺口）。业务代码普遍用 `new Error(msg, { cause })`，
+  // AI SDK 的 JSONParseError 也把 SyntaxError 塞在 cause 里（上游返回 HTML 错误页时）。
+  // 旧实现只要 `cause.code ?? cause.message` 非空就拼成「网络连接失败」，
+  // 用户被引去查端口，真实原因（配额用尽 / 被网关拦截）一个字都看不到。
+  it("业务异常带自己的 cause 时不误报成网络错误", () => {
+    const quota = new Error("保存失败", { cause: Object.assign(new Error("配额已用尽"), { code: "ERR_QUOTA" }) });
+    expect(describeError(quota, "兜底")).toBe("保存失败");
+    expect(isNetworkError(quota)).toBe(false);
+  });
+
+  it("上游返回 HTML 错误页（AI_JSONParseError）时不报成网络故障", () => {
+    const jsonParse = Object.assign(
+      new Error("JSON parsing failed: Text: <html><body>502 Bad Gateway</body></html>"),
+      { name: "AI_JSONParseError", cause: new SyntaxError("Unexpected token '<'") }
+    );
+    const text = describeError(jsonParse, "兜底");
+    expect(text).not.toContain("网络连接失败");
+    expect(text).not.toContain("请检查地址");
+    expect(isNetworkError(jsonParse)).toBe(false);
+  });
+
   // fetch 对被禁端口（WHATWG bad port 清单）直接拒绝，抛的是**无 code**、
   // cause.message 为 "bad port" 的 TypeError。实测（probe-badport）未收录时界面显示
   // 「网络错误 bad port」——中英混排，且用户不知道是自己填的端口有问题。

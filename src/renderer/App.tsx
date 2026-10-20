@@ -507,7 +507,15 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
     const group = groups.get(task.parentId);
     if (group) group.push(task); else groups.set(task.parentId, [task]);
   }
-  const daysLeft = (iso: string) => Math.max(0, Math.ceil((retentionMs - (Date.now() - new Date(iso).getTime())) / 86_400_000));
+  // **脏时间戳会显示「NaN 天后自动清除」**（实测）：`group[0].deletedAt || group[0].updatedAt`
+  // 可能两者都缺（旧版本记录）、或是个解析不出来的字符串。`Math.max(0, Math.ceil(NaN))` 仍是 NaN。
+  // 拿不到可信时间时返回 undefined，调用方据此不显示"还剩几天"，而不是显示一个假数字。
+  const daysLeft = (iso: string | undefined): number | undefined => {
+    if (!iso) return undefined;
+    const time = new Date(iso).getTime();
+    if (!Number.isFinite(time)) return undefined;
+    return Math.max(0, Math.ceil((retentionMs - (Date.now() - time)) / 86_400_000));
+  };
   const notifyChanged = () => window.dispatchEvent(new Event("h3-tasks-changed"));
   // 回收站两个操作同样要兜住 IPC reject：否则点了没反应，也没有任何提示。
   async function restore(ids: string[]) {
@@ -539,9 +547,10 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
     {Array.from(groups.values()).map((group) => {
       const ids = group.map((t) => t.id);
       const deletedAt = group[0].deletedAt || group[0].updatedAt;
+      const left = daysLeft(deletedAt);
       return <article key={group[0].parentId} className="trash-item">
         <div><strong>{sliceSafe(group[0].prompt, 40) || "未命名项目"}</strong>
-          <small>{group.length} 条 · {daysLeft(deletedAt)} 天后自动清除</small></div>
+          <small>{group.length} 条{left === undefined ? "" : ` · ${left} 天后自动清除`}</small></div>
         <div className="trash-actions">
           <button className="text-button" onClick={() => restore(ids)}>恢复</button>
           {/* 「彻底删除」会连输出视频一起删，**不可逆**。此前是单击即生效，
@@ -1022,6 +1031,24 @@ function normalizeDeletedAt(value: unknown): string | undefined {
   return new Date().toISOString();
 }
 
+/**
+ * 产物 kind 的归一化（读取侧）。
+ *
+ * 为什么需要：预览面板三个分支全是 `artifact.kind === "html" / "sheet" / "doc"` 的
+ * **精确比对**，任何其它值都会让三个分支全不命中——用户点「预览」看到一片空白面板，
+ * 既没有报错也没有内容。而 localStorage 是外部数据（旧版本写脏、手改、半截写入）。
+ *
+ * 判据：认得的三个值原样保留；否则**按文件名扩展名推断**；再推不出来按 doc 兜底
+ * （文档预览是纯文本渲染，最不容易出错）。
+ */
+function normalizeArtifactKind(value: unknown, name: unknown): ArtifactKind {
+  if (value === "html" || value === "sheet" || value === "doc") return value;
+  const lower = typeof name === "string" ? name.toLowerCase() : "";
+  if (/\.html?$/.test(lower)) return "html";
+  if (/\.xlsx?$/.test(lower)) return "sheet";
+  return "doc";
+}
+
 /** 读盘后的会话归一化。**导出以便单测**：坏元素的容错逻辑读代码看不出来，必须能断言。 */
 export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
   if (!Array.isArray(raw)) return [];
@@ -1119,9 +1146,46 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
         artifacts: asArray<NonNullable<PlaygroundMessage["artifacts"]>[number]>(rest.artifacts)?.filter(
           (a) => Boolean(a) && typeof a === "object" && typeof (a as { name?: unknown }).name === "string"
             && typeof (a as { path?: unknown }).path === "string"
-        )
+          // **`kind` 也要归一**（实测缺口）：预览面板三个分支全是
+          // `artifact.kind === "html" / "sheet" / "doc"` 的精确比对，而这里只校验了
+          // name/path —— 旧版本写进去的未知 kind（拼错、数字、缺失）会让
+          // **三个分支全不命中**：用户点「预览」看到一片空白面板，没有任何报错。
+          // （`size` 的脏值不用在这里处理：`sizeLabel(unknown)` 对非有限数字返回空串。）
+        )?.map((a) => ({ ...a, kind: normalizeArtifactKind(a.kind, a.name) }))
       };
-      return migrated.streaming ? { ...migrated, streaming: false, toolSteps: undefined } : migrated;
+      // `questions`（挂起的选择题）同样不能跨重启保留：它靠主进程内存里的
+      // `questionBridge` 兑现，重启后 requestId 全部失效——卡片还在、点了永远无效。
+      // 旧版本已经把这种数据写进过 localStorage，故读取侧也要剥。
+      return migrated.streaming || migrated.questions
+        ? { ...migrated, streaming: false, toolSteps: undefined, questions: undefined }
+        : migrated;
+    })
+  }));
+}
+
+/**
+ * 落盘前剥掉**瞬态字段**（`toolSteps` / `streaming`）。
+ *
+ * 读取侧（`normalizeStoredSessions`）本来就会强制剥离这两项，但**写入侧一直没剥**——
+ * 于是每条消息的工具日志（一次多步任务能攒二三十行）被原样写进 localStorage。
+ * 配额只有 5–10MB，长会话里工具日志是纯浪费：读回来立刻被丢掉，却先占了一次配额，
+ * 顶到上限时用户看到的是"本地存储空间不足，最近的对话可能无法保存"。
+ *
+ * 内存态**不动**（界面还要显示步骤条），只影响写到磁盘的那份拷贝。
+ *
+ * **`questions` 也必须剥掉**（实测复现的形状）：挂起的选择题靠主进程内存里的
+ * `questionBridge` 兑现，重启后那批 requestId 全部失效。卡片留在界面上，
+ * 用户点「确认」只会得到"这组问题已经超时或结束了"，然后卡片才消失——
+ * 一个永远点不动的控件比没有更糟。读取侧（`normalizeStoredSessions`）也会再兜一次，
+ * 兼容旧版本已经写进去的数据。
+ */
+export function stripTransientForPersist(sessions: PlaygroundSession[]): PlaygroundSession[] {
+  return sessions.map((session) => ({
+    ...session,
+    messages: session.messages.map((msg) => {
+      if (!msg.streaming && !msg.toolSteps && !msg.questions) return msg;
+      const { toolSteps: _steps, streaming: _streaming, questions: _questions, ...rest } = msg;
+      return rest;
     })
   }));
 }
@@ -1330,7 +1394,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     // 不兜的话 effect 直接抛异常 → 整个 PlaygroundPage 崩溃、界面塌成空白，
     // 用户还不知道会话其实没存下来（实测复现）。
     try {
-      localStorage.setItem(pgSessionsKey, JSON.stringify(data));
+      localStorage.setItem(pgSessionsKey, JSON.stringify(stripTransientForPersist(data)));
       storageWarnedRef.current = false; // 写成功即复位，下次真失败时还能再提醒一次
     } catch {
       if (!storageWarnedRef.current) {
@@ -1345,7 +1409,19 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 按"最近使用"裁剪，且绝不丢弃正在生成回复的会话——否则一段正在跑的对话会被静默砍掉。
   useEffect(() => {
     const capped = sessions.length > PG_SESSION_CAP ? capSessions(sessions, generatingIds) : sessions;
-    if (capped !== sessions) setSessions(capped);
+    if (capped !== sessions) {
+      // **被裁掉的会话，产物目录也要清**（实测泄漏）：清理只覆盖「用户彻底删除」与
+      // 「回收站 7 天过期」两条路径，而这第三条（超出 50 个上限被淘汰）从来没走过
+      // `purgeSessionArtifacts` —— 会话记录从 localStorage 消失、界面再也打不开，
+      // 但 `userData/artifacts/<sessionId>/` 一直躺在磁盘上（模型一个 3D 页面就是几百 KB）。
+      // 副作用必须放在 updater **之外**（React 开发模式会重复调用 updater）。
+      const keptIds = new Set(capped.map((s) => s.id));
+      for (const session of sessions) {
+        if (keptIds.has(session.id)) continue;
+        void window.h3.purgeSessionArtifacts(session.id).catch(() => undefined);
+      }
+      setSessions(capped);
+    }
     // 空对话不落盘：关软件即"永久删除"（用户要求——空状态只是临时草稿）；正在生成回复的空壳除外（防截断）。
     persistPendingRef.current = capped.filter((s) => s.messages.length > 0 || generatingIds.includes(s.id));
     // 已有排期就只更新待写数据（run-once timer），避免每个 chunk 都重置计时器
@@ -1376,6 +1452,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       open_page: "打开网页",
       create_file: "生成文件",
       inspect_artifact: "自检页面",
+      read_artifact: "读取文件",
+      edit_artifact: "修改文件",
+      edit_artifact_batch: "批量修改文件",
       update_plan: "更新步骤清单",
       request_user_input: "向你提问"
     };
@@ -1389,13 +1468,21 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         const summary = (event.result ?? "完成").replace(/\s+/g, " ").trim();
         const shortSummary = summary.length > 60 ? `${sliceSafe(summary, 60)}…` : summary;
         if ((event.phase ?? "start") === "end") {
-          return { ...msg, toolSteps: [...steps, `✓ ${name}完成（${shortSummary}）`] };
+          // 成败用结构化字段，不靠摘要文本猜："完成"指工具调用结束，不代表操作成功。
+          // 实测踩到：edit_artifact 拒绝歧义编辑时曾渲染成 `✓ 修改文件完成（oldText 出现了 2 次…）`。
+          // **失败时不要再加"失败"前缀**：摘要本身已经是"修改文件失败：…"，
+          // 再包一层就成了 `✕ 修改文件失败（修改文件失败：…）`（探针里看到的重复）。
+          // 缺省视为成功（兼容没有该字段的旧事件）。
+          return { ...msg, toolSteps: [...steps, event.ok === false ? `✕ ${shortSummary}` : `✓ ${name}完成（${shortSummary}）`] };
         }
         const label = event.tool === "web_search" ? `→ 正在搜索：${event.input}`
           : event.tool === "generate_video" ? "→ 正在创建视频生成任务…"
             : event.tool === "open_page" ? `→ 正在打开网页：${event.input}`
               : event.tool === "create_file" ? "→ 正在生成文件…"
                 : event.tool === "inspect_artifact" ? `→ 正在运行页面自检：${event.input}`
+                  : event.tool === "read_artifact" ? `→ 正在读取文件：${event.input}`
+                    : event.tool === "edit_artifact" ? `→ 正在修改文件：${event.input}`
+                      : event.tool === "edit_artifact_batch" ? `→ 正在批量修改：${event.input}`
                   : event.tool === "update_plan" ? "→ 正在更新步骤清单…"
                   : event.tool === "request_user_input" ? "→ 正在向你提问…"
                     : `→ ${name}中…`;
@@ -1507,10 +1594,37 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const offArtifact = window.h3.onLlmArtifact((event) => {
       const targetId = event.sessionId;
       if (!targetId) return;
-      setSessions((all) => patchLast(all, targetId, (msg) => ({
-        ...msg,
-        artifacts: [...(msg.artifacts ?? []), { name: event.name, path: event.path, size: event.size, kind: event.kind }]
-      })));
+      // **更新要扫整个会话，不能只看最后一条消息**：
+      // 模型在**新一轮**里改上一轮产出的文件时（"把刚才那个页面再改一下"），
+      // 那张卡片挂在更早的助手消息上。若仍用 patchLast，map 找不到匹配项 →
+      // 静默什么都不做，旧卡片永远停在旧大小。新建才追加到当前（最后一条）消息。
+      if (event.updated) {
+        setSessions((all) => all.map((session) => session.id !== targetId ? session : {
+          ...session,
+          messages: session.messages.map((msg) => {
+            const existing = msg.artifacts ?? [];
+            if (!existing.some((a) => a.path === event.path)) return msg;
+            return {
+              ...msg,
+              artifacts: existing.map((a) => a.path === event.path
+                ? { ...a, name: event.name, size: event.size, kind: event.kind }
+                : a)
+            };
+          })
+        }));
+      } else {
+        setSessions((all) => patchLast(all, targetId, (msg) => ({
+          ...msg,
+          artifacts: [...(msg.artifacts ?? []), { name: event.name, path: event.path, size: event.size, kind: event.kind }]
+        })));
+      }
+      // 已打开的预览面板同步换一份引用：html 走 URL 加载，path 不变就**不会重载**，
+      // 用户会继续看到改动前的旧画面（真机上会误判"还是坏的"）。
+      if (event.updated) {
+        setPreview((current) => current && current.path === event.path
+          ? { ...current, name: event.name, size: event.size, revision: (current.revision ?? 0) + 1 }
+          : current);
+      }
     });
     return () => { offChunk(); offDone(); offTasks(); offTool(); offCompaction(); offPlan(); offQuestion(); offArtifact(); };
   }, []);
@@ -1753,7 +1867,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     } finally {
       setGeneratingIds((all) => all.filter((id) => id !== activeId));
       sendingRef.current.delete(activeId);
-      setSessions((all) => patchLast(all, activeId, (msg) => ({ ...msg, streaming: false })));
+      // **主动停止要留下说明**（实测）：一个字都还没吐出来就点停止时，
+      // 气泡会落到「（空回复）」——看起来像软件坏了，其实是用户自己停的。
+      // 已经有内容时不动它（不要让"停止"覆盖已到的回复）。
+      setSessions((all) => patchLast(all, activeId, (msg) => (
+        msg.streaming === false
+          ? msg
+          : { ...msg, streaming: false, content: msg.content || "（已停止生成）" }
+      )));
     }
   }
 
@@ -1983,14 +2104,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
                 // 优先用主进程推来的已落盘产物（元数据，内容在磁盘上）。
                 // 回落到扫描正文围栏：兼容历史消息，以及模型没用工具、直接在回复里写文件内容的老路径。
                 if (msg.role === "assistant" && msg.artifacts?.length) {
-                  return msg.artifacts.map((a, i) => <PgArtifactCard
-                    key={`${msg.id}-art-${i}`}
-                    kind={a.kind}
-                    saved={{ name: a.name, path: a.path, size: a.size, kind: a.kind, content: "" }}
+                  return <PgArtifactList
+                    items={msg.artifacts}
                     sessionId={activeId}
                     onPreview={setPreview}
                     onError={onError}
-                  />);
+                  />;
                 }
                 // 产物三探测（html > 表格 > 文档）：流式未结束先不亮，避免半截内容。
                 const artifact = msg.role === "assistant" && !msg.streaming ? extractArtifact(msg.content) : undefined;
@@ -2110,10 +2229,44 @@ function clampDuration(duration: number, options: number[]): number {
 }
 
 // 游乐场会话回收站：悬浮面板展示已删除会话（保留 7 天），支持恢复 / 彻底删除。
+/**
+ * 切出消息里的**围栏代码块**（`{ lang, body }` 列表）。
+ *
+ * 为什么不用 `content.matchAll(/```(\w*)\r?\n([\s\S]*?)```/g)`（实测缺陷）：
+ * 那个正则只认三个反引号，而用**四个反引号**包住三个反引号的写法
+ * （官方 Markdown 用来"在正文里教别人写代码块"）会在内层三个反引号处**提前闭合**：
+ * 一个含代码示例的 4 反引号 html 页面会被截成 32 个字符的半截 HTML，
+ * 然后**真的落盘**成一张坏掉的产物卡片。
+ * 规则与渲染端 `markdown.tsx` 一致：开围栏 ≥3 个反引号，闭围栏长度必须 ≥ 开围栏。
+ */
+function codeFences(content: string): Array<{ lang: string; body: string }> {
+  // **行尾归一化**（实测回归）：下面的 `^…$` 正则里 `.` 与 `$` 都不吃 `\r`，
+  // CRLF 内容（Windows 记事本另存过的 `.md`、或模型把产物原文回灌）会让开/闭围栏
+  // **全部匹配失败**，`extractArtifact` 直接返回 undefined——卡片一个都不出。
+  // 与 `markdown.tsx` 同一处理：入口统一成 `\n`。
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const out: Array<{ lang: string; body: string }> = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const open = /^(`{3,})(.*)$/.exec(lines[i].trimStart());
+    if (!open) continue;
+    const fence = open[1];
+    const lang = open[2].trim();
+    const body: string[] = [];
+    i += 1;
+    while (i < lines.length) {
+      const closing = /^(`{3,})\s*$/.exec(lines[i].trimStart());
+      if (closing && closing[1].length >= fence.length) break;
+      body.push(lines[i]);
+      i += 1;
+    }
+    out.push({ lang, body: body.join("\n") });
+  }
+  return out;
+}
+
 /** 提取消息里第一个完整 HTML 代码块（```html 或以 <!DOCTYPE/或 html> 开头的围栏块）用于产物落盘与预览。 */
 function extractHtmlArtifact(content: string): string | undefined {
-  const fences = [...content.matchAll(/```(\w*)\r?\n([\s\S]*?)```/g)];
-  for (const [, lang, body] of fences) {
+  for (const { lang, body } of codeFences(content)) {
     const code = body.trim();
     if (/^html$/i.test(lang) || /^<!doctype html/i.test(code) || /^<html[\s>]/i.test(code)) return code;
   }
@@ -2127,14 +2280,22 @@ type ArtifactKind = "html" | "sheet" | "doc";
 export function extractArtifact(content: string): { kind: ArtifactKind; content: string } | undefined {
   const html = extractHtmlArtifact(content);
   if (html) return { kind: "html", content: html };
-  const fences = [...content.matchAll(/```(\w*)\r?\n([\s\S]*?)```/g)];
-  for (const [, lang, body] of fences) {
+  // 与 `extractHtmlArtifact` 共用同一套围栏切分（见 `codeFences` 的说明）。
+  for (const { lang, body } of codeFences(content)) {
     const code = body.trim();
     if (/^(csv|tsv|xlsx|excel)$/i.test(lang)) {
-      // CSV/TSV 围栏要有结构化数据的样子（≥2 行且含分隔符），排除随手贴的单行文本。
-      // xlsx/excel 别名：create_file 工具成功后回注的围栏用模型调用的 kind 命名，可能标成 xlsx。
-      const sep = /tsv/i.test(lang) ? "\t" : ",";
-      if (code.split("\n").length >= 2 && code.includes(sep)) return { kind: "sheet", content: code };
+      // **分隔符不能按 lang 猜**（实测缺陷）：旧写法是
+      //   `const sep = /tsv/i.test(lang) ? "\t" : ",";` + `code.includes(sep)`
+      // 于是 ```` ```xlsx ```` / ```` ```csv ```` 里放**制表符分隔**的数据时，
+      // 判据直接失败 → `extractArtifact` 返回 undefined → **卡片完全不出**，
+      // 而落盘路径（`saveArtifactFile` → `parseCsvRows`）本来就会自动识别制表符，
+      // 两边对"这是不是一张表"的判断不一致。
+      //
+      // 改用同一个共享解析器：**切出来至少 2 行、且有行是多列**才算表格。
+      // 这样逗号、制表符、以及"表头列数与数据行不一致"的脏数据都能过，
+      // 而随手贴的单行文本/纯段落仍然被挡住。
+      const rows = parseCsvRows(code);
+      if (rows.length >= 2 && rows.some((row) => row.length > 1)) return { kind: "sheet", content: code };
     }
     // `md` 必须收下：它正是 create_file 的 kind 枚举值之一（html/csv/tsv/md），
     // 模型自己写围栏时也最常用它。漏掉这条时，```md 的文档**一张卡片都挂不上**——
@@ -2145,18 +2306,112 @@ export function extractArtifact(content: string): { kind: ArtifactKind; content:
   return undefined;
 }
 
-interface ArtifactInfo { name: string; path: string; size: number; kind: ArtifactKind; content: string }
+interface ArtifactInfo {
+  name: string;
+  path: string;
+  size: number;
+  kind: ArtifactKind;
+  content: string;
+  /**
+   * 修订号：文件被 edit_artifact 改写过一次就换一个值。
+   *
+   * 为什么不能只靠 path：预览 iframe 走 `h3preview:` **按 URL 加载**，
+   * path 没变就不会重新请求，用户会一直看到改动前的旧画面
+   * （真机上这会让人误判"模型没改好"）。把它放进 iframe 的 key 与读取依赖里。
+   */
+  revision?: number;
+}
+
+/**
+ * 同名产物的多个版本折叠成「最新一版 + 旧版本」。
+ *
+ * 为什么会有多版：模型按 `inspect_artifact` 的报错修 bug 时会**整份重写**，
+ * 而 `uniqueArtifactPath`（main.ts）刻意不覆盖同名文件，于是依次落成
+ * `名字.html` → `名字 (2).html` → `名字 (3).html`。一次请求能留下 3–5 张卡片，
+ * 用户得读回复去猜哪张才是最终版——实测真机里模型自己写着
+ * "请用鹈鹕骑自行车_3D (2).html，前面的是废弃初版，可以删掉"。
+ *
+ * 判定"同一份文件的不同版本"只靠命名约定：去掉 ` (n)` 后缀后主名 + 扩展名相同。
+ * 这是 `uniqueArtifactPath` 唯一的产出形状，不做更花哨的相似度猜测
+ * （同名但用户真要两份并存的情况，展开后照旧都在）。
+ *
+ * 返回顺序按各版本**首次出现**的位置，卡片位置不会因后续版本出现而跳动。
+ */
+export function foldArtifactVersions<T extends { name: string }>(items: readonly T[]): Array<{ latest: T; older: T[] }> {
+  // 主名：`鹈鹕 (2).html` → `鹈鹕.html`。只剥末尾的 ` (数字)`，中间的括号是文件名的一部分。
+  const stemOf = (name: string) => name.replace(/ \(\d+\)(?=\.[^.]+$|$)/, "");
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const key = stemOf(item.name);
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(item);
+    else groups.set(key, [item]);
+  }
+  // Map 保持插入顺序 = 首次出现顺序。
+  return Array.from(groups.values()).map((bucket) => ({ latest: bucket[bucket.length - 1], older: bucket.slice(0, -1) }));
+}
+
+/**
+ * 产物卡片列表：每个主名只默认展示**最新一版**，旧版本收在一个小按钮后面。
+ * 只影响展示，磁盘上每一版都还在（用户想比对时可以展开）。
+ */
+function PgArtifactList({ items, sessionId, onPreview, onError }: {
+  items: NonNullable<PlaygroundMessage["artifacts"]>;
+  sessionId: string;
+  onPreview: (artifact: ArtifactInfo) => void;
+  onError: (e: unknown) => void;
+}) {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const groups = foldArtifactVersions(items);
+  return <>{groups.map(({ latest, older }) => {
+    const open = expanded.has(latest.path);
+    const visible = open ? [...older, latest] : [latest];
+    return <div key={latest.path} className="pg-artifact-group">
+      {visible.map((a, i) => <PgArtifactCard
+        key={`${a.path}-${i}`}
+        kind={a.kind}
+        saved={{ name: a.name, path: a.path, size: a.size, kind: a.kind, content: "" }}
+        sessionId={sessionId}
+        onPreview={onPreview}
+        onError={onError}
+      />)}
+      {older.length > 0 && <button
+        className="pg-artifact-versions"
+        title={open ? "只看最新一版" : "展开这次请求留下的所有版本"}
+        onClick={() => setExpanded((all) => {
+          const next = new Set(all);
+          if (open) next.delete(latest.path); else next.add(latest.path);
+          return next;
+        })}
+      >{open ? "收起旧版本" : `另有 ${older.length} 个旧版本`}</button>}
+    </div>;
+  })}</>;
+}
 
 /** 产物文件卡片：图标 + 文件名 + 大小 + 预览/打开文件夹（WorkBuddy 形态）。
  * 两种来源：① 主进程 create_file 推来的**已落盘**元数据（saved 有值，直接可用）；
  * ② 旧路径——从消息正文的围栏代码块扫出来的内容（懒落盘，首次点「预览」才写文件）。 */
 function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }: { kind: ArtifactKind; content?: string; saved?: ArtifactInfo; sessionId: string; onPreview: (artifact: ArtifactInfo) => void; onError: (e: unknown) => void }) {
-  const [artifact, setArtifact] = useState<ArtifactInfo | undefined>(saved);
-  // 懒落盘的去重：`artifact` 是 state，同一 tick 内连点两次「预览」会双双读到 undefined，
+  // 懒落盘（旧路径：从消息正文围栏扫出来的内容）的结果。**不能把 saved 也塞进 state**：
+  // `useState(saved)` 只快照第一次渲染的值，之后父组件推送"产物已更新"事件时
+  // size 变了、卡片却仍显示旧值（实测：模型改完文件，卡片大小纹丝不动）。
+  // 现在 saved 每次渲染直接参与计算，始终是最新元数据。
+  const [savedLocally, setSavedLocally] = useState<ArtifactInfo | undefined>(undefined);
+  const artifact: ArtifactInfo | undefined = saved
+    ? { ...saved, content: saved.content || savedLocally?.content || "" }
+    : savedLocally;
+  // 懒落盘的去重：`artifact` 是派生值，同一 tick 内连点两次「预览」会双双读到 undefined，
   // 各自调一次 saveArtifact —— 落盘两次、生成两个内容相同的文件（`报告.md` 与 `报告 (2).md`），
   // 用户却在卡片上只看到一张。用同步 ref 兜住。
   const savingRef = useRef<Promise<ArtifactInfo | undefined> | undefined>(undefined);
-  const sizeLabel = (bytes: number) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  // **脏数据会渲染出「NaN KB」**（实测）：`size` 来自 IPC/旧版本 localStorage，
+  // 缺失、null、非数字都可能出现——`undefined / 1024` 就是 NaN，
+  // `Math.round(NaN)` 还是 NaN，于是卡片上显示一个尺寸"NaN KB"。
+  // 拿不到可信数字时不显示尺寸，比显示一个假的数字好（用户会以为文件坏了）。
+  const sizeLabel = (bytes: unknown) => {
+    if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return "";
+    return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  };
   // 表格产物存 .xlsx（Excel 双击可开，主进程 SheetJS 转换）；文档存 .md；网页存 .html。
   const ext = kind === "html" ? ".html" : kind === "sheet" ? ".xlsx" : ".md";
   const label = kind === "html" ? "HTML 文件" : kind === "sheet" ? "Excel 表格" : "Markdown 文档 · Word 可打开";
@@ -2165,7 +2420,12 @@ function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }:
     if (content === undefined) return undefined; // 既没落盘元数据也没内容：无从保存
     // 已有一次保存在进行中：直接复用那个 Promise，不再发第二次 IPC。
     if (savingRef.current) return savingRef.current;
-    const name = `artifact-${Date.now()}${ext}`;
+    // **别用时间戳当文件名**（实测观感问题）：旧路径（从回复围栏里扫出来的产物）
+    // 首次点「预览」才落盘，原来命名成 `artifact-1792444806941.html`——卡片标题、
+    // 预览面板标题、以及用户在资源管理器里看到的都是这串时间戳。
+    // 改用按类型的中文名；重名由主进程的 `uniqueArtifactPath` 补 ` (2)`。
+    const baseName = kind === "sheet" ? "表格产物" : kind === "doc" ? "文档产物" : "网页产物";
+    const name = `${baseName}${ext}`;
     const saveKind = kind === "sheet" ? "xlsx" : kind === "doc" ? "md" : "html";
     // IPC 也可能**抛异常**（不只是返回 ok:false）。不兜住的话点「预览」毫无反应、
     // 也没有任何提示（与 send()/executePlan() 同一类问题）。
@@ -2174,7 +2434,7 @@ function PgArtifactCard({ kind, content, saved, sessionId, onPreview, onError }:
         const response = await window.h3.saveArtifact(sessionId, name, content, saveKind);
         if (!response.data) { onError(response.message); return undefined; }
         const info = { ...response.data, kind, content };
-        setArtifact(info);
+        setSavedLocally(info);
         return info;
       } catch (error) {
         onError(error);
@@ -2204,6 +2464,9 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
   // 主进程的截断说明（"文件较大，仅显示前 1MB" 等）。**必须与正文分开存**：
   // 表格预览把正文直接喂 `parseCsvRows`，说明拼进去会变成一行假数据。
   const [readNote, setReadNote] = useState<string>();
+  // 表格的**真实总行数**（主进程只回前 2000 行的正文）。表格下方的"共 N 行"
+  // 必须用它，否则用户会同时看到 note 里的"共 5001 行"和表下方的"共 2000 行"（实测矛盾）。
+  const [totalRows, setTotalRows] = useState<number>();
   const [readError, setReadError] = useState<string>();
   // 是否已读完（内容可能是合法的空串）。不区分的话，空文件会永远显示"（正在读取…）"。
   const [loaded, setLoaded] = useState(false);
@@ -2216,6 +2479,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
     setDiskContent(undefined);
     setReadNote(undefined);
     setReadError(undefined);
+    setTotalRows(undefined);
     if (!needsContent) { setLoaded(true); return; }
     let cancelled = false;
     setLoaded(false);
@@ -2223,15 +2487,19 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
       if (cancelled) return;
       // 读取失败必须让人看见（CLAUDE.md「出错必须让人看见」）——否则面板永远停在
       // "（正在读取…）"，看起来像卡住，实际是读文件报错了（xlsx 预览整片失效就是这样被掩盖的）。
-      if (r.data !== undefined) { setDiskContent(r.data.text); setReadNote(r.data.note); }
-      else setReadError(r.message || "读取产物内容失败。");
+      if (r.data !== undefined) {
+        setDiskContent(r.data.text);
+        setReadNote(r.data.note);
+        setTotalRows(r.data.totalRows);
+      } else setReadError(r.message || "读取产物内容失败。");
       setLoaded(true);
     }).catch((e) => { if (!cancelled) { setReadError(describeError(e, "读取产物内容失败。")); setLoaded(true); } });
     return () => { cancelled = true; };
     // 依赖里带 nonce：点「↻ 重新加载」时要**真的重新读盘**。
     // 此前 nonce 只用于重挂载 DOM，表格/文档读到的是 state 里的旧内容——按钮点了像没反应
     // （只有 html 分支因为 iframe 重新加载才真的刷新）。
-  }, [artifact.path, needsContent, nonce]);
+    // **revision**：文件被 edit_artifact 改写后，path 不变但内容变了，必须重读。
+  }, [artifact.path, artifact.revision, needsContent, nonce]);
   const content = artifact.content || diskContent || "";
   const dragRef = useRef<{ startX: number; startWidth: number } | undefined>(undefined);
   // 拖拽中的最新宽度：松手时用它落盘（不依赖闭包里过期的 width）。
@@ -2304,7 +2572,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
         预览页的内联脚本会被拦掉（游戏跑不起来）。sandbox 保持 allow-scripts：不透明源，
         拿不到宿主 DOM 与 window.h3.* 的 IPC 面。 */}
     {artifact.kind === "html" && <iframe
-      key={nonce}
+      key={`${nonce}:${artifact.revision ?? 0}`}
       ref={frameRef}
       className="pg-preview-frame"
       sandbox="allow-scripts"
@@ -2312,7 +2580,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
       onLoad={focusFrame}
       title={artifact.name}
     />}
-    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : !loaded ? <p className="pg-preview-doc-empty">（正在读取…）</p> : content ? <><SheetTable csv={content} />{readNote && <p className="pg-preview-doc-empty">{readNote}</p>}</> : <p className="pg-preview-doc-empty">（这个表格没有任何内容）</p>}</div>}
+    {artifact.kind === "sheet" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : !loaded ? <p className="pg-preview-doc-empty">（正在读取…）</p> : content ? <><SheetTable csv={content} totalRows={totalRows} />{readNote && <p className="pg-preview-doc-empty">{readNote}</p>}</> : <p className="pg-preview-doc-empty">（这个表格没有任何内容）</p>}</div>}
     {artifact.kind === "doc" && <div className="pg-preview-doc" key={nonce}>{readError ? <p className="pg-preview-doc-empty">读取失败：{readError}</p> : !loaded ? <p className="pg-preview-doc-empty">（正在读取…）</p> : content ? <>{renderMarkdown(content)}{readNote && <p className="pg-preview-doc-empty">{readNote}</p>}</> : <p className="pg-preview-doc-empty">（这个文档没有任何内容）</p>}</div>}
   </aside>;
 }
@@ -2326,7 +2594,7 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
  * 超过 `MAX_PREVIEW_ROWS` 只渲染前若干行并明确告知（不静默少给）。 */
 const MAX_PREVIEW_ROWS = 500;
 
-function SheetTable({ csv }: { csv: string }) {
+function SheetTable({ csv, totalRows }: { csv: string; totalRows?: number }) {
   // 解析结果必须记住：拖拽面板宽度时父组件每帧都在 setState，本组件随之重渲染，
   // 而 `parseCsvRows` 是逐字符扫描整段 CSV（预览上限 1MB）——不 memo 的话
   // 拖一次面板会做上百次全量解析，界面明显发涩。
@@ -2335,12 +2603,15 @@ function SheetTable({ csv }: { csv: string }) {
   const [header, ...allBody] = rows;
   const body = allBody.slice(0, MAX_PREVIEW_ROWS);
   const hidden = allBody.length - body.length;
+  // 显示的行数用**文件真实总行数**（主进程只回前 2000 行正文）。
+  // 只看 `allBody.length` 会与上方 note 里的"表格共 5001 行"打架（实测）。
+  const totalForDisplay = totalRows && totalRows > allBody.length ? totalRows : allBody.length;
   return <>
     <table className="pg-sheet-table">
       <thead><tr>{header.map((cell, i) => <th key={i}>{cell}</th>)}</tr></thead>
       <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{cell}</td>)}</tr>)}</tbody>
     </table>
-    {hidden > 0 && <p className="pg-preview-doc-empty">（共 {allBody.length} 行，预览仅显示前 {MAX_PREVIEW_ROWS} 行；完整内容请在文件夹中打开）</p>}
+    {hidden > 0 && <p className="pg-preview-doc-empty">（共 {totalForDisplay} 行，预览仅显示前 {MAX_PREVIEW_ROWS} 行；完整内容请在文件夹中打开）</p>}
   </>;
 }
 
@@ -2412,15 +2683,23 @@ function PgToolSteps({ steps, running }: { steps: string[]; running: boolean }) 
   // streaming 期间强制展开（实时过程可见）；结束后用户自己控制折叠。
   const expanded = running ? true : open;
   const last = steps[steps.length - 1] || "";
-  // 「N 步工具调用」要数**调用次数**，不是日志行数：每次调用会追加两条
-  //（start 的 "→ …" 与 end 的 "✓ …"）。直接 steps.length 会把 1 次 create_file 说成 2 步
-  //（实测：真实 key 跑一次 create_file，标题显示"已执行 2 步工具调用"）。
+  // 数的是**工具调用次数**（每次调用追加两条：start 的 "→ …" 与 end 的 "✓ …"）。
+  // 直接 steps.length 会把 1 次 create_file 说成 2 步（实测）。
+  //
+  // 措辞用「次」而不是「步」（实测矛盾）：主进程的 `stepCountIs(20)` 数的是**模型步**，
+  // 而一步里可能并行多个工具调用。真实一轮出现过「已执行 28 步工具调用」+「已达 20 步上限」
+  // 同屏——两个数字都"对"，单位却不同，用户只会觉得软件在胡言乱语。
   const callCount = steps.filter((step) => step.startsWith("→")).length;
+  // **收尾后还停在 "→ 正在…" 说明这一轮被中断了**（用户点停止 / 出错 / 撞步数上限）：
+  // 工具启动事件到了、结束事件永远不会来。原样显示会让用户以为它**还在跑**——
+  // 而右上角的停止键已经变回发送键。把最后那条改成「已中断」。
+  const danglingStart = !running && last.startsWith("→");
+  const summaryLast = danglingStart ? `${last}（已中断）` : last;
   return <div className="pg-tool-steps-wrap">
     {!running && <button className="pg-tool-steps-toggle" onClick={() => setOpen((v) => !v)} title={expanded ? "收起执行过程" : "展开执行过程"}>
-      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {callCount || steps.length} 步工具调用<span className="pg-tool-steps-last">· {last.length > 40 ? `${sliceSafe(last, 40)}…` : last}</span>
+      <span className="pg-tool-steps-arrow">{expanded ? "▾" : "▸"}</span>已执行 {callCount || steps.length} 次工具调用<span className="pg-tool-steps-last">· {summaryLast.length > 40 ? `${sliceSafe(summaryLast, 40)}…` : summaryLast}</span>
     </button>}
-    {expanded && <div className="pg-tool-steps">{steps.map((step, i) => <div key={i} className="pg-tool-step">{step}</div>)}</div>}
+    {expanded && <div className="pg-tool-steps">{steps.map((step, i) => <div key={i} className="pg-tool-step">{danglingStart && i === steps.length - 1 ? `${step}（已中断）` : step}</div>)}</div>}
   </div>;
 }
 
@@ -2431,7 +2710,14 @@ function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: 
   onClose: () => void;
   retentionDays: number;
 }) {
-  const daysLeft = (iso: string) => Math.max(0, Math.ceil((retentionDays * 86_400_000 - (Date.now() - new Date(iso).getTime())) / 86_400_000));
+  // **脏时间戳会显示「NaN 天后自动清除」**（实测）：`session.deletedAt` 可能缺失
+  // 或解析不出来。`Math.max(0, Math.ceil(NaN))` 仍是 NaN。拿不到可信时间时不显示剩余天数。
+  const daysLeft = (iso: string | undefined): number | undefined => {
+    if (!iso) return undefined;
+    const time = new Date(iso).getTime();
+    if (!Number.isFinite(time)) return undefined;
+    return Math.max(0, Math.ceil((retentionDays * 86_400_000 - (Date.now() - time)) / 86_400_000));
+  };
   // 二次确认用**内联两段式**而不是 window.confirm：
   // confirm 在 Electron 里会弹阻塞式原生对话框，且自动化（CDP）会被挂住；
   // 本项目对 prompt 已有同样教训（"prompt() is not supported"），统一步调。
@@ -2442,7 +2728,7 @@ function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: 
       {sessions.length === 0 && <p className="footnote">回收站是空的。</p>}
       {sessions.map((session) => <article key={session.id} className="trash-item">
         <div><strong>{session.title || "新对话"}</strong>
-          <small>{session.messages.length} 条消息 · {session.deletedAt ? `${daysLeft(session.deletedAt)} 天后自动清除` : ""}</small></div>
+          <small>{session.messages.length} 条消息{(() => { const left = daysLeft(session.deletedAt); return left === undefined ? "" : ` · ${left} 天后自动清除`; })()}</small></div>
         <div className="trash-actions">
           <button className="text-button" onClick={() => onRestore(session)}>恢复</button>
           {/* 彻底删除不可逆（会话记录 + 产物目录一起删）。第一次点击变成确认态，

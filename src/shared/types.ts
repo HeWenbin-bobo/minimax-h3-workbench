@@ -256,7 +256,7 @@ export interface WorkbenchApi {
    * 放在 `note` 里。早前把提示拼在 `text` 末尾，表格预览会把它当成**一行数据**
    * 渲染出来（实测：3 行表格变成 4 行，多出一行只有一列的说明文字）。
    */
-  readArtifactText(filePath: string): Promise<ApiResponse<{ text: string; note?: string }>>;
+  readArtifactText(filePath: string): Promise<ApiResponse<{ text: string; note?: string; totalRows?: number }>>;
   /** 会话被彻底删除时清掉它的产物目录（userData/artifacts/<sessionId>/），避免永久占盘。 */
   purgeSessionArtifacts(sessionId: string): Promise<ApiResponse<boolean>>;
   openExternal(url: string): Promise<ApiResponse<boolean>>;
@@ -378,6 +378,16 @@ export interface LlmToolEvent {
   phase?: "start" | "end";
   /** end 阶段的结果摘要文本。 */
   result?: string;
+  /**
+   * end 阶段：这次工具调用**是否成功**。
+   *
+   * 为什么不能靠 result 猜（实测踩到）：`edit_artifact` 拒绝歧义编辑时返回的是
+   * "oldText 出现了 2 次…"，渲染端却把它拼成 `✓ 修改文件完成（oldText 出现了 2 次…）`——
+   * 打勾、"完成"、"失败"三件事同时出现，用户看了一头雾水。
+   * "完成"只表示工具调用结束，不代表操作成功，故把成败做成结构化字段。
+   * 缺省视为成功（兼容旧事件）。
+   */
+  ok?: boolean;
   sessionId?: string;
 }
 
@@ -413,6 +423,12 @@ export interface LlmArtifactEvent {
   size: number;
   /** 渲染端据此选卡片图标与预览方式。 */
   kind: "html" | "sheet" | "doc";
+  /**
+   * `true` 表示这是**对已有产物的更新**（edit_artifact 写回同一个文件），
+   * 渲染端应当就地刷新那张卡片与已打开的预览，而不是再追加一张新卡片。
+   * 缺省 = 新增产物（兼容旧事件）。
+   */
+  updated?: boolean;
   sessionId?: string;
 }
 

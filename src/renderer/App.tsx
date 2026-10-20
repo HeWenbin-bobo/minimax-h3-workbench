@@ -1309,6 +1309,57 @@ let playgroundLive: PlaygroundLive | undefined;
 const uiStreamBuffers = new Map<string, string>();
 const uiTaskIdBuffers = new Map<string, string[]>();
 
+/** 工具名的中文标签。每个工具都必须有——否则界面会冒出英文标识符（违反「界面文案一律中文」）。 */
+const TOOL_LABELS: Record<string, string> = {
+  web_search: "联网搜索",
+  generate_video: "生成视频",
+  open_page: "打开网页",
+  create_file: "生成文件",
+  inspect_artifact: "自检页面",
+  read_artifact: "读取文件",
+  edit_artifact: "修改文件",
+  edit_artifact_batch: "批量修改文件",
+  update_plan: "更新步骤清单",
+  request_user_input: "向你提问"
+};
+const toolLabelOf = (tool: string) => TOOL_LABELS[tool] ?? "工具调用";
+
+/**
+ * 把一条 `llm:tool` 事件拼成步骤条上的那一行。
+ *
+ * **必须有单一实现**：这条规则同时被"实时事件"与"切页后恢复"两条路径使用，
+ * 各写一份必然漂移（本项目已因"同一判定写两处"踩过多次）。主进程只存原始事件，
+ * 拼装规则全部留在渲染端这里。
+ */
+function formatToolStep(event: {
+  tool: string;
+  phase?: "start" | "end";
+  input?: string;
+  result?: string;
+  ok?: boolean;
+}): string {
+  const name = toolLabelOf(event.tool);
+  if ((event.phase ?? "start") === "end") {
+    const summary = (event.result ?? "完成").replace(/\s+/g, " ").trim();
+    const short = summary.length > 60 ? `${sliceSafe(summary, 60)}…` : summary;
+    // 成败用结构化字段，不靠摘要文本猜。**失败时不再加"失败"前缀**：
+    // 摘要本身已经是"修改文件失败：…"，再包一层就成了重复。
+    return event.ok === false ? `✕ ${short}` : `✓ ${name}完成（${short}）`;
+  }
+  const input = event.input ?? "";
+  return event.tool === "web_search" ? `→ 正在搜索：${input}`
+    : event.tool === "generate_video" ? "→ 正在创建视频生成任务…"
+      : event.tool === "open_page" ? `→ 正在打开网页：${input}`
+        : event.tool === "create_file" ? "→ 正在生成文件…"
+          : event.tool === "inspect_artifact" ? `→ 正在运行页面自检：${input}`
+            : event.tool === "read_artifact" ? `→ 正在读取文件：${input}`
+              : event.tool === "edit_artifact" ? `→ 正在修改文件：${input}`
+                : event.tool === "edit_artifact_batch" ? `→ 正在批量修改：${input}`
+                  : event.tool === "update_plan" ? "→ 正在更新步骤清单…"
+                    : event.tool === "request_user_input" ? "→ 正在向你提问…"
+                      : `→ ${name}中…`;
+}
+
 function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
   // **只解析一次 localStorage**：此前 `useState(loadSessions)` 与
   // `useState(() => loadSessions().find(...))` 各读一遍，等于把整份会话
@@ -1557,51 +1608,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, content: buffered })));
     });
     // 智能体多步工具日志：start 追加"→ …"，end 追加"✓ …"——用户能看到完整过程而非光标空闪。
-    // 每个工具都必须有**中文名**：此前只有 web_search / generate_video / open_page 有映射，
-    // create_file / update_plan / request_user_input 会直接冒出英文标识符（"→ 正在调用 create_file…"），
-    // 违反「界面文案一律中文」。end 的 result 可能很长（create_file 的确认文案约百字），截断展示。
-    const TOOL_LABELS: Record<string, string> = {
-      web_search: "联网搜索",
-      generate_video: "生成视频",
-      open_page: "打开网页",
-      create_file: "生成文件",
-      inspect_artifact: "自检页面",
-      read_artifact: "读取文件",
-      edit_artifact: "修改文件",
-      edit_artifact_batch: "批量修改文件",
-      update_plan: "更新步骤清单",
-      request_user_input: "向你提问"
-    };
-    const toolLabel = (tool: string) => TOOL_LABELS[tool] ?? "工具调用";
+    // **拼装规则在模块级 `formatToolStep`**（切页后恢复也用它，两处必须同一份实现）。
     const offTool = window.h3.onLlmTool((event) => {
       const targetId = event.sessionId;
       if (!targetId) return;
-      setSessions((all) => patchLast(all, targetId, (msg) => {
-        const steps = msg.toolSteps ?? [];
-        const name = toolLabel(event.tool);
-        const summary = (event.result ?? "完成").replace(/\s+/g, " ").trim();
-        const shortSummary = summary.length > 60 ? `${sliceSafe(summary, 60)}…` : summary;
-        if ((event.phase ?? "start") === "end") {
-          // 成败用结构化字段，不靠摘要文本猜："完成"指工具调用结束，不代表操作成功。
-          // 实测踩到：edit_artifact 拒绝歧义编辑时曾渲染成 `✓ 修改文件完成（oldText 出现了 2 次…）`。
-          // **失败时不要再加"失败"前缀**：摘要本身已经是"修改文件失败：…"，
-          // 再包一层就成了 `✕ 修改文件失败（修改文件失败：…）`（探针里看到的重复）。
-          // 缺省视为成功（兼容没有该字段的旧事件）。
-          return { ...msg, toolSteps: [...steps, event.ok === false ? `✕ ${shortSummary}` : `✓ ${name}完成（${shortSummary}）`] };
-        }
-        const label = event.tool === "web_search" ? `→ 正在搜索：${event.input}`
-          : event.tool === "generate_video" ? "→ 正在创建视频生成任务…"
-            : event.tool === "open_page" ? `→ 正在打开网页：${event.input}`
-              : event.tool === "create_file" ? "→ 正在生成文件…"
-                : event.tool === "inspect_artifact" ? `→ 正在运行页面自检：${event.input}`
-                  : event.tool === "read_artifact" ? `→ 正在读取文件：${event.input}`
-                    : event.tool === "edit_artifact" ? `→ 正在修改文件：${event.input}`
-                      : event.tool === "edit_artifact_batch" ? `→ 正在批量修改：${event.input}`
-                  : event.tool === "update_plan" ? "→ 正在更新步骤清单…"
-                  : event.tool === "request_user_input" ? "→ 正在向你提问…"
-                    : `→ ${name}中…`;
-        return { ...msg, toolSteps: [...steps, label] };
-      }));
+      setSessions((all) => patchLast(all, targetId, (msg) => ({
+        ...msg,
+        toolSteps: [...(msg.toolSteps ?? []), formatToolStep(event)]
+      })));
     });
     const offDone = window.h3.onLlmDone((event) => {
       const targetId = event.sessionId;
@@ -1829,6 +1843,17 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             const missing = state.artifacts.filter((a) => !existing.some((b) => b.path === a.path));
             return missing.length ? { ...msg, artifacts: [...existing, ...missing] } : msg;
           }));
+        }
+        // 工具步骤同理（同一根因的第五个实例）：切页期间 `llm:tool` 全丢，
+        // 用户切回来看「已执行 0 次工具调用」，而 AI 其实做了好几次搜索。
+        // **复用 `formatToolStep`**——拼装规则只该有一份，否则两处必然漂移。
+        if (state.toolSteps.length > 0) {
+          setSessions((all) => patchLast(all, target, (msg) => (
+            // 已经有步骤说明这轮事件正常送达，以现有为准；只在为空时还原。
+            msg.toolSteps && msg.toolSteps.length > 0
+              ? msg
+              : { ...msg, toolSteps: state.toolSteps.map((step) => formatToolStep(step)) }
+          )));
         }
         if (state.done) {
           setSessions((all) => patchLast(all, target, (msg) => {

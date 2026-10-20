@@ -335,6 +335,15 @@ export interface WorkbenchApi {
     taskIds: string[];
     /** 本轮产出的文件（`create_file` 建的）。切页期间 `llm:artifact` 会丢，靠它补齐。 */
     artifacts: Array<{ name: string; path: string; size: number; kind: "html" | "sheet" | "doc" }>;
+    /**
+     * 本轮的**原始**工具事件（start/end 各一条）。切页期间 `llm:tool` 会全部丢失，
+     * 用户切回来看到「已执行 0 次工具调用」。存原始事件而非拼好的字符串：
+     * 拼装规则（中文名映射、摘要截断）属于渲染端，主进程复制一份必然会漂移。
+     */
+    toolSteps: Array<
+      | { phase: "start"; tool: string; input: string }
+      | { phase: "end"; tool: string; result: string; ok: boolean }
+    >;
     done: boolean;
     ok: boolean;
     message?: string;

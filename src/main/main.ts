@@ -527,6 +527,17 @@ function registerIpc(
      * 产物是这一轮的主要交付物，看不到就等于白做。
      */
     artifacts: Array<{ name: string; path: string; size: number; kind: "html" | "sheet" | "doc" }>;
+    /**
+     * 本轮的**工具步骤日志**（`llm:tool` 的 start/end 两条各存一条）。
+     *
+     * 同一根因的第五个实例（实测缺陷 probe-toolsteps-while-away）：切页期间
+     * `llm:tool` 没有订阅者，全部丢弃 —— 用户切回来看到「已执行 0 次工具调用」，
+     * 而实际上 AI 做了三次搜索。这一行正是用户判断"它到底干了什么"的主要依据。
+     *
+     * 存原始事件而不是拼好的字符串：拼装规则（`TOOL_LABELS`、摘要截断）属于渲染端，
+     * 主进程复制一份必然会漂移。这里只记事实，由渲染端按同一套规则还原。
+     */
+    toolSteps: Array<{ phase: "start"; tool: string; input: string } | { phase: "end"; tool: string; result: string; ok: boolean }>;
     done: boolean;
     ok: boolean;
     message?: string;
@@ -906,10 +917,11 @@ function registerIpc(
       fullText: string;
       taskIds: string[];
       artifacts: Array<{ name: string; path: string; size: number; kind: "html" | "sheet" | "doc" }>;
+      toolSteps: Array<{ phase: "start"; tool: string; input: string } | { phase: "end"; tool: string; result: string; ok: boolean }>;
       done: boolean;
       ok: boolean;
       message?: string;
-    } = { fullText: "", taskIds: [], artifacts: [], done: false, ok: true, message: undefined };
+    } = { fullText: "", taskIds: [], artifacts: [], toolSteps: [], done: false, ok: true, message: undefined };
     sessionTurnState.set(session, turnState);
     const chunk = (event: LlmStreamEvent) => {
       if (typeof event.delta === "string" && event.delta) turnText += event.delta;
@@ -1833,8 +1845,12 @@ ${tableNote}` : ""}`;
           // 环境事实拼成一条 user 消息附在**当轮**历史末尾（见 injectWorldState 的通道说明）。
           // 放在循环内：内容过滤重试会往 effective 追加改写指引，须基于最新历史注入。
           result = await chatAgent(agentOptions, injectWorldState(effective, worldStateText), agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
+            // 记进本轮状态：切页期间丢掉的 `llm:tool` 靠它补齐（同一根因的第五个实例）。
+            // 用户判断"AI 到底做了哪些事"主要就看这一行，丢了会显示"已执行 0 次"。
+            turnState.toolSteps.push({ phase: "start", tool, input });
             sendLlmTool({ tool, input, phase: "start", sessionId: session });
           }, (tool, summary, ok) => {
+            turnState.toolSteps.push({ phase: "end", tool, result: summary, ok });
             sendLlmTool({ tool, input: "", phase: "end", result: summary, ok, sessionId: session });
           }, planArg === "plan");
           break;

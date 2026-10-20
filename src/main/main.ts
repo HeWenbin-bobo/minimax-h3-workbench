@@ -223,7 +223,12 @@ app.whenReady().then(async () => {
     // 只服务 HTML：预览 iframe 仅用于 html 产物，限制扩展名把暴露面压到最小。
     if (!/\.html?$/i.test(resolved)) return explain("只有网页（.html）产物能在预览面板里打开。表格与文档请直接在卡片上查看。", 403);
     try {
-      const body = await readFile(resolved, "utf8");
+      // **与其它三条读产物路径共用同一个解码函数**（见 `modules/textFile.ts`）：
+      // 产物是模型写的（UTF-8），但用户完全可能用记事本把 .html 另存成 ANSI/UTF-16 再回来预览。
+      // 直接 `readFile(…, "utf8")` 会得到一片 `���` 并当成 HTML 渲染——白屏或满屏乱码。
+      // 解码后再以 UTF-8 送出（响应头已声明 charset=utf-8，按规范优先于页面内的 <meta>），
+      // 因此内层 `<meta charset="gbk">` 不会造成二次错解。
+      const body = decodeTextBytes(await readFile(resolved));
       // CSP 由**响应头**下发（权威，内容无法构造影响），不注入 <meta>。
       // 内联脚本照跑（否则游戏动不了），但网络出口全封——产物由模型生成，按不可信内容对待。
       // nosniff：避免响应体内 content-type 被当成别的类型解释。

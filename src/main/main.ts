@@ -37,7 +37,7 @@ import { QuestionBridge } from "./modules/questionBridge";
 import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, SHEET_REQUEST_EXTS } from "./modules/artifactDir";
 import { applyExactEdit, applyExactEdits, countLines, findMatchingLines, MAX_READ_CHARS, sliceWithLineNumbers } from "./modules/artifactEdit";
 import { PREVIEW_CSP } from "./modules/previewCsp";
-import { isPathInside, resolveWithinRoot } from "./modules/safePath";
+import { isPathInside, resolveWithinRoot, resolveWithinRootDetailed } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
 import { normalizeHistory } from "./modules/historyNormalize";
 import { freezeTurn } from "./modules/stepSnapshot";
@@ -218,8 +218,17 @@ app.whenReady().then(async () => {
       });
     if (!requestedPath || !path.isAbsolute(requestedPath)) return explain("预览地址无效：缺少产物路径。请从对话里的文件卡片重新点「预览」。", 400);
     // 符号链接安全的白名单校验：realpath 后比对，软链指向外部一律拒绝。
-    const resolved = await resolveWithinRoot(artifactRoot(), requestedPath);
-    if (!resolved) return explain("这个文件不在产物目录内，已拒绝预览。请从对话里的文件卡片重新打开。", 403);
+    //
+    // **失败原因要分清**（实测缺口）：旧实现两种失败都回 403「不在产物目录内」，
+    // 而最常见的那种其实是**文件已经不在了**（会话被删 / 回收站清理 / 换过目录）。
+    // 用户看到"越界"只会去怀疑路径被拦，然后反复重试。区分后给出可操作的提示。
+    const resolution = await resolveWithinRootDetailed(artifactRoot(), requestedPath);
+    if (!resolution.ok) {
+      return resolution.reason === "missing"
+        ? explain("这个产物已经不存在了（可能已被删除、随会话清理，或所在目录被移动）。请重新生成一份，或从对话里的文件卡片重新点「预览」。", 404)
+        : explain("这个文件不在产物目录内，已拒绝预览。请从对话里的文件卡片重新打开。", 403);
+    }
+    const resolved = resolution.path;
     // 只服务 HTML：预览 iframe 仅用于 html 产物，限制扩展名把暴露面压到最小。
     if (!/\.html?$/i.test(resolved)) return explain("只有网页（.html）产物能在预览面板里打开。表格与文档请直接在卡片上查看。", 403);
     try {
@@ -1796,8 +1805,16 @@ ${tableNote}` : ""}`;
   // 读取已落盘产物的文本内容：表格/文档预览用（html 走 h3preview 协议，不需要读文本）。
   // 路径白名单与协议一致——只允许 userData/artifacts/ 内、且 realpath 后仍在根内的文件。
   handle("artifact:read", async (_event, filePath: string) => {
-    const resolved = await resolveWithinRoot(path.join(app.getPath("userData"), "artifacts"), String(filePath || ""));
-    if (!resolved) throw new Error("只能读取产物目录内的文件。");
+    // **"文件没了"与"越界"必须分开说**（实测缺口）：旧实现两种都抛
+    // 「只能读取产物目录内的文件」——而最常见的那种是文件已被删除/随会话清理，
+    // 用户看到"权限/路径被拒"只会反复重试或怀疑白名单，永远查不到真实原因。
+    const resolution = await resolveWithinRootDetailed(path.join(app.getPath("userData"), "artifacts"), String(filePath || ""));
+    if (!resolution.ok) {
+      throw new Error(resolution.reason === "missing"
+        ? "这个产物已经不存在了（可能已被删除、随会话清理，或所在目录被移动）。请重新生成一份再预览。"
+        : "只能读取产物目录内的文件。");
+    }
+    const resolved = resolution.path;
     // xlsx 是二进制：表格产物落盘时转成了真 Excel（用户要"能双击打开"）。
     // 预览要的是表格文本，故用同一套 SheetJS 反向转回 CSV——避免"存得下、看不了"。
     if (/\.xlsx$/i.test(resolved)) {

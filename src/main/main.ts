@@ -967,6 +967,16 @@ function registerIpc(
       let agentArtifactCount = 0; // 本轮已落盘产物数：用于收尾文案（见下面 1243 行附近）
       /** 本轮**改动过**的文件数（编辑已有产物，不新建）。单独计数才能把收尾文案说对。 */
       let agentEditCount = 0;
+      /**
+       * 本轮问过用户几次。
+       *
+       * 为什么要参与"不得整轮重试"（实测缺陷 probe-total-timeout）：整轮中止后我们的重试
+       * 会把模型从**头**再跑一遍——而用户已经答过的问题会被**重新问一遍**，
+       * 他刚才的选择全部作废（实测：连问两题、累计超时后，上游被请求 5 次，
+       * 提问卡片反复出现，最终什么都没做成）。
+       * 用户的时间也是成本，重放询问比重放无副作用的搜索更不可接受。
+       */
+      let agentQuestionCount = 0;
       const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
       const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
       // 编辑产物后推一条"更新"事件：渲染端就地刷新卡片大小与已打开的预览。
@@ -1675,6 +1685,9 @@ ${tableNote}` : ""}`;
         // 超时/跳过会 reject（见 QuestionBridge），execute 层把它翻译成"按最佳判断继续"。
         requestUserInput: async (params: { questions: AgentQuestion[] }) => {
           const requestId = randomUUID();
+          // **问过就计数**：整轮重试会把已经答过的题重新问一遍，那不可接受
+          // （见 `agentQuestionCount` 的说明）。挂在挂起之前，超时/跳过也算问过。
+          agentQuestionCount += 1;
           // 先推事件再挂起：渲染端要拿到 requestId 才能回传答案。
           sendLlmQuestion({ requestId, questions: params.questions, sessionId: session });
           try {
@@ -1779,7 +1792,10 @@ ${tableNote}` : ""}`;
           // - edit_artifact 更糟——oldText 已经被改掉，重放必然 not-found，
           //   模型于是开始怀疑自己、换片段重试，把预算烧在"修一个已经修好的东西"上。
           // 已经产出东西的这一轮，直接如实报错 + 回落普通对话，比悄悄重放更可控。
-          const producedSideEffects = agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0;
+          // **问过用户也算副作用**（实测缺陷 probe-total-timeout）：重放会把已经答过的
+          // 问题**重新问一遍**，用户刚才的选择全部作废（实测连问两题后整体超时，
+          // 上游被请求 5 次、卡片反复出现，最终什么都没做成）。
+          const producedSideEffects = agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0 || agentQuestionCount > 0;
           if (isContentFilterError(error) && attempts < 3 && agentSent === 0 && !producedSideEffects) {
             chunk({ seq: 0, delta: contentFilterNotice(attempts, 3) });
             effective = [...effective, { role: "user", content: CONTENT_FILTER_GUIDANCE }];

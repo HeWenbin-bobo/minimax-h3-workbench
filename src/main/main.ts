@@ -2291,6 +2291,10 @@ ${tableNote}` : ""}`;
     // 新加的会话态（用户选定过的后端）同样要清：不删会随"反复新建/删除对话"慢慢累积，
     // 而且**会话删掉后 id 理论上可被复用**时，新会话会继承旧会话的后端选择。
     sessionChosenBackend.delete(id);
+    // 本轮运行状态同理。**它比别的条目更该清**：里面带着 `fullText`（整段回复正文）
+    // 与产物元数据，会话删掉后留着纯属占用，而且若 id 被复用时，
+    // 新会话会把上一轮的内容"补"进自己的气泡里（比继承一个后端选择离谱得多）。
+    sessionTurnState.delete(id);
     const root = path.join(app.getPath("userData"), "artifacts");
     const target = path.join(root, artifactSessionDirName(id));
     // 再兜一层：resolve 后必须仍在 artifacts 根之下（规则若被改动，这里也不会越界）。

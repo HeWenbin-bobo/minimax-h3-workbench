@@ -16,7 +16,7 @@ import {
   shell,
   type IpcMainInvokeEvent
 } from "electron";
-import { AdapterRegistry, backendAvailability, backendKindLabel, backendMentionedInText, normalizeBackendKind } from "./backends/adapterRegistry";
+import { AdapterRegistry, backendAvailability, backendKindLabel, backendMentionedInText, backendPickedFromQuestions, normalizeBackendKind } from "./backends/adapterRegistry";
 import { mediaMime, parseByteRange } from "./modules/mediaRange";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import { describeError, isNetworkError } from "../shared/errors";
@@ -1825,21 +1825,14 @@ ${tableNote}` : ""}`;
             // 「云端漂浮的城堡那种感觉」就被判成"选了 MiniMax 云端"，直接按秒计费生成。
             // 他明明只是在描述画面。
             //
-            // 现在把两件事分开：
-            // ① 选项 label 是我们自己生成的，出现即代表用户点了它 → 可以走 loose；
-            // ② 整段答案（含手写内容）只走**严格**模式，认「用/走/选 云端」这类明确指令。
-            const pickedFromOptions = (): BackendKind | undefined => {
-              for (const question of params.questions) {
-                for (const option of question.options ?? []) {
-                  const label = typeof option.label === "string" ? option.label : "";
-                  if (!label || !answer.includes(label)) continue;
-                  const kind = normalizeBackendKind(option.id) ?? backendMentionedInText(label, { loose: true });
-                  if (kind) return kind;
-                }
-              }
-              return undefined;
-            };
-            const picked = pickedFromOptions() ?? backendMentionedInText(answer);
+            // **光看"label 出现在答案里"还不够**（第二个实测缺陷 probe-style-option-backend）：
+            // 模型也会问画面风格，而风格选项完全可能叫「云端漂浮的城堡」——
+            // 选了这种**风格**同样会被当成"选了云端后端"，任务按秒计费。
+            // 判定收进 `backendPickedFromQuestions`（纯函数、可单测）：
+            // ① 选项 id 本身就是后端名（模型显式写 `local`/`minimax`）→ 认；
+            // ② 否则要求**这道题问的就是后端**（id/header/question 里出现「后端」「生成方式」）。
+            // 整段答案（含用户手写内容）只走**严格**模式，认「用/走/选 云端」这类明确指令。
+            const picked = backendPickedFromQuestions(params.questions, answer) ?? backendMentionedInText(answer);
             if (picked) {
               backendFromUser = picked;
               // **记进会话**：计划模式下轮 2 点「继续执行」时不该再问一遍。

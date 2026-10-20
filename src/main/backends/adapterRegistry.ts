@@ -62,6 +62,52 @@ export function backendMentionedInText(value: unknown, options?: { loose?: boole
   return undefined;
 }
 
+/** 把任意值读成去空白后的字符串（IPC 来的字段类型没有保证）。 */
+function textOf(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * 从「用户的选择题答案」里判断他选了哪个后端。
+ *
+ * **只认问的就是后端的那道题的选项**（实测缺陷 probe-style-option-backend）：
+ * 模型也会问画面风格，而风格选项完全可能叫「云端漂浮的城堡」——
+ * 早先对所有题目的所有选项都走 `loose` 匹配，于是选了这种**风格**就被当成
+ * "用户选了 MiniMax 云端"，任务按秒计费，而他只是在挑画面。
+ *
+ * 两道判据（从严到宽）：
+ * 1. **选项 id 本身就是后端名**（模型显式写 `local` / `minimax` / `rb` / `ssh`）——
+ *    这与题目主题无关都能认，因为 id 是模型专门用来标后端的；
+ * 2. 否则要求**这道题问的就是后端**（id/header/question 里出现「后端」「生成方式」等），
+ *    再按 label 宽松匹配（`云端（按秒计费）` → minimax）。
+ *
+ * @param answer `formatAnswers` 拼出来的回执全文（用于判断某个 label 是否被选中）
+ */
+export function backendPickedFromQuestions(
+  questions: ReadonlyArray<{ id?: unknown; header?: unknown; question?: unknown; options?: ReadonlyArray<{ id?: unknown; label?: unknown }> | null }>,
+  answer: unknown
+): BackendKind | undefined {
+  if (typeof answer !== "string" || !answer) return undefined;
+  for (const question of questions ?? []) {
+    if (!question) continue;
+    const subject = `${textOf(question.id)} ${textOf(question.header)} ${textOf(question.question)}`;
+    // 「用哪个后端」「生成方式」「走哪个 backend」——只认明确指向后端主题的题。
+    const isBackendQuestion = /后端|生成方式|backend|用哪个方式/i.test(subject);
+    for (const option of question.options ?? []) {
+      if (!option) continue;
+      const label = textOf(option.label);
+      if (!label || !answer.includes(label)) continue;
+      const byId = normalizeBackendKind(option.id);
+      if (byId) return byId;
+      if (isBackendQuestion) {
+        const byLabel = backendMentionedInText(label, { loose: true });
+        if (byLabel) return byLabel;
+      }
+    }
+  }
+  return undefined;
+}
+
 export interface BackendAvailability {
   kind: BackendKind;
   label: string;

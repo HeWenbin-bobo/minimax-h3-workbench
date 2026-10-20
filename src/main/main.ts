@@ -1923,6 +1923,17 @@ ${tableNote}` : ""}`;
   });
   // 跳过整组问题：立即放行工具循环（模型按最佳判断继续），不必干等超时。
   handle("llm:skip-question", (_event, requestId: string) => questionBridge.skip(requestId));
+  /**
+   * 取该会话**当前挂起**的选择题（没有则 undefined）。
+   *
+   * 切页会卸载 `PlaygroundPage`，那段时间 `llm:question` 事件没有订阅者、被直接丢弃，
+   * 而 `questionBridge` 仍在挂起等回答。渲染端在挂载/切回会话时调这个接口，
+   * 就能把丢掉的那张卡片补回来（实测缺陷 probe-question-while-away）。
+   */
+  handle("llm:pending-question", (_event, sessionId: string) => {
+    const session = typeof sessionId === "string" && sessionId ? sessionId : "";
+    return session ? questionBridge.pendingFor(session) : undefined;
+  });
 
   /**
    * 上下文占用查询：渲染端据此显示「上下文 42%」，并在超阈值时把压缩按钮点亮。

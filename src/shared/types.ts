@@ -312,6 +312,15 @@ export interface WorkbenchApi {
   /** 跳过整组问题：主进程立即放行工具循环（模型按最佳判断继续），不必等超时。 */
   skipLlmQuestion(requestId: string): Promise<ApiResponse<boolean>>;
   /**
+   * 取该会话**当前挂起**的选择题（没有则 `undefined`）。
+   *
+   * 为什么需要（实测缺陷 probe-question-while-away）：渲染端切页会卸载 `PlaygroundPage`，
+   * 那段时间 `llm:question` 事件没有订阅者、被直接丢弃，而主进程的 `questionBridge`
+   * 仍在挂起等回答。用户切回来时看不到卡片，只能干等到超时。
+   * 渲染端在**挂载时**与**切回会话时**各调一次即可把丢掉的那张卡片补回来。
+   */
+  pendingQuestion(sessionId: string): Promise<ApiResponse<{ requestId: string; questions: LlmQuestionEvent["questions"] } | undefined>>;
+  /**
    * 安装包下载进度（`downloadAndInstallUpdate` 期间推送）。
    *
    * 主进程早就把 electron-updater 的 `download-progress` 接出来了，界面也备好了

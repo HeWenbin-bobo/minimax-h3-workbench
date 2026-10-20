@@ -1762,6 +1762,33 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   useEffect(() => { setPreview(undefined); }, [activeId]);
   // 新会话创建完成后释放"正在建会话"哨兵（此时 active 已就绪，守卫由 sendingRef 接管）。
   useEffect(() => { if (activeId) creatingSessionRef.current = false; }, [activeId]);
+  /**
+   * **补齐"离开期间丢失的提问"**（实测缺陷 probe-question-while-away）。
+   *
+   * 切页会卸载本组件，那段时间 `llm:question` 事件没有订阅者、被直接丢弃；
+   * 而主进程的 `questionBridge` 仍在挂起等回答。用户切回来时若看不到卡片，
+   * 只能干等到 180 秒超时——AI 那边还以为在等人。
+   *
+   * 组件挂载（含切页回来）与切换会话时各问一次主进程，有就补挂上去。
+   * `msg.questions` 已存在时不动它（事件正常送达的情况由订阅那条路径负责）。
+   */
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await window.h3.pendingQuestion(activeId);
+        if (cancelled || !response.ok || !response.data) return;
+        const { requestId, questions } = response.data;
+        setSessions((all) => patchLast(all, activeId, (msg) => (
+          msg.questions ? msg : { ...msg, questions: { requestId, questions } }
+        )));
+      } catch {
+        // 补不回来就当没有：这条路径只是"锦上添花"，不能因为它让界面报错。
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeId]);
   const onMessagesScroll = () => {
     const el = scrollRef.current;
     if (!el) return;

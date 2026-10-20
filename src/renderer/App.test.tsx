@@ -412,6 +412,16 @@ describe("extractArtifact 围栏语言别名", () => {
     expect(extractArtifact(text)?.kind).toBe("html");
   });
 
+  // 实测缺陷：`extractArtifact` 原来也只用一条匹配三个反引号的正则，
+  // 于是**四个反引号**包住三个反引号的写法（正文里教别人写代码块）会在内层提前闭合，
+  // 一个含代码示例的 html 页面被截成半截、**真的落盘**成一张坏掉的卡片。
+  // 与 `markdown.tsx` 的围栏规则保持一致：闭围栏长度必须 ≥ 开围栏。
+  it("四个反引号包住的 html 围栏按完整内容提取（不提前闭合）", () => {
+    const body = "<!DOCTYPE html><html><body><pre>```js</pre></body></html>";
+    const text = "````html\n" + body + "\n````";
+    expect(extractArtifact(text)).toEqual({ kind: "html", content: body });
+  });
+
   it("没有围栏的纯文本不产生产物", () => {
     expect(extractArtifact("这是一段普通回答。")).toBeUndefined();
   });

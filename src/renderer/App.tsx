@@ -2206,10 +2206,40 @@ function clampDuration(duration: number, options: number[]): number {
 }
 
 // 游乐场会话回收站：悬浮面板展示已删除会话（保留 7 天），支持恢复 / 彻底删除。
+/**
+ * 切出消息里的**围栏代码块**（`{ lang, body }` 列表）。
+ *
+ * 为什么不用 `content.matchAll(/```(\w*)\r?\n([\s\S]*?)```/g)`（实测缺陷）：
+ * 那个正则只认三个反引号，而用**四个反引号**包住三个反引号的写法
+ * （官方 Markdown 用来"在正文里教别人写代码块"）会在内层三个反引号处**提前闭合**：
+ * 一个含代码示例的 4 反引号 html 页面会被截成 32 个字符的半截 HTML，
+ * 然后**真的落盘**成一张坏掉的产物卡片。
+ * 规则与渲染端 `markdown.tsx` 一致：开围栏 ≥3 个反引号，闭围栏长度必须 ≥ 开围栏。
+ */
+function codeFences(content: string): Array<{ lang: string; body: string }> {
+  const lines = content.split("\n");
+  const out: Array<{ lang: string; body: string }> = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const open = /^(`{3,})(.*)$/.exec(lines[i].trimStart());
+    if (!open) continue;
+    const fence = open[1];
+    const lang = open[2].trim();
+    const body: string[] = [];
+    i += 1;
+    while (i < lines.length) {
+      const closing = /^(`{3,})\s*$/.exec(lines[i].trimStart());
+      if (closing && closing[1].length >= fence.length) break;
+      body.push(lines[i]);
+      i += 1;
+    }
+    out.push({ lang, body: body.join("\n") });
+  }
+  return out;
+}
+
 /** 提取消息里第一个完整 HTML 代码块（```html 或以 <!DOCTYPE/或 html> 开头的围栏块）用于产物落盘与预览。 */
 function extractHtmlArtifact(content: string): string | undefined {
-  const fences = [...content.matchAll(/```(\w*)\r?\n([\s\S]*?)```/g)];
-  for (const [, lang, body] of fences) {
+  for (const { lang, body } of codeFences(content)) {
     const code = body.trim();
     if (/^html$/i.test(lang) || /^<!doctype html/i.test(code) || /^<html[\s>]/i.test(code)) return code;
   }
@@ -2223,8 +2253,8 @@ type ArtifactKind = "html" | "sheet" | "doc";
 export function extractArtifact(content: string): { kind: ArtifactKind; content: string } | undefined {
   const html = extractHtmlArtifact(content);
   if (html) return { kind: "html", content: html };
-  const fences = [...content.matchAll(/```(\w*)\r?\n([\s\S]*?)```/g)];
-  for (const [, lang, body] of fences) {
+  // 与 `extractHtmlArtifact` 共用同一套围栏切分（见 `codeFences` 的说明）。
+  for (const { lang, body } of codeFences(content)) {
     const code = body.trim();
     if (/^(csv|tsv|xlsx|excel)$/i.test(lang)) {
       // **分隔符不能按 lang 猜**（实测缺陷）：旧写法是

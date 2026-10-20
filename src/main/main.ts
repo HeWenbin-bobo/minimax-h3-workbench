@@ -1023,8 +1023,11 @@ function registerIpc(
           // **只有真的配好凭据的后端才列出来**（实测缺口）：模型现在要先问用户
           // "用哪个方式生成"，而它看不到「连接设置」。不筛的话它会把没配密钥的云端
           // 选项摆给用户，选了必然报"未保存卡密"/"请先保存 API Key"，白走一轮。
-          // 计划模式不产视频，不注入（问了也没用）。
-          videoBackends: turn.value.planMode === "plan" ? [] : await availableVideoBackends(turnSettings),
+          //
+          // 计划模式传 **undefined**（而不是 `[]`）：空数组是"有这一段、但一个都没有"，
+          // 会向模型断言"去连接设置配置"——而计划模式下 generate_video 根本没下发，
+          // 真实原因是"本轮只出方案"。不传就不出现这一段，不会给出误导的原因。
+          videoBackends: turn.value.planMode === "plan" ? undefined : await availableVideoBackends(turnSettings),
           contextBudget: { remainingTokens: Math.max(0, modelLimit - activeTokens), modelLimitTokens: modelLimit }
         }),
         sessionWorldState.get(session)

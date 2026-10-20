@@ -786,6 +786,10 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       // 两句话都是他自己的动作，得分开说。
       if (/用户跳过了这组问题/.test(output)) return "已跳过（按默认继续）";
       if (/用户停止了本轮对话/.test(output)) return "已停止本轮";
+      // **取消会话走的是另一句文案**（`questionBridge.cancelSession` reject
+      // 「本轮对话已结束。」）。漏掉它就会落到兜底的「未获得回答，按默认继续」——
+      // 而这一轮其实**已经停了**，什么都没继续（实测 probe-stop-with-question）。
+      if (/本轮对话已结束/.test(output)) return "已停止本轮";
       if (/用户未在时限内回答/.test(output)) return "等待超时，按默认继续";
       return /未获得用户回答/.test(output) ? "未获得回答，按默认继续" : "已收到你的回答";
     }

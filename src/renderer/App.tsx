@@ -2963,7 +2963,14 @@ function PgQuestionCard({ questions, onSubmit, onSkip }: {
   const answerFor = (target: LlmQuestion, override?: string[]): string[] => {
     if (override) return override;
     const text = (custom[target.id] ?? "").trim();
-    // 自定义优先：用户手写了内容，就不该再叠加预设选项（那会让模型以为"两个都选了"）。
+    // **单选**：自定义优先，不叠加预设选项（否则模型会以为"两个都选了"）。
+    // **多选**：补一句自定义不该把已勾的选项清掉（实测缺陷 probe-multi-custom）——
+    // 用户勾了「加字幕」「配背景音乐」再写「再加个片尾」，本意是三个都要，
+    // 而旧逻辑只把自定义那一句交上去，前面两个白勾了。多选的语义本来就是"可以多个"。
+    if (target.multiSelect) {
+      const picks = picked[target.id] ?? [];
+      return text ? [...picks, text] : picks;
+    }
     return text ? [text] : picked[target.id] ?? [];
   };
   const answered = (target: LlmQuestion) => answerFor(target).length > 0;
@@ -3040,8 +3047,10 @@ function PgQuestionCard({ questions, onSubmit, onSkip }: {
             onChange={(event) => {
               const text = event.target.value;
               setCustom((all) => ({ ...all, [question.id]: text }));
-              // 一旦开始手写，就清掉已选的预设选项（避免两个答案同时生效）。
-              if (text.trim()) setPicked((all) => ({ ...all, [question.id]: [] }));
+              // **单选**才开始手写就清掉已选的预设选项（避免两个答案同时生效）。
+              // **多选不能清**（实测缺陷 probe-multi-custom）：用户勾了「加字幕」「配背景音乐」
+              // 再补一句「再加个片尾」，本意是三个都要；清空的话前两个白勾了。
+              if (text.trim() && !question.multiSelect) setPicked((all) => ({ ...all, [question.id]: [] }));
             }}
             onKeyDown={(event) => {
               if (event.key !== "Enter") return;

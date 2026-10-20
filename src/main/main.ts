@@ -1126,16 +1126,33 @@ function registerIpc(
             backendSettled = true;
             sessionChosenBackend.set(session, userSaid);
           }
+          // **用户点名的后端不可用时，必须说清楚，不能静默换一个**（实测缺陷
+          // probe-named-unavailable）：用户说「用瞬映生成」，而这台机器没存瞬映卡密、
+          // 只有本机 ComfyUI 可用。此时 `usableBackends.length === 1`，下面那个闸门
+          // 整块被跳过（它是 `> 1` 才生效），于是 `backend` 落到默认的 `local`——
+          // **用户明确说了用瞬映，软件却用本机跑，且没有任何提示**。
+          //
+          // 这正是 CLAUDE.md 点过的那类错：用户以为走了云端、实际跑在本机，
+          // 结果与花费完全不同，而他看不出任何异常。
+          if (userSaid && !usableBackends.some((entry) => entry.kind === userSaid)) {
+            const all = await videoBackendAvailability(turnSettings);
+            const why = all.find((entry) => entry.kind === userSaid)?.reason;
+            const others = usableBackends.filter((entry) => entry.kind !== userSaid);
+            return [
+              `你提到要用「${backendKindLabel(userSaid)}」，但它现在用不了${why ? `：${why}` : ""}。`,
+              others.length
+                ? `目前可用的只有：${others.map((entry) => `${backendKindLabel(entry.kind)}（\`${entry.kind}\`）— ${entry.note}`).join("、")}。**任务没有创建。** 请把这个情况告诉用户，问他要不要改用这一个，别自己替他换。`
+                : `现在没有任何可用的生成后端。**任务没有创建。** 请让用户去「连接设置」配好一个再试。`
+            ].join("\n");
+          }
           if (usableBackends.length > 1 && !backendSettled) {
-            // 走到这里说明：本轮原话没点名后端（否则上一块已置位），会话记忆里也没有
+            // 走到这里说明：本轮原话没点名后端（否则上面已 return 或已置位），会话记忆里也没有
             // （否则 `backendSettled` 初值就是 true）——**必须先问用户**。
             return [
               `**还没有确定用哪个后端，任务没有创建。** 现在有 ${usableBackends.length} 个可用的生成方式：`,
               usableBackends.map((entry) => `- ${backendKindLabel(entry.kind)}（\`${entry.kind}\`）— ${entry.note}`).join("\n"),
               `它们的花费差别很大（本机不额外计费、云端按秒计费、瞬映扣卡密次数），不能替用户默认挑一个。`,
-              userSaid
-                ? `另外：用户提到了「${userSaid}」，但那个后端现在不可用（或不在可用清单里）。请先把现状告诉用户，再问要不要换一个。`
-                : `请先用 \`request_user_input\` 问用户用哪一个（选择题里把上面几个都列上），拿到答复后再带 \`backend\` 重新调用本工具。`,
+              `请先用 \`request_user_input\` 问用户用哪一个（选择题里把上面几个都列上），拿到答复后再带 \`backend\` 重新调用本工具。`,
               `如果用户已经明确说了用哪个（如"用本机""走云端"），直接把那个值放进 \`backend\` 再调用。`
             ].join("\n");
           }

@@ -1347,18 +1347,30 @@ ${tableNote}` : ""}`;
         editArtifact: async (params: { name: string; oldText: string; newText: string }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
-          // **解析必须排队**（见 resolveArtifactQueued 的注释）：同 step 里并行的
-          // create_file 可能还没落盘，直接解析会报"找不到产物"。
-          const found = await resolveArtifactQueued(dir, safeName);
-          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
-          const resolved = found.path;
-          // 下落必须说出来，且**分清成因**（名字不存在 / 已过期 / 没写扩展名 / csv 落成 xlsx）。
-          // 不说的话模型以为改的就是自己点的那份（界面上同名只展示最新版）。
-          const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
-          if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
-          // 读改写在同一个串行队列里：AI SDK 会在一个 step 里并行执行多个 tool call，
-          // 两个 edit 同时读同一份文件时后写的会覆盖前一个改动（与 create_file 同名覆盖同类）。
+          // **解析与读改写必须在同一个队列条目里**（实测竞态）。
+          //
+          // 旧写法是 `await resolveArtifactQueued(...)` 之后再 `artifactWriteQueue.run(...)`——
+          // 那是**两次排队**，中间允许别的条目插进来。真实序列（AI SDK 同 step 并行调用）：
+          //
+          //   A: 解析 → 命中「报告.html」（当前最新）
+          //   B: create_file 落盘「报告 (2).html」（新的最新）
+          //   C: 读改写「报告.html」  ← 改的是**上一版**
+          //
+          // 而界面把同名多版本折叠成只显示最新一版，于是用户看到的那份**一点没变**，
+          // 模型却回一句"已修改"——两边看的是两个文件（与 `probe-name-fallback` 同一类，
+          // 只是这里由"两次排队"引入）。
+          //
+          // 收进一个条目后，解析必然排在它前面所有落盘之后，`create_file` 也就总能被看见。
+          // 注意：这里**必须**调 `resolveArtifactForTool` 而不是 `resolveArtifactQueued`——
+          // 后者会再排一次队，等于自己等自己，永久挂起（与 `readArtifact` 那条注释同理）。
           return artifactWriteQueue.run(async (): Promise<string> => {
+            const found = await resolveArtifactForTool(dir, safeName);
+            if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+            const resolved = found.path;
+            // 下落必须说出来，且**分清成因**（名字不存在 / 已过期 / 没写扩展名 / csv 落成 xlsx）。
+            // 不说的话模型以为改的就是自己点的那份（界面上同名只展示最新版）。
+            const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
+            if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
             // 与 read_artifact / 预览共用同一个解码函数（见 `modules/textFile.ts`）。
             // **这条路径更要紧**：按 utf8 硬读 GBK 文件会得到一堆 `�`，`applyExactEdit`
             // 拿着这份乱码去匹配必然 not-found；即便匹配上，写回时也是把乱码落盘——
@@ -1414,13 +1426,15 @@ ${tableNote}` : ""}`;
         editArtifactBatch: async (params: { name: string; edits: Array<{ oldText: string; newText: string }> }) => {
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
-          // 同 editArtifact：解析排队，避免同 step 里 create_file 还没落盘。
-          const found = await resolveArtifactQueued(dir, safeName);
-          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
-          const resolved = found.path;
-          const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
-          if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
+          // **同 editArtifact：解析与读改写放进同一个队列条目**，否则两次排队之间
+          // 允许 `create_file` 插进来落成新版本，而这里改的仍是上一版——
+          // 界面只展示最新版，用户看到"一点没变"。
           return artifactWriteQueue.run(async (): Promise<string> => {
+            const found = await resolveArtifactForTool(dir, safeName);
+            if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+            const resolved = found.path;
+            const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
+            if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
             // 同单处编辑：与 read_artifact / 预览共用同一个解码函数。
             const before = decodeTextBytes(await readFile(resolved));
             const outcome = applyExactEdits(before, params.edits);

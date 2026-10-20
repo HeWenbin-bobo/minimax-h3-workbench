@@ -1616,13 +1616,24 @@ ${tableNote}` : ""}`;
           const requestId = randomUUID();
           // 先推事件再挂起：渲染端要拿到 requestId 才能回传答案。
           sendLlmQuestion({ requestId, questions: params.questions, sessionId: session });
-          const answer = await questionBridge.ask(session, requestId, params.questions, controller.signal);
-          // **用户答完就置位**：`generate_video` 的准入闸门看的就是这个。
-          // 只认"回答里出现了某个后端名"，不认问题内容——模型问的是时长、
-          // 而答案里恰好带了"本机"，那种情况不该被当成"用户选了后端"。
-          const picked = backendMentionedInText(answer);
-          if (picked) { backendSettled = true; backendFromUser = picked; }
-          return answer;
+          try {
+            const answer = await questionBridge.ask(session, requestId, params.questions, controller.signal);
+            // **问过就算数**（闸门的语义是"不许不问就挑"，不是"必须拿到明确后端名"）。
+            // 用户答了但答的是时长、没提后端时，也应该允许模型自己定——
+            // 否则它会为了"凑一个后端名"再问一次，白烧步骤。
+            backendSettled = true;
+            const picked = backendMentionedInText(answer);
+            if (picked) backendFromUser = picked;
+            return answer;
+          } catch (error) {
+            // **跳过 / 超时也是"问过了"**（实测 probe-skip-then-gate）：
+            // 用户点「跳过，你决定」走的是 reject，没有这一段的话 `backendSettled`
+            // 永远不会置位，闸门继续拦着——用户明确授权 AI 自己决定，
+            // 软件却不许它决定，模型只能再问一次，用户再点跳过……
+            // 这正是"问了又拦、拦了又问"的死循环形状（探针复现：2 轮都被拦）。
+            backendSettled = true;
+            throw error;
+          }
         }
       };
       let result: AgentRunResult | undefined;

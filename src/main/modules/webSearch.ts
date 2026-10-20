@@ -1,4 +1,5 @@
 import { describeError } from "../../shared/errors";
+import { sliceSafe } from "../../shared/text";
 
 /**
  * 联网搜索：优先走用户配置的第三方搜索 API；未配置时回落到免 key 直抓公开结果页。
@@ -251,7 +252,10 @@ export function parseBing(html: string): SearchResult[] {
     items.push({
       url: resolveHref(heading[1], "https://www.bing.com"),
       title: stripHtml(heading[2]),
-      snippet: snippet ? stripHtml(snippet[1]).slice(0, 200) : ""
+      // **用 sliceSafe**（实测）：裸 `slice(0, 200)` 会切开 emoji 的代理对，
+      // 留下一个孤立高代理项——拼进 `web_search` 回执后渲染成 `�`，模型读到的是坏字符。
+      // 中英混排的真实摘要切点不一定是偶数，这条一定会踩到（探针：末码元 d83d）。
+      snippet: snippet ? sliceSafe(stripHtml(snippet[1]), 200) : ""
     });
   }
   return items;

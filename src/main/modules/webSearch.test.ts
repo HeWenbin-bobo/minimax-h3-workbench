@@ -222,6 +222,18 @@ describe("parseBing class 匹配稳健性", () => {
     expect(items[0].url).toBe("https://x.com");
     expect(items[0].title).toBe("标题");
   });
+
+  // 实测：摘要截断用裸 `slice(0, 200)` 会切开 emoji 的代理对，
+  // 留下孤立高代理项——拼进 web_search 回执后渲染成 `�`，模型读到的是坏字符。
+  // 中英混排的真实摘要切点不一定是偶数，这条一定会踩到（探针：末码元 d83d）。
+  it("摘要截断到 200 字符时不切开 emoji 的代理对", () => {
+    const body = `摘${"😀".repeat(200)}`; // 前置一个单码元字符，把切点挪成奇数
+    const html = `<ol><li class="b_algo"><h2><a href="https://x.com">标题</a></h2><p>${body}</p></li></ol>`;
+    const snippet = parseBing(html)[0]?.snippet ?? "";
+    const last = snippet.charCodeAt(snippet.length - 1);
+    expect(last >= 0xd800 && last <= 0xdbff, `末码元 ${last.toString(16)} 是孤立高代理项`).toBe(false);
+    expect(snippet.length).toBeLessThanOrEqual(200);
+  });
 });
 
 // 第三方搜索 API 的兼容实现质量参差：results 不是数组时会抛英文 TypeError，

@@ -935,3 +935,20 @@ describe("chat 等响应头的超时", () => {
     expect((error as Error).message).not.toMatch(/AbortError/);
   });
 });
+
+// 实测误报（本会话自引入）：放宽 schema 后新增的「可纠正的拒绝」判定，最初写成裸的
+// `/是空的|没有要问的问题|…/`，于是搜索引擎返回的**标题**只要含这几个字
+// （`[1] 为什么杯子是空的`）就会被判成工具失败 —— 步骤条打 ✕、摘要只剩标题一行。
+// 判据必须锚定我们自己的回执开头。
+describe("可纠正的拒绝对搜索结果不误报", () => {
+  it("标题里含「是空的」的正常结果不算失败", () => {
+    const output = "[1] 为什么杯子是空的\nhttps://x.com/a\n一篇科普。\n\n[2] 标题二\nhttps://x.com/b\n摘要二";
+    expect(isToolFailure(output)).toBe(false);
+    expect(humanizeToolOutput("web_search", output)).toBe("找到 2 条结果");
+  });
+
+  it("读回的正文里含这些字样也不算失败", () => {
+    const output = "文件：a.html（共 3 行，本次显示第 1–3 行）\n    1| 没有要问的问题\n    2| x";
+    expect(isToolFailure(output)).toBe(false);
+  });
+});

@@ -1207,7 +1207,10 @@ function registerIpc(
               throw new Error(`表格文件已损坏或格式不受支持，无法读取（${error instanceof Error ? error.message : "未知错误"}）。`);
             }
           } else {
-            raw = await readFile(resolved, "utf8");
+            // 与附件 / 预览共用一个解码函数（见 `modules/textFile.ts`）：
+            // 用户完全可能用记事本把产物另存成 GBK/UTF-16 再让模型读；
+            // 按 utf8 硬读只会把乱码喂给模型，它据此改出来的东西必然是坏的。
+            raw = decodeTextBytes(await readFile(resolved));
           }
           // **按关键词定位优先**（实测真机）：模型要找某个函数却不知道在哪，
           // 于是把 2118 行的文件按 400 行一段连读 5 次，光找位置就吃掉 5 步。
@@ -1333,7 +1336,11 @@ ${tableNote}` : ""}`;
           // 读改写在同一个串行队列里：AI SDK 会在一个 step 里并行执行多个 tool call，
           // 两个 edit 同时读同一份文件时后写的会覆盖前一个改动（与 create_file 同名覆盖同类）。
           return artifactWriteQueue.run(async (): Promise<string> => {
-            const before = await readFile(resolved, "utf8");
+            // 与 read_artifact / 预览共用同一个解码函数（见 `modules/textFile.ts`）。
+            // **这条路径更要紧**：按 utf8 硬读 GBK 文件会得到一堆 `�`，`applyExactEdit`
+            // 拿着这份乱码去匹配必然 not-found；即便匹配上，写回时也是把乱码落盘——
+            // 用户的原文被彻底覆盖。写回统一成 UTF-8（内容不变、只换编码），这是可接受的取舍。
+            const before = decodeTextBytes(await readFile(resolved));
             const outcome = applyExactEdit(before, params.oldText, params.newText);
             if (!outcome.ok) {
               // 失败要说清**为什么**、**在哪**，并给下一步动作——只说"失败"模型会盲目重试。
@@ -1389,7 +1396,8 @@ ${tableNote}` : ""}`;
           const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
           if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
           return artifactWriteQueue.run(async (): Promise<string> => {
-            const before = await readFile(resolved, "utf8");
+            // 同单处编辑：与 read_artifact / 预览共用同一个解码函数。
+            const before = decodeTextBytes(await readFile(resolved));
             const outcome = applyExactEdits(before, params.edits);
             if (!outcome.ok) {
               // 失败必须指明是**第几条**、为什么——否则模型不知道从哪一条开始修。

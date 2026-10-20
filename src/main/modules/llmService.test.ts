@@ -216,6 +216,31 @@ describe("工具成败判定（isToolFailure）", () => {
     });
   });
 
+  /**
+   * 后端闸门拒绝（22f67da 引入）的回执也必须判成"没做成"。
+   *
+   * 实测（真机 probe-real-ask-first 的日志）：闸门拦住时步骤条渲染成
+   * `✓ 生成视频完成（没有创建任务）`——**打了勾，却说没有创建任务**。
+   * 用户看到的是"成功了但什么也没发生"。
+   *
+   * 成因：回执以 `**还没有确定用哪个后端，任务没有创建。**` 开头，
+   * 既不含"失败"，也不在 `REJECTION_RE` 的清单里。
+   */
+  describe("后端闸门拒绝不算「完成」", () => {
+    const blocked = [
+      "**还没有确定用哪个后端，任务没有创建。** 现在有 2 个可用的生成方式：\n- 本机 ComfyUI（`local`）— 不额外计费\n请先用 `request_user_input` 问用户用哪一个。",
+      "后端「MiniMax H3」现在用不了：还没保存 MiniMax АРI keys。\n**任务没有创建**，不要告诉用户已经提交。"
+    ];
+
+    it("闸门拒绝要判成未成功（不能打勾）", () => {
+      for (const text of blocked) expect(isToolFailure(text), text.slice(0, 24)).toBe(true);
+    });
+
+    it("摘要要说「没有创建任务」，不能只写「完成」", () => {
+      expect(humanizeToolOutput("generate_video", blocked[0])).toMatch(/没有创建任务|还没有确定/);
+    });
+  });
+
   // 本会话自引入：允许 `duration` / `count` 写成 `"8 秒"` / `"2 路"` 之后，
   // 步骤条仍要显示这两个值——只判 `typeof === "number"` 会让它们**从步骤条上消失**，
   // 而"这一轮生成几秒、几条"正是用户最想在这一行确认的东西。

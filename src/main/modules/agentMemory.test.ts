@@ -71,6 +71,36 @@ describe("buildAgentMemoryHint", () => {
     expect(buildAgentMemoryHint(tasks)).not.toContain("常用时长");
   });
 
+  /**
+   * **英文 prompt 的主题词不能被逗号粘成一团**（实测 2026-10-21）。
+   *
+   * `generate_video` 的工具描述明确写着「画面感强的英文 prompt 效果更好」，
+   * 所以真实用户的提示词大量是英文、且用逗号分隔短语。而分词只把**中文**标点
+   * 与空白当分隔符，英文逗号不断开：`lake,` 变成 5 个字符的"词"（刚好通过长度过滤），
+   * bigram 于是产出 `overlake,`、`moonlitlake,` 这类**没有任何意义**的串。
+   *
+   * 更糟的是它会被注入**每一轮**的系统提示词——一旦用户的英文提示词里有
+   * 3 次重复的短语组合，之后每条消息都带着这堆噪声。
+   */
+  it("英文 prompt 的主题词要按空格切干净（不能把逗号粘进词里）", () => {
+    const prompt = "a fairy floating over a moonlit lake, cinematic lighting, ultra detailed, no text, no watermark";
+    const tasks = Array.from({ length: 5 }, () => task({ prompt }));
+    const hint = buildAgentMemoryHint(tasks);
+    // **右边界要含「。」**：`常见主题` 是这条提示里的最后一项，后面接的是
+    // 「。用户未明确指定时…」而不是「；」。只按 `；）` 截会把后面的说明文字一起吞进来，
+    // 于是断言永远报"含标点"（我第一版就写错了，这是探针/测试自身的错，不是产品的）。
+    const matched = /常见主题：([^；。）]*)/.exec(hint)?.[1] ?? "";
+    for (const theme of matched.split("、").filter(Boolean)) {
+      expect(theme, `主题词「${theme}」不该含标点`).not.toMatch(/[,，.。!！?？、;；:：]/);
+    }
+  });
+
+  it("中文主题词提取不受这次收紧影响", () => {
+    const prompt = "赛博朋克城市夜景，霓虹灯效果，赛博朋克风格";
+    const tasks = Array.from({ length: 5 }, () => task({ prompt }));
+    expect(buildAgentMemoryHint(tasks)).toContain("赛博朋克");
+  });
+
   // 实测（本会话）：任务记录的 `backend` 是数字时，平票排序会调
   // `a[0].localeCompare(b[0])` → `TypeError: localeCompare is not a function`。
   // 而本函数跑在"构建 system prompt"的热路径上——一个脏任务记录就能让**整轮对话**抛错。

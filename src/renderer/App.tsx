@@ -1353,6 +1353,15 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const storageWarnedRef = useRef(false);
   const searchReady = Boolean(settings.searchApi.baseUrl);
   const generating = generatingIds.includes(activeId);
+  /**
+   * AI 正在等用户回答选择题（卡片挂在气泡上）。
+   *
+   * 为什么单独提出来（实测缺陷 probe-send-kills-card）：这一刻方形主键是「■ 停止」，
+   * 而用户看到输入框还能打字，很自然地打完字去点它——**整轮对话当场被终止**，
+   * 选择题卡片一起消失，他刚才想说的内容再也发不出去。
+   * 所以在"等回答"期间，方形键不执行停止，改为提示去处；真停止仍可用下方的「■ 停止」。
+   */
+  const awaitingAnswer = Boolean(active?.messages.some((m) => m.questions));
   // 以 plan 语义发出的会话集合（按会话隔离，多会话并发时不串味）。
   // offDone 是订阅回调、读不到最新 state，故用 ref；由 onLlmDone 消费后自行删除。
   const planTurnRef = useRef(new Set<string>());
@@ -1786,6 +1795,14 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     // 故无 active 时用 creatingSessionRef 这个同步哨兵挡住第二次点击。
     if (!text && attachments.length === 0) return;
     if (active) {
+      // **AI 挂着一张选择题等回答时，要先说清楚**（实测缺陷 probe-send-kills-card）：
+      // 此时用户在输入框打了字按 Enter，`send()` 原本静默 return —— 字还在框里、界面毫无反应，
+      // 他不知道该点上面的选项才能继续（而方形键那一刻是"停止"，点下去会直接终止整轮对话）。
+      // 这类"点了没反应"是最难自查的一类问题，所以宁可多一句提示。
+      if (active.messages.some((m) => m.questions)) {
+        onNotice("AI 正在等你回答上面的选择题——请点一个选项，或点「跳过，你决定」。");
+        return;
+      }
       if (generatingIds.includes(active.id) || sendingRef.current.has(active.id)) return;
     } else if (creatingSessionRef.current) {
       // 第一次点击已经进入"新建会话"流程，第二次点击必须被挡住。
@@ -2202,7 +2219,13 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
             <textarea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder={generating ? "AI 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
             {/* 这个方形键在生成中就是停止键：图标已经是 ■，却还 disabled（灰掉、点了没反应），
                 用户只能去下面 chips 里找「■ 停止」。图标语义已经说明它是停止，就让它真能停。 */}
-            <button className="primary" aria-label={generating ? "停止生成" : "发送"} title={generating ? "停止生成" : "发送（Enter）"} disabled={!generating && !input.trim() && attachments.length === 0} onClick={generating ? stop : send}>{generating ? "■" : "▲"}</button>
+            {/* 这个方形键在生成中就是停止键：图标已经是 ■，却还 disabled（灰掉、点了没反应），
+                用户只能去下面 chips 里找「■ 停止」。图标语义已经说明它是停止，就让它真能停。
+                **但"等用户回答选择题"期间例外**（实测 probe-send-kills-card）：那一刻用户
+                看到输入框还能打字，很自然会打完字去点这个键——而它是停止，一点就把整轮
+                连同选择题卡片一起终结，想说的话再也发不出去。这时改为提示去处；
+                真要中止仍可用下方 chips 里的「■ 停止」。 */}
+            <button className="primary" aria-label={awaitingAnswer ? "请先回答上面的选择题" : generating ? "停止生成" : "发送"} title={awaitingAnswer ? "AI 正在等你回答上面的选择题（点「跳过，你决定」也可以继续）" : generating ? "停止生成" : "发送（Enter）"} disabled={!awaitingAnswer && !generating && !input.trim() && attachments.length === 0} onClick={awaitingAnswer ? () => onNotice("AI 正在等你回答上面的选择题——请点一个选项，或点「跳过，你决定」。") : generating ? stop : send}>{awaitingAnswer ? "…" : generating ? "■" : "▲"}</button>
           </div>
           <div className="pg-chips">
             <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => setWebSearch(!webSearch)}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>

@@ -500,3 +500,29 @@ describe("落盘前剥离瞬态字段（stripTransientForPersist）", () => {
     expect(result[0].messages[0].questions).toBeUndefined();
   });
 });
+
+// 实测缺陷：围栏只认三个反引号时，用**四个反引号**包住三个反引号的代码块
+// （官方 Markdown 用来"在正文里教别人写代码块"的标准写法）会渲染成两个空代码块，
+// 中间那行正文落到外面变成普通段落。模型写"怎么用 markdown"这类文档时几乎一定会这么写。
+describe("围栏代码块（长度可变）", () => {
+  it("四个反引号能包住三个反引号的示例", () => {
+    const html = render(["````md", "```js", "const a = 1;", "```", "````"].join("\n"));
+    expect(html).toContain("md-code");
+    expect(html).toContain("```js");
+    expect(html).toContain("const a = 1;");
+    // 不能渲染成两个空代码块
+    expect(html).not.toContain("<code></code>");
+  });
+
+  it("普通三个反引号行为不变（语言标记仍被识别）", () => {
+    const html = render("```js\nconst a = 1;\n```");
+    expect(html).toContain('data-lang="js"');
+    expect(html).toContain("const a = 1;");
+  });
+
+  it("未闭合的围栏（流式途中）照常按代码块渲染", () => {
+    const html = render("说明：\n```js\nconst a = 1;");
+    expect(html).toContain("md-code");
+    expect(html).toContain("说明：");
+  });
+});

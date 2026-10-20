@@ -58,16 +58,33 @@ export function renderMarkdown(text: string, depth = 0): ReactNode[] {
       continue;
     }
 
-    // 围栏代码块 ```lang ... ```
-    if (line.trimStart().startsWith("```")) {
-      const lang = line.trim().slice(3).trim();
+    // 围栏代码块 ```lang ... ```（**围栏长度可变**，见下面的说明）
+    //
+    // 实测缺陷：只认三个反引号时，用**四个反引号**包住三个反引号的代码块
+    // （官方 Markdown 用来"在正文里教别人写代码块"的标准写法）会渲染成两个空代码块，
+    // 中间那行 `const a = 1;` 落到外面变成普通段落：
+    //     ````md          →  <pre data-lang="`md"></pre>
+    //     ```js                <p>const a = 1;</p>
+    //     const a = 1;         <pre></pre>
+    //     ```
+    //     ````
+    // 而模型写"怎么用 markdown"这类文档时几乎一定会这么写，用户看到的是空白代码块。
+    // 规则（CommonMark）：开围栏至少 3 个反引号；闭围栏必须**不小于**开围栏长度。
+    const fenceOpen = /^(`{3,})(.*)$/.exec(line.trimStart());
+    if (fenceOpen) {
+      const fence = fenceOpen[1];
+      // 语言标记：`` ````md `` 的开围栏是 4 个，剩下的 `md` 才是语言。
+      const lang = fenceOpen[2].trim();
       const body: string[] = [];
       index += 1;
-      while (index < lines.length && !lines[index].trimStart().startsWith("```")) {
+      while (index < lines.length) {
+        const closing = /^(`{3,})\s*$/.exec(lines[index].trimStart());
+        // 闭围栏长度不够（内层那三个反引号）不算结束——它属于正文。
+        if (closing && closing[1].length >= fence.length) break;
         body.push(lines[index]);
         index += 1;
       }
-      index += 1; // 跳过闭合 ```
+      index += 1; // 跳过闭合围栏
       nodes.push(
         <pre className="md-code" key={key++} data-lang={lang || undefined}>
           <code>{body.join("\n")}</code>

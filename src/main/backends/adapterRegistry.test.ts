@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backendAvailability, backendMentionedInText, normalizeBackendKind } from "./adapterRegistry";
+import { backendAvailability, backendMentionedInText, backendPickedFromQuestions, normalizeBackendKind } from "./adapterRegistry";
 
 /**
  * 背景（实测真机，2026-10-20）：用户输入一段视频描述后，智能体**直接**用「连接设置」
@@ -167,5 +167,58 @@ describe("backendMentionedInText", () => {
     for (const value of [null, undefined, 42, {}, [], true]) {
       expect(backendMentionedInText(value)).toBeUndefined();
     }
+  });
+});
+
+/**
+ * 从选择题答案里判断"用户选了哪个后端"。
+ *
+ * 实测缺陷 probe-style-option-backend：模型问的是**画面风格**，选项里恰好有
+ * 「云端漂浮的城堡」，用户点了它 —— 结果被当成"选了 MiniMax 云端"，任务按秒计费。
+ * 他只是在挑画面。
+ *
+ * 判据：**不是所有题都在问后端**，只有 id/header/question 指向后端主题的题，
+ * 其选项 label 才参与宽松匹配；选项 id 本身是后端名时例外（那是模型专门标后端的）。
+ */
+describe("backendPickedFromQuestions", () => {
+  const answerWith = (...labels: string[]) => `用户已回答：\n【题】用户选择：${labels.join("、")}`;
+
+  it("后端题的选项 label 能认（云端 → minimax）", () => {
+    const questions = [{ id: "backend", header: "生成方式", question: "用哪个后端？", options: [
+      { id: "a", label: "云端（按秒计费）" },
+      { id: "b", label: "本机 ComfyUI" }
+    ] }];
+    expect(backendPickedFromQuestions(questions, answerWith("云端（按秒计费）"))).toBe("minimax");
+    expect(backendPickedFromQuestions(questions, answerWith("本机 ComfyUI"))).toBe("local");
+  });
+
+  it("**风格题的「云端」不算**（这条是花钱的边界）", () => {
+    const questions = [{ id: "style", header: "画面风格", question: "想要哪种画面风格？", options: [
+      { id: "cloud", label: "云端漂浮的城堡" },
+      { id: "forest", label: "森林秘境" }
+    ] }];
+    expect(backendPickedFromQuestions(questions, answerWith("云端漂浮的城堡"))).toBeUndefined();
+  });
+
+  it("选项 id 本身是后端名时，与题目主题无关也认", () => {
+    const questions = [{ id: "q1", header: "随便", question: "随便问问", options: [
+      { id: "minimax", label: "按秒计费的那个" }
+    ] }];
+    expect(backendPickedFromQuestions(questions, answerWith("按秒计费的那个"))).toBe("minimax");
+  });
+
+  it("答案里没出现的 label 不算（用户没点它）", () => {
+    const questions = [{ id: "backend", header: "生成方式", question: "用哪个后端？", options: [
+      { id: "x", label: "云端" }
+    ] }];
+    expect(backendPickedFromQuestions(questions, answerWith("本机"))).toBeUndefined();
+  });
+
+  it("脏入参不抛错（questions / options / answer 都来自 IPC）", () => {
+    for (const bad of [null, undefined, 42, {}, ""]) {
+      expect(() => backendPickedFromQuestions(bad as never, bad as never)).not.toThrow();
+    }
+    expect(backendPickedFromQuestions([], answerWith("x"))).toBeUndefined();
+    expect(backendPickedFromQuestions([{ id: "backend", options: null }], answerWith("x"))).toBeUndefined();
   });
 });

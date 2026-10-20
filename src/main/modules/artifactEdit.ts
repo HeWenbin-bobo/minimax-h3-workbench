@@ -155,7 +155,9 @@ function closestLines(text: string, needle: string, limit = 3): Array<{ line: nu
     .sort((a, b) => b.length - a.length)
     .slice(0, 4);
   if (tokens.length === 0) return [];
-  const lines = text.split("\n");
+  // **用 `splitLines` 而不是 `split("\n")`**：这里的输出会被模型直接"照抄成 oldText"，
+  // 行尾残留的 `\r` 在界面上看不见，抄回去必然匹配不上（与 `read_artifact` 那一类同）。
+  const lines = splitLines(text);
   const scored: Array<{ line: number; text: string; score: number }> = [];
   for (let i = 0; i < lines.length; i += 1) {
     let score = 0;

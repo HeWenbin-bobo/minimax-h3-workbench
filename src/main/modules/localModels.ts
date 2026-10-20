@@ -43,8 +43,18 @@ export async function checkLocalModels(comfyuiRoot: string, links: ResourceLink[
       let sizeBytes: number | undefined;
       try {
         const info = await stat(fullPath);
-        present = info.isFile();
         sizeBytes = info.size;
+        // **不能只判 `isFile()`**（实测缺口，2026-10-21）：H3 的 5 个模型从
+        // 605MB 到 21GB 不等（见 `shared/resourceLinks.ts` 的 sizeBytes）。
+        // 下载中断留下的 **0 字节**、或下到一半的**半截文件**，在磁盘上同样是
+        // "一个普通文件"——只判 `isFile()` 会让界面显示「✓ 已就位 / 全部就绪」，
+        // 用户直到点生成才失败，而 ComfyUI 对坏文件的报错很难读懂。
+        //
+        // 判据取"至少达到预期体积的一半"：留足余量（不同量化版本大小会有差异），
+        // 又能挡掉 0 字节与明显没下完的文件。拿不到预期体积时退回旧判据。
+        const expected = link?.sizeBytes ?? 0;
+        const atLeast = expected > 0 ? expected / 2 : 1;
+        present = info.isFile() && info.size >= atLeast;
       } catch {
         present = false;
       }

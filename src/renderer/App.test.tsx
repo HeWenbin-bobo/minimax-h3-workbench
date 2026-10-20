@@ -577,3 +577,25 @@ describe("围栏代码块（长度可变）", () => {
     expect(html).toContain("说明：");
   });
 });
+
+// 实测缺陷：链接地址里含**成对括号**很常见（维基百科的消歧义后缀就是
+// `.../Foo_(bar)`），旧的 `[^)\s]+` 会在第一个 `)` 处停下 ——
+// href 变成半截地址，多出来的那个 `)` 还被当成正文显示。
+describe("行内链接（URL 含括号）", () => {
+  it("URL 里的成对括号被完整保留", () => {
+    const html = render("见 [说明](https://zh.wikipedia.org/wiki/Foo_(bar))");
+    expect(html).toContain('href="https://zh.wikipedia.org/wiki/Foo_(bar)"');
+    expect(html).not.toContain("</a>)");
+  });
+
+  it("查询串与锚点不受影响", () => {
+    // 输入用原始 `&`：React 渲染 href 时会转义成 `&amp;`，断言里要按转义后的形态比。
+    expect(render("[a](https://x.com/p?q=1&r=2#sec)")).toContain("https://x.com/p?q=1&amp;r=2#sec");
+  });
+
+  it("http 链接仍退化为纯文本（不可点）", () => {
+    const html = render("[标题](http://example.com/a)");
+    expect(html).not.toContain("<a ");
+    expect(html).toContain("标题");
+  });
+});

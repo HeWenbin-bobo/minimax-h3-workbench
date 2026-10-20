@@ -225,7 +225,12 @@ function parseTableRow(line: string): string[] {
 // 比不可点更糟。这里的做法：匹配 `https?`，http 只输出标题文字。
 function inline(text: string, keyBase: number): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  // **URL 里可以有成对的括号**（实测缺陷）：维基百科的链接形如
+  // `https://zh.wikipedia.org/wiki/Foo_(bar)`，旧的 `[^)\s]+` 会在第一个 `)` 处停下，
+  // 于是 href 变成半截地址、多余的那个 `)` 被当成正文显示出来。
+  // 这里只放开**一层**配平括号（`(?:[^()\s]|\([^()\s]*\))*`）——够覆盖消歧义后缀这类真实写法，
+  // 又不至于让正则回溯失控。未配平的括号仍不匹配（按字面文本显示，比给出坏链接安全）。
+  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https?:\/\/(?:[^()\s]|\([^()\s]*\))*)\)/g;
   let last = 0;
   let match: RegExpExecArray | null;
   let key = keyBase * 1000;

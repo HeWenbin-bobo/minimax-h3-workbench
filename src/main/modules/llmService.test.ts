@@ -11,7 +11,7 @@ vi.mock("@ai-sdk/openai-compatible", () => ({
   createOpenAICompatible: () => ({ chatModel: (id: string) => ({ id }) })
 }));
 
-import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, humanizeToolInput, humanizeToolOutput, isToolFailure, type LlmServiceOptions } from "./llmService";
+import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, humanizeToolInput, humanizeToolOutput, isToolFailure, normalizeAgentQuestions, type LlmServiceOptions } from "./llmService";
 
 // 构造一个 ReadableStream，把字符串分块推送（模拟网络分包边界不齐）。
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
@@ -980,5 +980,121 @@ describe("可纠正的拒绝对搜索结果不误报", () => {
   it("读回的正文里含这些字样也不算失败", () => {
     const output = "文件：a.html（共 3 行，本次显示第 1–3 行）\n    1| 没有要问的问题\n    2| x";
     expect(isToolFailure(output)).toBe(false);
+  });
+});
+
+/**
+ * 选择题参数的形状归一（`normalizeAgentQuestions`）。
+ *
+ * 实测背景（probe-question-shapes，2026-10-20）：9 种参数形状里 **7 种**被 AI SDK 在
+ * `parseToolCall` 阶段拒掉，`execute` 根本不跑、模型收不到回执。而 `request_user_input`
+ * 是后端闸门（"多个后端可用时必须先问用户"）的**唯一出口**——调用被跳过，
+ * 闸门就永远关不上，模型反复重试烧光 20 步。
+ *
+ * 所以这里的契约是：**任何"能猜出意图"的形状都要接住**，读不出来时回一句
+ * 可纠正的中文说明（而不是抛错）。
+ */
+describe("选择题参数归一（normalizeAgentQuestions）", () => {
+  const questionsOf = (raw: unknown) => {
+    const result = normalizeAgentQuestions(raw);
+    if ("error" in result) throw new Error(`预期归一成功，却返回了说明：${result.error}`);
+    return result.questions;
+  };
+
+  it("标准形状原样通过", () => {
+    const [q] = questionsOf([{ id: "dur", header: "时长", question: "几秒？", options: [{ id: "6", label: "6 秒", description: "短" }] }]);
+    expect(q.id).toBe("dur");
+    expect(q.header).toBe("时长");
+    expect(q.question).toBe("几秒？");
+    expect(q.options).toEqual([{ id: "6", label: "6 秒", description: "短" }]);
+  });
+
+  it("options 写成纯字符串数组也接住（模型真这么写）", () => {
+    const [q] = questionsOf([{ question: "几秒？", options: ["6 秒", "15 秒"] }]);
+    expect(q.options.map((o) => o.label)).toEqual(["6 秒", "15 秒"]);
+    // id 自动补，且两两不同（否则答案回传会把两个选项当成一个）
+    expect(new Set(q.options.map((o) => o.id)).size).toBe(2);
+  });
+
+  it("options 写成对象映射 / 单个字符串也接住", () => {
+    expect(questionsOf([{ question: "几秒？", options: { a: "6 秒", b: "15 秒" } }])[0].options.map((o) => o.label))
+      .toEqual(["6 秒", "15 秒"]);
+    expect(questionsOf([{ question: "几秒？", options: "6 秒" }])[0].options).toHaveLength(1);
+  });
+
+  it("questions 写成单字符串 / 对象映射也接住", () => {
+    // 单个字符串 = "只问这一个"（没给选项 → 走可纠正说明）
+    expect(normalizeAgentQuestions("几秒？")).toHaveProperty("error");
+    // 对象映射的**值**里带完整问题与选项时应能画出来
+    const [q] = questionsOf({ q1: { question: "几秒？", options: ["6 秒", "15 秒"] } });
+    expect(q.question).toBe("几秒？");
+    expect(q.options).toHaveLength(2);
+  });
+
+  it("问题元素本身是字符串时，用文本当问题", () => {
+    const result = normalizeAgentQuestions([{ question: "几秒？", options: [{ label: "6 秒" }, { label: "15 秒" }] }]);
+    expect("questions" in result && result.questions[0].question).toBe("几秒？");
+  });
+
+  it("multiSelect 接受 \"yes\" / 1 / \"是\"，拒绝无意义的值时按未开启", () => {
+    const bool = (value: unknown) => questionsOf([{ question: "哪些？", multiSelect: value, options: ["a", "b"] }])[0].multiSelect;
+    expect(bool("yes")).toBe(true);
+    expect(bool(1)).toBe(true);
+    expect(bool("是")).toBe(true);
+    expect(bool("no")).toBe(false);
+    expect(bool(0)).toBe(false);
+    expect(bool("???")).toBeUndefined();
+  });
+
+  it("label 是数字时转成文本（否则渲染端会画出空标签）", () => {
+    const [q] = questionsOf([{ question: "几秒？", options: [{ id: "6", label: 6 }, { id: "15", label: 15 }] }]);
+    expect(q.options.map((o) => o.label)).toEqual(["6", "15"]);
+  });
+
+  it("问题 id / 选项 id 双双去重（同 id 会让后一题顶用前一题的答案）", () => {
+    const list = questionsOf([
+      { id: "q", question: "几秒？", options: [{ id: "a", label: "6 秒" }, { id: "a", label: "15 秒" }] },
+      { id: "q", question: "什么比例？", options: ["16:9", "9:16"] }
+    ]);
+    expect(list[0].id).not.toBe(list[1].id);
+    expect(new Set(list[0].options.map((o) => o.id)).size).toBe(2);
+  });
+
+  it("越界夹紧而不是拒绝：超过 3 题 / 4 个选项时只截断", () => {
+    const many = Array.from({ length: 6 }, (_, i) => ({
+      id: `q${i}`,
+      question: `问题 ${i}`,
+      options: Array.from({ length: 8 }, (_, j) => ({ id: `o${j}`, label: `选项 ${j}` }))
+    }));
+    const list = questionsOf(many);
+    expect(list).toHaveLength(3);
+    expect(list[0].options).toHaveLength(4);
+  });
+
+  it("问不出来的形状给**中文可纠正说明**，而不是抛错（模型据此改）", () => {
+    // 只有一句话、没有选项 → 说清"缺选项"
+    const noOptions = normalizeAgentQuestions([{ question: "几秒？" }]);
+    expect("error" in noOptions && noOptions.error).toMatch(/没有任何选项/);
+    // 空/缺 → 说清"没有要问的问题"
+    for (const empty of [[], null, undefined, "", {}, 0]) {
+      const result = normalizeAgentQuestions(empty);
+      expect("error" in result, JSON.stringify(empty)).toBe(true);
+    }
+  });
+
+  it("缺 header / question 时补默认值，不让卡片空着", () => {
+    // 两个都缺 → 这一条读不出问题文本，**跳过它**；全被跳光时回可纠正说明
+    // （而不是画一张既没标题也没问题的空卡片）。
+    const empty = normalizeAgentQuestions([{ options: ["6 秒", "15 秒"] }]);
+    expect("error" in empty && empty.error).toMatch(/缺少 question/);
+
+    // 只缺 question、有 header → 用 header 顶上（总比空卡片强）
+    const [withHeader] = questionsOf([{ header: "时长", options: ["6 秒", "15 秒"] }]);
+    expect(withHeader.question).toBe("时长");
+    expect(withHeader.header).toBe("时长");
+
+    // 只缺 header、有 question → header 补「问题 N」
+    const [withQuestion] = questionsOf([{ question: "几秒？", options: ["6 秒", "15 秒"] }]);
+    expect(withQuestion.header).toBe("问题 1");
   });
 });

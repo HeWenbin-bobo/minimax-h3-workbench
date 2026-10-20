@@ -1260,8 +1260,10 @@ function registerIpc(
               // 行数同样以真实行数为准（大表格被截到 2000 行时，
               // `raw.split("\n").length` 只有 ~2002，与正文里的"表格共 5001 行"打架）。
               // "只载入了前 N 行"也用 `readableRows`（= MAX_ROWS），
-              // 不能拿 `raw.split("\n").length - 1` 反推——`raw` 末尾还拼着说明段，会多算一行。
-              const keywordTotal = realRowCount ?? raw.split("\n").length;
+              // 不能拿 `raw 的行数 - 1` 反推——`raw` 末尾还拼着说明段，会多算一行。
+              // 用 `countLines`：文件通常以换行结尾，`split` 会多算一行（回执说"共 4 行"、
+              // 用户在编辑器里看到 3 行）。
+              const keywordTotal = realRowCount ?? countLines(raw);
               const readableNote = realRowCount !== undefined && readableRows !== undefined ? `，只载入了前 ${readableRows} 行` : "";
               return `${nameLead}在 ${found.name}（共 ${keywordTotal} 行${readableNote}）里没有找到「${keyword}」。换个更短或更准确的片段试试（区分大小写）。${caseHint}${keywordGutterNote}${ignoredRange}${tableNote ? `
 ${tableNote}` : ""}`;

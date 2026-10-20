@@ -32,14 +32,46 @@ export function inspectH3Readiness(input: unknown): {
   return { hasH3Nodes, missingModels };
 }
 
+/**
+ * 从 `/object_info` 的一个输入定义里取出**可选值列表**。
+ *
+ * 定义形如 `[<第一项>, { ...输入元信息 }]`，而"第一项"在不同 ComfyUI 版本里有三种写法：
+ *
+ * 1. **裸数组**（旧版）：`[["a.safetensors", "b.safetensors"], {}]`
+ * 2. **COMBO 类型 + options**（新版）：`[["COMBO", { options: ["a", "b"] }], {}]`
+ * 3. **字符串类型**（非下拉，例如 `["STRING", {...}]`）—— 不是选项列表，返回空
+ *
+ * **只认第 1 种会误报"模型缺失"**：新版返回第 2 种时，`choices` 是 `["COMBO", {...}]`，
+ * 过滤出字符串后只剩 `["COMBO"]`，于是每个模型都判成"不在列表里"——
+ * 用户本机模型装得好好的，界面却让他去下载 5 个模型（约 60GB）。
+ * 这类"看不见版本差异就误报"的错误比不检测更糟，所以三种都要认。
+ */
 function inputChoices(nodes: JsonObject, className: string, inputName: string): string[] {
   const node = objectValue(nodes[className]);
   const input = objectValue(node?.input);
   const required = objectValue(input?.required);
   const definition = required?.[inputName];
   if (!Array.isArray(definition)) return [];
-  const choices = definition[0];
-  return Array.isArray(choices) ? choices.filter((value): value is string => typeof value === "string") : [];
+  const first = definition[0];
+  // ① 裸数组：元素都是字符串
+  if (Array.isArray(first)) {
+    const strings = first.filter((value): value is string => typeof value === "string");
+    // ② 新版 `["COMBO", { options: [...] }]`：首元素是类型名、次元素带 options
+    if (strings.length === 1 && strings[0].toUpperCase() === "COMBO") {
+      const meta = objectValue(first[1]);
+      const options = meta?.options;
+      return Array.isArray(options)
+        ? options.filter((value): value is string => typeof value === "string")
+        : [];
+    }
+    return strings;
+  }
+  // ③ `[{ options: [...] }, {...}]`（少数自定义节点把 choices 包成对象）
+  const wrapped = objectValue(first);
+  const options = wrapped?.options;
+  return Array.isArray(options)
+    ? options.filter((value): value is string => typeof value === "string")
+    : [];
 }
 
 function objectValue(value: unknown): JsonObject | undefined {

@@ -1340,6 +1340,13 @@ let playgroundLive: PlaygroundLive | undefined;
  */
 const uiStreamBuffers = new Map<string, string>();
 const uiTaskIdBuffers = new Map<string, string[]>();
+/**
+ * 以 plan 语义发出的会话集合（**模块级**，切页卸载后仍保留）。
+ *
+ * 见 `planTurnRef` 处的说明：`offDone` 靠它判断"这一轮要不要亮「继续执行」"，
+ * 放在组件内 useRef 里会在切页后清空，导致"方案出来了却没有按钮让它开工"。
+ */
+const uiPlanTurns = new Set<string>();
 
 /** 工具名的中文标签。每个工具都必须有——否则界面会冒出英文标识符（违反「界面文案一律中文」）。 */
 const TOOL_LABELS: Record<string, string> = {
@@ -1527,7 +1534,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const awaitingAnswer = Boolean(active?.messages.some((m) => m.questions));
   // 以 plan 语义发出的会话集合（按会话隔离，多会话并发时不串味）。
   // offDone 是订阅回调、读不到最新 state，故用 ref；由 onLlmDone 消费后自行删除。
-  const planTurnRef = useRef(new Set<string>());
+  //
+  // **必须模块级**（实测缺陷 probe-plan-turn-while-away）：它记录的是"这一轮是计划语义"，
+  // 而 `offDone` 靠它决定要不要给收尾消息打 `plan: true`（渲染端据此亮「继续执行」）。
+  // 放在组件内 useRef 里，切页卸载后重建为空 Set —— 切回来收尾时判不出是计划轮，
+  // 用户看到一份完整方案，却**没有任何办法让它开工**。
+  const planTurnRef = { current: uiPlanTurns };
   // 上下文占用：分母是「模型窗口 × 80%」= 压缩触发点。按当前会话的历史轮询（主进程持有记账状态）。
   const [contextStatus, setContextStatus] = useState<ContextStatus>();
   const [compacting, setCompacting] = useState(false);
@@ -1926,6 +1938,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           }));
         }
         if (state.done) {
+          // **计划轮的「继续执行」标记也要补**（实测缺陷 probe-plan-turn-while-away）：
+          // `onLlmDone` 里靠 `planTurnRef` 判"这一轮是不是计划语义"，据此打 `plan: true`；
+          // 而那条路径在切页期间根本没跑过（事件丢了），恢复时若不算这一步，
+          // 用户会看到一份完整方案却**没有任何按钮让它开工**。
+          const wasPlanTurn = planTurnRef.current.has(target);
+          planTurnRef.current.delete(target);
           setSessions((all) => patchLast(all, target, (msg) => {
             const base = state.fullText && state.fullText.length > (msg.content?.length ?? 0)
               ? state.fullText
@@ -1936,6 +1954,8 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
               streaming: false,
               questions: undefined,
               error: failed,
+              // 与 onLlmDone 同一判据（`looksLikePlan` 纯函数，两处共用）。
+              plan: wasPlanTurn && !failed && looksLikePlan(base) ? true : undefined,
               content: failed
                 ? (base ? `${base}\n\n请求失败：${state.message}` : `请求失败：${state.message}`)
                 : base

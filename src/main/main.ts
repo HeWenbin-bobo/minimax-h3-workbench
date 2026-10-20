@@ -1200,8 +1200,12 @@ function registerIpc(
           // 这里自己收敛成数字（不引 `llmService` 的 `toFiniteNumber`：那是它的私有函数，
           // 而 `params.duration` 在本层已声明为 number，只需防运行时的非有限值）。
           const wantedDuration = Number.isFinite(Number(params.duration)) ? Math.round(Number(params.duration)) : undefined;
+          // **措辞不能说「只支持 N 秒」**（我自己第一版就这么写的，是错的）：
+          // RB 允许的是 **4/6/8 三档**，夹到 8 秒只是"这一次落在 8"，
+          // 说成"只支持 8 秒"会让模型转述给用户一个错误事实。
+          // 只说"已按这个后端允许的档位调整"，并给出实际值。
           const durationNote = wantedDuration !== undefined && wantedDuration !== request.duration
-            ? `（你要的是 ${wantedDuration} 秒，但这个后端只支持 ${request.duration} 秒，已按它调整。**对用户说明实际时长，不要复述原来的数字。**）`
+            ? `（你要的是 ${wantedDuration} 秒，已按这个后端允许的档位调整为 ${request.duration} 秒。**对用户说明实际时长，不要复述原来的数字。**）`
             : "";
           // **数量被夹同样要说**（实测缺陷 probe-count-clamp）：云端**按路计费**，
           // 模型要 8 路、实际只建 4 路时，回执若只写"数量=4 路"，它可能对用户说

@@ -147,6 +147,24 @@ describe("工具成败判定（isToolFailure）", () => {
     expect(isToolFailure(pageBody)).toBe(false);
   });
 
+  // **放宽 schema 之后新增的一类回执**：参数空/缺时工具什么都没做，
+  // 只回一句"请先给我像样的参数"。它们不含"失败"二字，旧判定一律打勾。
+  // 实测要点：`update_plan` 会显示「步骤清单已更新」（实际一条没更新）、
+  // `request_user_input` 显示「已收到你的回答」（实际没问出去）、
+  // `web_search` 显示「未找到结果」（实际根本没搜）。
+  it("可纠正的拒绝（参数为空）要判成未成功，且摘要说出实情", () => {
+    const cases: Array<[string, string, string]> = [
+      ["web_search", "搜索关键词是空的。请给出 3–6 个具体的词，不要写整句话。", "搜索关键词是空的"],
+      ["update_plan", "步骤清单是空的：请给出至少一步（每步写清要做什么 + 当前 status）。", "步骤清单是空的"],
+      ["request_user_input", "没有要问的问题（questions 是空的）。如果确实需要用户拍板，请给出 1–3 个问题。", "没有要问的问题（questions 是空的）"],
+      ["edit_artifact_batch", "没有可应用的修改：edits 是空的。请把要改的内容写成至少一条 {oldText, newText}。", "没有可应用的修改"]
+    ];
+    for (const [tool, text, expected] of cases) {
+      expect(isToolFailure(text), `${tool} 应判为未成功`).toBe(true);
+      expect(humanizeToolOutput(tool, text), `${tool} 摘要`).toBe(expected);
+    }
+  });
+
   // 实测：`read_artifact(keyword)` 没命中时，步骤条渲染成
   // `✓ 读取文件完成（共 2118 行）`——打了勾、还像是读到了内容。
   // 两个成因：① 判定用"前 40 字切句"，长文件名把「没有找到」挤出窗口；

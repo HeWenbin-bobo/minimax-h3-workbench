@@ -483,8 +483,24 @@ export function isToolFailure(output: unknown): boolean {
   const head = firstSentence.split(/[：:]/, 1)[0] ?? "";
   // `没有找到` 是 read_artifact(keyword) 的"没命中"，不是失败调用，但对用户是
   // 「这次没找到」——打勾会让人以为读到了内容（实测渲染成 `✓ 读取文件完成（共 2118 行）`）。
+  //
+  // **"可纠正的拒绝"也算未成功**（本会话放宽 schema 后新增的一类回执）：
+  // 参数空/缺时工具**什么都没做**，只回一句让模型改正的话，例如
+  // 「搜索关键词是空的。…」「步骤清单是空的：…」「没有要问的问题（questions 是空的）。…」
+  // 「没有可应用的修改：edits 是空的。…」。它们不含"失败"二字，旧判定一律打勾，
+  // 步骤条于是显示 `✓ 更新步骤清单完成（步骤清单已更新）`——而清单根本没变。
+  // 判据放在 `head`（第一小句）上：这些回执的第一句就点明了"是空的 / 没有…"。
+  if (REJECTION_RE.test(head)) return true;
   return /失败|未获得用户回答|没有找到/.test(sliceSafe(head, 160));
 }
+
+/**
+ * 「可纠正的拒绝」的第一小句特征：参数为空/缺失，工具**没有执行任何操作**。
+ *
+ * 与"失败"分开列，是因为它们的语义不同（失败=做了一半或做不了，
+ * 拒绝=你先给我像样的参数），但对用户都一样：**这一下没有产出**，不能打勾。
+ */
+const REJECTION_RE = /是空的|没有要问的问题|没有可应用的修改|没有任何选项|请给出至少一步/;
 
 /**
  * 工具执行结果 → 给用户看的摘要（显示在气泡的步骤条里）。
@@ -503,6 +519,20 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
   if (typeof output !== "string" || !output) return "完成";
   // 失败文案的第一句对用户有意义（"保存文件失败：不支持的产物类型…"），保留但剥掉后续指令。
   if (/失败/.test(output.slice(0, 12))) return sliceSafe(output.split(/。(?=\S|$)/)[0], 80);
+  // **"可纠正的拒绝"要原样说出第一句**（实测缺口，放宽 schema 后新增的一类回执）：
+  // 这类回执不含"失败"，落到下面的 switch 会按工具类型编出成功文案——
+  // `update_plan` 显示「步骤清单已更新」（实际一条都没更新）、
+  // `request_user_input` 显示「已收到你的回答」（实际没问出去）、
+  // `web_search` 显示「未找到结果」（实际根本没搜）、`edit_artifact_batch` 显示「完成」。
+  // 用户看到的是"做成了"，而工具什么都没做。第一句本身就是给人看的指令，直接用。
+  if (REJECTION_RE.test(output.split(/[。\n]/, 1)[0] ?? "")) {
+    // 只取**冒号之前**那段：冒号后面跟着的是给模型的改正指令
+    // （`步骤清单是空的：请给出至少一步（每步写清要做什么 + 当前 status）`），
+    // 用户不需要读到"写清要做什么 + 当前 status"这种内部约定。
+    const first = String(output).split(/[。\n]/, 1)[0] ?? "";
+    const short = first.split(/[：:]/, 1)[0] ?? first;
+    return sliceSafe(short.trim() || first, 80);
+  }
   switch (toolName) {
     case "web_search": {
       const count = (output.match(/^\[\d+\]/gm) || []).length;

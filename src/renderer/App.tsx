@@ -1355,6 +1355,15 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const videoSubmittingRef = useRef(false);
   // 首条消息的会话尚未创建时的同步守卫（见 send()：active 为空时按 id 守卫会失效）。
   const creatingSessionRef = useRef(false);
+  /**
+   * 已作答的 `requestId`（同步守卫）。
+   *
+   * 双击同一个选项时，第一次已经把卡片摘掉、主进程也已落定；
+   * 第二次必然返回 false，而那个 false 会被解释成「这组问题已经超时或结束了」——
+   * 用户双击一次选项却被告知"你答慢了"（实测缺陷 probe-double-answer）。
+   * `useState` 在同一 tick 内挡不住连点，与 `videoSubmittingRef` / `retryingRef` 同一类修法。
+   */
+  const answeredRef = useRef(new Set<string>());
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // 用户是否贴在底部：流式期间只有贴底才自动跟随。否则用户往上翻看历史时，
@@ -1936,13 +1945,21 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
    * 无论成功与否都把卡片摘掉：留着会让用户以为还能再答一次，而那个 requestId 早已落定。
    */
   async function answerQuestions(requestId: string, answers: Record<string, string[]>) {
+    // **双击同一个选项要挡住**（实测缺陷 probe-double-answer）：第一次已经把卡片摘掉、
+    // 主进程也已落定；第二次调用必然返回 false，而下面的代码把 false 一律解释成
+    // 「这组问题已经超时或结束了」——用户双击一次选项，被告知"你答慢了"。
+    // 与 `retry` / `manualCompact` 同一类问题：React state 在同一 tick 内挡不住连点。
+    if (answeredRef.current.has(requestId)) return;
+    answeredRef.current.add(requestId);
+    // 只记最近一批（requestId 每个都是新的，正常不会长到这里）
+    if (answeredRef.current.size > 200) answeredRef.current.clear();
     setSessions((all) => all.map((session) => session.id !== activeId ? session : {
       ...session,
       messages: session.messages.map((msg) => msg.questions?.requestId === requestId ? { ...msg, questions: undefined } : msg)
     }));
     try {
       const result = await window.h3.answerLlmQuestion(requestId, answers);
-      // 返回 false 通常是超时竞态（用户点得太慢），不是错误——提示一下即可，不弹红色报错。
+      // 走到这里的 false 才是真的超时竞态（用户点得太慢），提示一下即可，不弹红色报错。
       if (!result.ok || !result.data) onNotice("这组问题已经超时或结束了，AI 会按最合理的方式继续。");
     } catch (error) {
       onError(error);

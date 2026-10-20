@@ -157,7 +157,11 @@ describe("工具成败判定（isToolFailure）", () => {
       ["web_search", "搜索关键词是空的。请给出 3–6 个具体的词，不要写整句话。", "搜索关键词是空的"],
       ["update_plan", "步骤清单是空的：请给出至少一步（每步写清要做什么 + 当前 status）。", "步骤清单是空的"],
       ["request_user_input", "没有要问的问题（questions 是空的）。如果确实需要用户拍板，请给出 1–3 个问题。", "没有要问的问题（questions 是空的）"],
-      ["edit_artifact_batch", "没有可应用的修改：edits 是空的。请把要改的内容写成至少一条 {oldText, newText}。", "没有可应用的修改"]
+      ["edit_artifact_batch", "没有可应用的修改：edits 是空的。请把要改的内容写成至少一条 {oldText, newText}。", "没有可应用的修改"],
+      // 实测 probe-nocred-backend：模型选了没配密钥的后端，`submit()` 前的前置检查拒绝。
+      // 这类回执不含「失败」二字，旧判定打勾 → 步骤条编出
+      // `✓ 生成视频完成（已创建视频任务）`，而回执原文写着"任务没有创建"——界面替模型撒谎。
+      ["generate_video", "后端「MiniMax H3」现在用不了：还没保存 MiniMax АРI keys。\n目前可用的有：本机 ComfyUI（local）。\n**任务没有创建**，不要告诉用户已经提交。", "后端「MiniMax H3」现在用不了"]
     ];
     for (const [tool, text, expected] of cases) {
       expect(isToolFailure(text), `${tool} 应判为未成功`).toBe(true);

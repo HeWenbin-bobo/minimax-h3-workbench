@@ -526,8 +526,12 @@ export function isToolFailure(output: unknown): boolean {
  * - `request_user_input`：`没有要问的问题（questions 是空的）。` / `第 N 个问题没有任何选项。`
  * - `edit_artifact_batch`：`没有可应用的修改：edits 是空的。`
  * - `create_file`：`保存文件失败：content 是空的。`（已由"失败"覆盖，这里不重复）
+ * - `generate_video`：`后端「MiniMax H3」现在用不了：还没保存…。**任务没有创建**…`
+ *   （`main.ts` 里 `videoBackendAvailability` 的前置检查拒绝）。漏掉它会让步骤条
+ *   显示 `✓ 生成视频完成（已创建视频任务）`——**界面替模型撒谎**：任务一个都没建，
+ *   回执原文还写着"任务没有创建"（实测 probe-nocred-backend）。
  */
-const REJECTION_RE = /^(?:搜索关键词是空的|步骤清单是空的|没有要问的问题|没有可应用的修改|第\s*\d+\s*个问题没有任何选项|请给出至少一步)/;
+const REJECTION_RE = /^(?:搜索关键词是空的|步骤清单是空的|没有要问的问题|没有可应用的修改|第\s*\d+\s*个问题没有任何选项|请给出至少一步|后端「.+」现在用不了)/;
 
 /**
  * 工具执行结果 → 给用户看的摘要（显示在气泡的步骤条里）。
@@ -566,8 +570,13 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       return count > 0 ? `找到 ${count} 条结果` : "未找到结果";
     }
     case "generate_video": {
+      // **兜底不能硬编"已创建"**：提交前的前置检查拒绝时，回执原文写着"任务没有创建"，
+      // 而旧兜底照编"已创建视频任务"，步骤条成了 `✓ 生成视频完成（已创建视频任务）`
+      // （实测 probe-nocred-backend）。拒绝文案已由上面的 REJECTION_RE 优先接走，
+      // 这里只兜真正没创建成功的其它情况。
+      if (/任务没有创建/.test(output)) return "没有创建任务";
       const count = /已创建\s*(\d+)\s*个视频生成任务/.exec(output)?.[1];
-      return count ? `已创建 ${count} 个视频任务` : "已创建视频任务";
+      return count ? `已创建 ${count} 个视频任务` : "完成";
     }
     case "create_file": {
       // 右边界必须锚到**尺寸标记**，不能锚到括号：重名文件是 `名字 (2).html`，

@@ -26,6 +26,76 @@ export function normalizeBackendKind(value: unknown): BackendKind | undefined {
   return BACKEND_ALIASES[value.trim().toLowerCase()];
 }
 
+/** 后端在界面/回执里的中文名（与渲染端「连接设置」的写法一致）。 */
+export function backendKindLabel(kind: BackendKind): string {
+  if (kind === "local") return "本机 ComfyUI";
+  if (kind === "ssh") return "SSH 远程显卡";
+  if (kind === "rb") return "瞬映 RB";
+  return "MiniMax H3";
+}
+
+export interface BackendAvailability {
+  kind: BackendKind;
+  label: string;
+  note: string;
+  /** 有值 = 现在用不了，值就是给用户看的原因（已配好时没有这个字段）。 */
+  reason?: string;
+}
+
+/**
+ * 四个后端**此刻能不能用**的单一判定，两个调用方共用：
+ * ① 世界状态「视频生成后端」小节（告诉模型哪些能选）；
+ * ② `generateVideo` 真正 `submit()` **之前**的前置检查。
+ *
+ * 为什么必须共用（实测缺陷 probe-nocred-backend）：`orchestrator.submit()` 只校验参数、
+ * 不查凭据，会先把任务建出来并返回成功 → 工具回执写「已创建 1 个视频生成任务」→
+ * 随后 `runTask()` 异步抛「请先保存 АРI keys」→ 模型据此对用户说"已经帮你提交了"，
+ * 卡片却是失败的。两处各写一份判定必然漂移（一处"有地址就行"、另一处要"有密钥"）。
+ *
+ * 判据只认"能不能发出去"，不做连通性探测（要几秒，且每轮都探会拖慢对话）：
+ * - `local`：填了 ComfyUI 地址（服务开没开由工具执行时的报错回答）；
+ * - `ssh`：填了主机 + 用户名；
+ * - `minimax` / `rb`：存了密钥 / 卡密。
+ *
+ * @param hasSecret 注入而非直接读 store：`hasSecret` 会真的试解密（换机器 / Local State
+ * 丢失时密文在但解不开，必须算"没有"），但那需要 Electron 的 safeStorage，单测里给不了。
+ */
+export async function backendAvailability(
+  settings: Pick<AppSettings, "localComfyUrl" | "ssh">,
+  hasSecret: (name: "minimaxApiKey" | "rbCardCode") => Promise<boolean>
+): Promise<BackendAvailability[]> {
+  const [hasMinimax, hasRb] = await Promise.all([
+    hasSecret("minimaxApiKey").catch(() => false),
+    hasSecret("rbCardCode").catch(() => false)
+  ]);
+  return [
+    {
+      kind: "local",
+      label: backendKindLabel("local"),
+      note: "不额外计费，用本机显卡",
+      ...(settings.localComfyUrl ? {} : { reason: "还没填 ComfyUI 地址" })
+    },
+    {
+      kind: "ssh",
+      label: backendKindLabel("ssh"),
+      note: settings.ssh?.host ? `远程 ${settings.ssh.host}` : "远程显卡",
+      ...(settings.ssh?.host && settings.ssh?.username ? {} : { reason: "还没填 SSH 主机与用户名" })
+    },
+    {
+      kind: "minimax",
+      label: backendKindLabel("minimax"),
+      note: "云端按秒计费",
+      ...(hasMinimax ? {} : { reason: "还没保存 MiniMax АРI keys" })
+    },
+    {
+      kind: "rb",
+      label: backendKindLabel("rb"),
+      note: "扣卡密次数",
+      ...(hasRb ? {} : { reason: "还没保存瞬映卡密" })
+    }
+  ];
+}
+
 export class AdapterRegistry {
   private sshAdapter?: SshComfyAdapter;
 

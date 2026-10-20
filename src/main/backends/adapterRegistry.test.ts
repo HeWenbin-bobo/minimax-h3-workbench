@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeBackendKind } from "./adapterRegistry";
+import { backendAvailability, normalizeBackendKind } from "./adapterRegistry";
 
 /**
  * 背景（实测真机，2026-10-20）：用户输入一段视频描述后，智能体**直接**用「连接设置」
@@ -55,5 +55,53 @@ describe("normalizeBackendKind", () => {
     for (const value of [null, undefined, 42, {}, [], true]) {
       expect(normalizeBackendKind(value)).toBeUndefined();
     }
+  });
+});
+
+/**
+ * 实测缺陷（probe-nocred-backend，2026-10-20）：用户说"用云端生成"，模型调
+ * `generate_video({backend:"minimax"})`，而这台机器没存 MiniMax Key。
+ * `submit()` 只校验参数就把任务建出来 → 回执「已创建 1 个视频生成任务」→
+ * 随后 runTask 抛「请先保存 АРI keys」→ 模型据此对用户说"已经帮你提交了"，
+ * 卡片却是 failed。这条判定必须**在 submit 之前**回答"这个后端现在能不能用"。
+ */
+describe("backendAvailability", () => {
+  const settings = { localComfyUrl: "", ssh: { host: "", username: "" } };
+  const none = async () => false;
+
+  it("什么都没配时四个都不可用，且各自给出原因", async () => {
+    const list = await backendAvailability(settings, none);
+    expect(list.map((e) => e.kind)).toEqual(["local", "ssh", "minimax", "rb"]);
+    for (const entry of list) expect(entry.reason, entry.kind).toBeTruthy();
+    // 原因要能直接给用户看：必须指向具体的配置项，不能只说"不可用"。
+    expect(list.find((e) => e.kind === "minimax")!.reason).toContain("MiniMax");
+    expect(list.find((e) => e.kind === "rb")!.reason).toContain("瞬映");
+    expect(list.find((e) => e.kind === "local")!.reason).toContain("ComfyUI");
+    expect(list.find((e) => e.kind === "ssh")!.reason).toContain("SSH");
+  });
+
+  it("配好之后对应后端不再带 reason（调用方据此筛出可选项）", async () => {
+    const list = await backendAvailability(
+      { localComfyUrl: "http://127.0.0.1:8188", ssh: { host: "10.0.0.2", username: "me" } },
+      async (name) => name === "rbCardCode"
+    );
+    expect(list.filter((e) => !e.reason).map((e) => e.kind)).toEqual(["local", "ssh", "rb"]);
+  });
+
+  it("只有主机没有用户名时 SSH 仍算不可用（连不上，等于没配）", async () => {
+    const list = await backendAvailability({ localComfyUrl: "", ssh: { host: "10.0.0.2", username: "" } }, none);
+    expect(list.find((e) => e.kind === "ssh")!.reason).toBeTruthy();
+  });
+
+  it("hasSecret 抛错时算「没有」，不能把异常冒成整轮失败", async () => {
+    // 换机器 / Local State 丢失时 safeStorage 解不开，hasSecret 会抛。
+    // 让异常穿出去会连"告诉模型哪些可用"这一步都做不成。
+    const list = await backendAvailability(
+      { localComfyUrl: "http://127.0.0.1:8188", ssh: { host: "", username: "" } },
+      async () => {
+        throw new Error("decrypt failed");
+      }
+    );
+    expect(list.filter((e) => !e.reason).map((e) => e.kind)).toEqual(["local"]);
   });
 });

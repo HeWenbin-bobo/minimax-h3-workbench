@@ -16,7 +16,7 @@ import {
   shell,
   type IpcMainInvokeEvent
 } from "electron";
-import { AdapterRegistry, normalizeBackendKind } from "./backends/adapterRegistry";
+import { AdapterRegistry, backendAvailability, backendKindLabel, normalizeBackendKind } from "./backends/adapterRegistry";
 import { mediaMime, parseByteRange } from "./modules/mediaRange";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
 import { describeError, isNetworkError } from "../shared/errors";
@@ -420,14 +420,20 @@ function registerIpc(
     count: 1,
     baseSeed: 1
   };
-  const backendKindLabel = (kind: BackendKind) => kind === "local" ? "本机 ComfyUI" : kind === "ssh" ? "SSH 远程显卡" : kind === "rb" ? "瞬映 RB" : "MiniMax H3";
   /**
-   * 本轮**真的可用**的视频后端（已配好凭据的那些），供世界状态告诉模型。
+   * 四个后端**此刻能不能用**（单一真源的薄封装）。
+   * 真源在 `adapterRegistry.backendAvailability`（纯函数、可单测）；这里只把
+   * `settingsStore.hasSecret`（需要 Electron safeStorage）注进去。
    *
-   * 判据只认"能不能发出去"，不做连通性探测（那要几秒，且每轮都探会拖慢对话）：
-   * - `local`：配了 ComfyUI 地址就算（本机服务开着与否由工具执行时的报错回答）；
-   * - `ssh`：填了主机 + 用户名；
-   * - `minimax` / `rb`：存了对应密钥 / 卡密。
+   * 为什么要单一判定（实测缺陷 probe-nocred-backend）：模型选了没配密钥的云端后端，
+   * `submit()` 只校验参数就把任务建出来、回执写"已创建"，随后 runTask 才抛
+   * "请先保存 АРI keys"——用户被告知"已经提交了"，卡片却是失败的。
+   * 两处各写一份判定必然漂移：一处认"有地址就行"、另一处要"有密钥"。
+   */
+  const videoBackendAvailability = (settings: AppSettings) =>
+    backendAvailability(settings, (name) => settingsStore.hasSecret(name));
+  /**
+   * 本轮**真的可用**的视频后端，供世界状态告诉模型。
    *
    * **不筛会怎样**（实测语义缺口）：模型现在要先问用户"用哪个方式生成"，
    * 而它看不到「连接设置」。把没配密钥的云端选项摆给用户，用户选了必然报
@@ -436,22 +442,10 @@ function registerIpc(
   const availableVideoBackends = async (
     settings: AppSettings
   ): Promise<Array<{ kind: BackendKind; label: string; note?: string }>> => {
-    const out: Array<{ kind: BackendKind; label: string; note?: string }> = [];
-    if (settings.localComfyUrl) {
-      out.push({ kind: "local", label: backendKindLabel("local"), note: "不额外计费，用本机显卡" });
-    }
-    if (settings.ssh.host && settings.ssh.username) {
-      out.push({ kind: "ssh", label: backendKindLabel("ssh"), note: `远程 ${settings.ssh.host}` });
-    }
-    // `hasSecret` 会真的试解密：换机器 / Local State 丢失时密文在但解不开，
-    // 那种情况必须算"没有"（否则界面上写着有，用起来每次都失败）。
-    if (await settingsStore.hasSecret("minimaxApiKey").catch(() => false)) {
-      out.push({ kind: "minimax", label: backendKindLabel("minimax"), note: "云端按秒计费" });
-    }
-    if (await settingsStore.hasSecret("rbCardCode").catch(() => false)) {
-      out.push({ kind: "rb", label: backendKindLabel("rb"), note: "扣卡密次数" });
-    }
-    return out;
+    const all = await videoBackendAvailability(settings);
+    return all
+      .filter((entry) => !entry.reason)
+      .map(({ kind, label, note }) => ({ kind, label, note }));
   };
   /**
    * 按后端约束夹取时长（智能体工具用）。
@@ -1077,6 +1071,26 @@ function registerIpc(
             return `不认识的生成后端「${params.backend}」。可选：local（本机 ComfyUI）/ ssh（SSH 远程显卡）/ minimax（MiniMax 云 API）/ rb（瞬映 RB）。请向用户确认用哪一个再调用。`;
           }
           const backend: BackendKind = normalizeBackendKind(requested) ?? turn.value.defaultBackend;
+          // **提交前必须确认这个后端此刻能不能用**（实测缺陷 probe-nocred-backend）：
+          // `orchestrator.submit()` 只做参数校验、不查凭据，会先把任务建出来并返回成功，
+          // 于是工具回执写"已创建 1 个视频生成任务"，随后 `runTask()` 异步抛
+          // "请先在连接设置中保存 MiniMax АРI keys" —— 气泡里模型据此告诉用户
+          // "已经帮你提交了，稍等就好"，卡片却是失败的。用户被两边打架的说法绕进去。
+          //
+          // 用与「告诉模型有哪些可选」**同一个判定**（`videoBackendAvailability`），
+          // 否则一处认"填了地址就行"、另一处要"有密钥"，迟早漂移。
+          const availability = await videoBackendAvailability(turnSettings);
+          const chosen = availability.find((entry) => entry.kind === backend);
+          if (chosen?.reason) {
+            const others = availability.filter((entry) => !entry.reason);
+            return [
+              `后端「${backendKindLabel(backend)}」现在用不了：${chosen.reason}。`,
+              others.length
+                ? `目前可用的有：${others.map((entry) => `${backendKindLabel(entry.kind)}（${entry.kind}）`).join("、")}。可以问用户要不要改用其中一个。`
+                : `现在没有任何可用的视频生成后端，请让用户去「连接设置」配好一个再试。`,
+              `**任务没有创建**，不要告诉用户已经提交。`
+            ].join("\n");
+          }
           const request: GenerationRequest = {
             ...initialAgentVideoRequest,
             backend,

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describeError } from "../../shared/errors";
 import type { GenerationRequest, GenerationTask, TaskStatus } from "../../shared/types";
 import { MAX_PROMPT_LENGTH } from "../../shared/types";
-import { AdapterRegistry } from "../backends/adapterRegistry";
+import { AdapterRegistry, backendKindLabel as backendName } from "../backends/adapterRegistry";
 import { sliceSafe } from "../../shared/text";
 import { TaskStore } from "./taskStore";
 
@@ -395,7 +395,12 @@ export class GenerationOrchestrator {
       if (cancelled) {
         this.update(task, "cancelled", task.progress, "已取消");
       } else {
-        this.update(task, "failed", task.progress, messageOf(error));
+        // **失败文案要带上是哪个后端**（实测 probe-local-dead）：用户同时配了本机 ComfyUI
+        // 与云端时，「网络连接失败：目标服务未在监听（连接被拒绝）。请检查地址、端口与服务
+        // 是否已启动。」看不出失败的是谁——是本机 ComfyUI 忘了启动，还是云端地址填错？
+        // 两者该做的事完全不同（去启动本地服务 vs 去改设置里的地址）。
+        // 任务卡片上没有别的地方显示后端名，只能在这里补。
+        this.update(task, "failed", task.progress, `${backendName(request.backend)}：${messageOf(error)}`);
         task.errorCode = "GENERATION_FAILED";
       }
     } finally {

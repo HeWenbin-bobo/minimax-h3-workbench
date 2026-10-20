@@ -2690,14 +2690,18 @@ function PgQuestionCard({ questions, onSubmit, onSkip }: {
   };
   const answered = (target: LlmQuestion) => answerFor(target).length > 0;
 
-  const advance = (target: LlmQuestion, justPicked?: string[]) => {
+  /** 把**所有已答**的题合成最终载荷；未答的不放进 map（主进程据此逐题说"未作答"）。 */
+  const collect = (overrideFor?: { id: string; value: string[] }): Record<string, string[]> => {
     const answers: Record<string, string[]> = {};
-    // 把**所有已答**的题（含当前这题）合进最终载荷；未答的不放进 map
-    // （主进程据此区分"用户跳过"与"这题没答"）。
     for (const item of questions) {
-      const value = answerFor(item, item.id === target.id ? justPicked : undefined);
+      const value = answerFor(item, overrideFor?.id === item.id ? overrideFor.value : undefined);
       if (value.length > 0) answers[item.id] = value;
     }
+    return answers;
+  };
+
+  const advance = (target: LlmQuestion, justPicked?: string[]) => {
+    const answers = collect(justPicked ? { id: target.id, value: justPicked } : undefined);
     // 还有下一题 → 推进一步；已是最后一题 → 提交。
     if (step < questions.length - 1) {
       setStep(step + 1);
@@ -2775,7 +2779,18 @@ function PgQuestionCard({ questions, onSubmit, onSkip }: {
       {step > 0 && <button className="pg-question-skip" onClick={() => setStep(step - 1)}>← 上一题</button>}
       {/* 多选必须显式确认；单选点选项已自动推进，这里只在"填了自定义"时出现。 */}
       {(multi || usingCustom) && canAdvance && <button className="pg-plan-run" onClick={() => advance(question)}>{isLast ? "确认" : "下一题"}</button>}
-      <button className="pg-question-skip" onClick={onSkip} title="不回答，让 AI 自己按最合理的方式做">跳过，你决定</button>
+      {/* **「跳过」不能把已经答过的题一起扔掉**（实测 probe-partial-skip）：
+          用户在第 1 题明确选了「本机 ComfyUI」，到第 2 题点跳过，走 `onSkip` 是
+          `questionBridge.skip()` → **整组 reject**，回执只剩「未获得用户回答」。
+          他选过的东西不算数了，模型只好自己猜——而在生成视频这个场景里，
+          "猜"意味着可能落到默认后端开跑、或自行挑云端（按秒计费）。
+          所以：**已经答过的题就按作答提交**，剩下的交给主进程 `formatAnswers`
+          逐题说"未作答，请按最合理的方式处理"。只有一题都没答时才真的整组跳过。 */}
+      <button className="pg-question-skip" onClick={() => {
+        const answers = collect();
+        if (Object.keys(answers).length > 0) onSubmit(answers);
+        else onSkip();
+      }} title="已答的照常提交，没答的让 AI 自己定">跳过，你决定</button>
     </div>
   </div>;
 }

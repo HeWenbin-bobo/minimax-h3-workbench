@@ -36,16 +36,25 @@ export function formatAnswers(
 ): string {
   if (questions.length === 0) return "未获得用户回答。";
   const lines: string[] = [];
+  // **同 id 的题目要各自独立取答案**（实测缺陷，与 `request_user_input` 里的去重配合）：
+  // 模型偶尔把两题写成同一个 id，而答案表是 `{ [id]: [optionId] }` —— 按 id 查表时
+  // 后一题会**顶用前一题的答案**：用户只答了"时长 6 秒"，回执里"画幅"也变成
+  // "用户选择：横屏"。去重已在入口做了；这里再兜一层——**同一个 id 只用一次**，
+  // 第二次出现时按"未作答"处理，宁可让模型按默认值继续，也不能替用户编一个答案。
+  const consumed = new Set<string>();
   for (const question of questions) {
     // `answers` 来自 IPC（`llm:answer`），值类型没有保证：可能是字符串、数字或对象。
     // 旧实现直接 `picked.map(...)`，非数组会抛 "picked.map is not a function"——
     // 而这里跑在工具循环的 resolve 路径上，抛错会让整轮对话挂掉（实测确认）。
     const raw = (answers as Record<string, unknown> | undefined)?.[question.id];
-    const picked = Array.isArray(raw)
-      ? raw.filter((id): id is string => typeof id === "string")
-      : typeof raw === "string"
-        ? [raw]
-        : [];
+    const picked = consumed.has(question.id)
+      ? []
+      : Array.isArray(raw)
+        ? raw.filter((id): id is string => typeof id === "string")
+        : typeof raw === "string"
+          ? [raw]
+          : [];
+    consumed.add(question.id);
     if (picked.length === 0) {
       // 单题未答：如实说，让模型对这道题按最佳判断继续，而不是替用户编一个答案。
       lines.push(`【${question.header}】用户未作答——请按你认为最合理的方式处理，并说明你采用的默认值。`);

@@ -367,6 +367,23 @@ function toFiniteNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+/**
+ * 保证一道选择题的 id 在本轮内唯一（见 `request_user_input` 里那段说明）。
+ *
+ * 重复时追加 `_2` / `_3`…（仍冲突就一路加上去）。只在**同一轮**内保证唯一即可——
+ * 答案回传按 requestId + id 查表，跨轮不会串。
+ */
+function uniqueQuestionId(id: string, used: Set<string>, index: number): string {
+  let candidate = id;
+  let suffix = 2;
+  // 上限只是防御：每轮最多 3 个问题，碰不到。
+  while (used.has(candidate) && suffix < 100) candidate = `${id}_${suffix++}`;
+  // 完全空白的 id 也要能落地（`q${index+1}` 已被调用方兜过，这里只防极端）。
+  if (!candidate) candidate = `q${index + 1}`;
+  used.add(candidate);
+  return candidate;
+}
+
 export interface AgentToolCallbacks {
   /** 联网搜索工具：返回参考段落（未配置搜索 API 时抛错）。 */
   webSearch: (query: string) => Promise<string>;
@@ -1331,9 +1348,17 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           // - `id` 缺失时按下标生成，否则回传答案时对不上题（`formatAnswers` 按 id 匹配）；
           // - `header` / `label` 缺失时退回「问题 N」/ 选项 id——渲染端会画出一个空标签的芯片；
           // - `question` 缺失时用 header 顶上，总比一张只有标签的空卡片强。
+          //
+          // **id 必须去重**（实测缺陷）：模型偶尔把两个问题都写成同一个 id（复制粘贴、
+          // 或干脆都写 `q`）。而答案回传是按 id 查表的（`formatAnswers` 里
+          // `answers[question.id]`），同 id 会让**后一题顶用前一题的答案**——
+          // 用户只答了"时长 6 秒"，回执里"画幅"也变成"用户选择：横屏"
+          // （其实是第一题被选中的那个选项在第二题里的同名 id）。
+          // 渲染端与 formatAnswers 用的都是这份 `clipped`，在源头改一次即可。
+          const usedIds = new Set<string>();
           const clipped = {
             questions: rawQuestions.slice(0, 3).map((question, index) => ({
-              id: question.id?.trim() || `q${index + 1}`,
+              id: uniqueQuestionId(question.id?.trim() || `q${index + 1}`, usedIds, index),
               header: question.header?.trim() || `问题 ${index + 1}`,
               question: question.question?.trim() || question.header?.trim() || `请选择第 ${index + 1} 项的取值`,
               multiSelect: question.multiSelect,

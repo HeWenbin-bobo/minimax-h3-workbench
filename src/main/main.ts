@@ -492,6 +492,17 @@ function registerIpc(
    */
   const sessionWorldState = new Map<string, WorldStateSnapshot>();
   /**
+   * 用户在这个会话里**明确选定过**的视频后端（`generate_video` 的准入闸门用）。
+   *
+   * 必须按会话持久（实测缺陷 probe-cross-turn-backend）：闸门状态原是
+   * `llm:chat` 里的每轮局部变量，于是计划模式下——轮 1 用户答了「本机 ComfyUI」、
+   * 轮 2 点「继续执行」时状态复位 → 模型调 `generate_video` 又被拦住 →
+   * 用户得把同一个后端问题再答一遍。用户已经答过，软件又问一遍。
+   *
+   * 只记**用户明确选过**的值，不记模型自己猜的：模型猜过一次不代表用户同意。
+   */
+  const sessionChosenBackend = new Map<string, BackendKind>();
+  /**
    * 交互提问桥：工具循环挂起等渲染端回答（`request_user_input`）。
    * 必须带超时——没有超时的话用户关窗走开会让该会话的取消器永久占着，
    * 那条会话从此再也发不出消息（同会话并发守卫一直拒绝）。
@@ -1051,10 +1062,15 @@ function registerIpc(
        *
        * 为什么需要它：真实模型会把 `backend:"local"` 直接写进参数，绕开"未指定才拦"的判定
        * （真机实测 deepseek-v4.1-flash）。所以判据只能是"问没问过"，不是"传没传参"。
+       *
+       * **初值从会话记忆里读**（实测缺陷 probe-cross-turn-backend）：计划模式下轮 1 用户
+       * 答了「本机 ComfyUI」，轮 2 点「继续执行」时如果仍从 false 起算，闸门又会拦住
+       * 同一个问题，用户得重新答一遍——他明明已经答过。
        */
-      let backendSettled = false;
+      const rememberedBackend = sessionChosenBackend.get(session);
+      let backendSettled = Boolean(rememberedBackend);
       /** 用户自己在原话里点名、或答题卡片里选定的后端（优先级高于模型自己填的）。 */
-      let backendFromUser: BackendKind | undefined;
+      let backendFromUser: BackendKind | undefined = rememberedBackend;
       /**
        * 本轮**用户自己说的话**（不含我们注入的环境事实）。
        *
@@ -1105,6 +1121,8 @@ function registerIpc(
             if (userPick) {
               // 用户自己在消息里点名了 → 直接用，不必再问（"能动手就不问"）。
               backendFromUser = userPick.kind;
+              // **记进会话**：下一轮（计划执行轮）不该再问一遍同一个问题。
+              sessionChosenBackend.set(session, userPick.kind);
             } else {
               return [
                 `**还没有确定用哪个后端，任务没有创建。** 现在有 ${usableBackends.length} 个可用的生成方式：`,
@@ -1627,7 +1645,11 @@ ${tableNote}` : ""}`;
             // 用户描述画面说「云端漂浮的城堡」时被判成"选了云端"会直接跳过询问、
             // 按秒计费生成（实测误判，花的是真钱）。
             const picked = backendMentionedInText(answer, { loose: true });
-            if (picked) backendFromUser = picked;
+            if (picked) {
+              backendFromUser = picked;
+              // **记进会话**：计划模式下轮 2 点「继续执行」时不该再问一遍。
+              sessionChosenBackend.set(session, picked);
+            }
             return answer;
           } catch (error) {
             // **跳过 / 超时也是"问过了"**（实测 probe-skip-then-gate）：
@@ -2071,6 +2093,9 @@ ${tableNote}` : ""}`;
     sessionServicesGeneration.delete(id);
     sessionBudgets.delete(id);
     sessionWorldState.delete(id);
+    // 新加的会话态（用户选定过的后端）同样要清：不删会随"反复新建/删除对话"慢慢累积，
+    // 而且**会话删掉后 id 理论上可被复用**时，新会话会继承旧会话的后端选择。
+    sessionChosenBackend.delete(id);
     const root = path.join(app.getPath("userData"), "artifacts");
     const target = path.join(root, artifactSessionDirName(id));
     // 再兜一层：resolve 后必须仍在 artifacts 根之下（规则若被改动，这里也不会越界）。

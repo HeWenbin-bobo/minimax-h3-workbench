@@ -1840,8 +1840,20 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         if (state.artifacts.length > 0) {
           setSessions((all) => patchLast(all, target, (msg) => {
             const existing = msg.artifacts ?? [];
+            if (existing.length === 0) return { ...msg, artifacts: [...state.artifacts] };
+            // **同一 path 要按主进程那份元数据就地更新**（实测缺陷 probe-edit-update-while-away）：
+            // 切页期间 `edit_artifact` 的更新事件被丢弃，文件已经变大、卡片却停在旧大小
+            // （实测：磁盘 12KB，卡片仍写 1 KB）。只按 path 跳过会把这种"同文件的新版本"漏掉。
+            let changed = false;
+            const merged = existing.map((item) => {
+              const fresh = state.artifacts.find((a) => a.path === item.path);
+              if (!fresh || (fresh.size === item.size && fresh.name === item.name)) return item;
+              changed = true;
+              return { ...item, name: fresh.name, size: fresh.size, kind: fresh.kind };
+            });
             const missing = state.artifacts.filter((a) => !existing.some((b) => b.path === a.path));
-            return missing.length ? { ...msg, artifacts: [...existing, ...missing] } : msg;
+            if (!changed && missing.length === 0) return msg;
+            return { ...msg, artifacts: [...merged, ...missing] };
           }));
         }
         // 工具步骤同理（同一根因的第五个实例）：切页期间 `llm:tool` 全丢，

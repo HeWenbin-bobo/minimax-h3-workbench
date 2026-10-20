@@ -1090,6 +1090,15 @@ function registerIpc(
       // 判断"还是坏的"，而模型那边已经改好了。两边看到的是两个不同的文件。
       const notifyArtifactUpdated = (absolutePath: string, name: string, size: number) => {
         const kind: LlmArtifactEvent["kind"] = /\.html?$/i.test(name) ? "html" : /\.xlsx$/i.test(name) ? "sheet" : "doc";
+        // **更新也要记进本轮状态**（实测缺陷 probe-edit-update-while-away）：
+        // 切页期间这条事件被丢弃，而恢复逻辑按 `path` 去重会跳过已存在的卡片 ——
+        // 于是切回来时卡片停在**改前的大小**（实测：文件已 12KB，卡片仍写 1 KB），
+        // 用户据此以为"没改成功"，再点一次预览才看到新内容。
+        // 记进 `artifacts` 时**按 path 覆盖**（同一文件只保留最新一份元数据）。
+        const existing = turnState.artifacts.findIndex((entry) => entry.path === absolutePath);
+        const record = { name, path: absolutePath, size, kind };
+        if (existing >= 0) turnState.artifacts[existing] = record;
+        else turnState.artifacts.push(record);
         sendLlmArtifact({ name, path: absolutePath, size, kind, updated: true, sessionId: session });
       };
       // world state：每轮都注入**完整**的环境事实（时间/联网/产物/余量）。

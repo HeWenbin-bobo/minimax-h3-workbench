@@ -1272,6 +1272,29 @@ interface PlaygroundDraft {
 }
 let playgroundDraft: PlaygroundDraft | undefined;
 
+/**
+ * 切页时**必须留住**的"活着的那一轮"（内存态，关掉应用即丢）。
+ *
+ * 为什么需要（实测缺陷 probe-page-switch-card）：`App` 用
+ * `{page === "playground" && <PlaygroundPage …/>}` 切页，切走时组件**整个卸载**——
+ * `sessions` / `activeId` / `generatingIds` 全在组件里，随之蒸发。
+ * 切回来时从 localStorage 重读，而那份被 `stripTransientForPersist` 剥掉了
+ * `questions` / `streaming` / 工具步骤（那是给"重启后 requestId 失效"设计的）。
+ *
+ * 后果：AI 正挂着一张选择题等回答（主进程 `questionBridge` 还在等，最长 180 秒），
+ * 用户切去别的页面看一眼再回来 —— **卡片没了、停止键没了、气泡变成「（空回复）」**。
+ * 他不知道这道题还在等，只能干等到超时。
+ *
+ * 与 `playgroundDraft` 同一套语义：只存内存、不进 localStorage；
+ * 重启后确实拿不回来（requestId 已失效，卡片留着也点不动，那种情况本来就该剥掉）。
+ */
+interface PlaygroundLive {
+  sessions: PlaygroundSession[];
+  activeId: string;
+  generatingIds: string[];
+}
+let playgroundLive: PlaygroundLive | undefined;
+
 function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
   // **只解析一次 localStorage**：此前 `useState(loadSessions)` 与
   // `useState(() => loadSessions().find(...))` 各读一遍，等于把整份会话
@@ -1280,8 +1303,11 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const loaded = loadSessions();
     return { sessions: loaded, activeId: loaded.find((s) => !s.deletedAt)?.id || "" };
   });
-  const [sessions, setSessions] = useState<PlaygroundSession[]>(initial.sessions);
-  const [activeId, setActiveId] = useState<string>(initial.activeId);
+  // **优先从内存活态恢复**（切页会卸载本组件，见 `playgroundLive` 的说明）：
+  // 那里带着 `questions` / `streaming` / 工具步骤这些**只存在于内存**的瞬态字段，
+  // 而 localStorage 那份是剥过的。没有它，切页回来就看不到还在等的选择题。
+  const [sessions, setSessions] = useState<PlaygroundSession[]>(() => playgroundLive?.sessions ?? initial.sessions);
+  const [activeId, setActiveId] = useState<string>(() => playgroundLive?.activeId ?? initial.activeId);
   const active = sessions.find((s) => s.id === activeId);
   // 输入框 / 附件 / 计划开关 / 视频表单都从模块级草稿恢复（切页会卸载本组件）。
   const [input, setInput] = useState(() => playgroundDraft?.input ?? "");
@@ -1335,7 +1361,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 智能体默认开启（用户指令）；模型不支持工具时主进程自动回落普通对话，前端无感。
   const [agentMode, setAgentMode] = useState(() => playgroundDraft?.agentMode ?? true);
   // generating 从"全局"改为"按会话"：多会话可并发生成，每个会话各有自己的发送守卫与流缓冲。
-  const [generatingIds, setGeneratingIds] = useState<string[]>([]);
+  // **同样从活态恢复**：切页回来若把它丢了，那个会话的「■ 停止」会消失、
+  // 而主进程其实还在跑（用户再也停不下来，只能等它自己结束）。
+  const [generatingIds, setGeneratingIds] = useState<string[]>(() => playgroundLive?.generatingIds ?? []);
   const [showVideoForm, setShowVideoForm] = useState(() => playgroundDraft?.showVideoForm ?? false);
   // 任何一处草稿变化都写回缓存；卸载时不必额外处理（引用一直是最新的）。
   // 必须放在上面所有 `useState(() => playgroundDraft?.x)` 之后——否则初始化表达式
@@ -1343,6 +1371,15 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   useEffect(() => {
     playgroundDraft = { input, attachments, videoRequest, planNext, webSearch, browserSearch, agentMode, showVideoForm };
   }, [input, attachments, videoRequest, planNext, webSearch, browserSearch, agentMode, showVideoForm]);
+  /**
+   * 把"活着的那一轮"同步进内存活态（切页卸载后靠它恢复）。
+   *
+   * 必须**先于卸载**执行：React 会在卸载前跑最后一次 effect，而 `sessions` /
+   * `generatingIds` 在流式期间每次都变，所以这个 effect 会持续刷新。
+   */
+  useEffect(() => {
+    playgroundLive = { sessions, activeId, generatingIds };
+  }, [sessions, activeId, generatingIds]);
   // 与工作台共用同一份合法时长定义：RB 的 reference/tail_frame 只收 4/6/8 秒，
   // 若这里仍放开 10/12/15，非法 seconds+preset 组合会真的发到云端——失败也照样扣卡密次数。
   const videoDurationOptions = durationOptionsFor(videoRequest.backend, videoRequest.preset);

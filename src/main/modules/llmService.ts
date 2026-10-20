@@ -441,6 +441,126 @@ export interface AgentQuestion {
   options: Array<{ id: string; label: string; description: string }>;
 }
 
+/** 把任意值读成去空白后的字符串（模型给数字/布尔/对象都不该让整轮失效）。 */
+function asText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+/** 「是否多选」：模型会写 `"yes"` / `"true"` / `1` / `"是"`，一律按真值理解。 */
+function asBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (["true", "yes", "y", "1", "是", "对", "多选"].includes(text)) return true;
+    if (["false", "no", "n", "0", "否", "不是", "单选"].includes(text)) return false;
+  }
+  return undefined;
+}
+
+/**
+ * 把选项归一成 `{ id, label, description }` 数组。
+ *
+ * 为什么要吃得这么杂（实测 probe-question-shapes）：模型表达"几个选项"的方式至少有五种——
+ * `[{id,label,description}]`、`[{id,label}]`、`["6 秒","15 秒"]`、`{ a: "6 秒" }`、
+ * 单个字符串 `"6 秒"`。**这些形状原先全部被 zod 在 `parseToolCall` 阶段拒掉**，
+ * 整个调用被静默跳过（9 种形状里 7 种中招），界面上什么都不会出现。
+ */
+function normalizeOptions(raw: unknown): AgentQuestion["options"] {
+  const entries: unknown[] = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object"
+      ? Object.entries(raw as Record<string, unknown>).map(([key, value]) => (
+        typeof value === "string" ? { id: key, label: value } : { id: key, ...(value as object) }
+      ))
+      : typeof raw === "string" && raw.trim()
+        ? [raw]
+        : [];
+
+  const usedIds = new Set<string>();
+  return entries.slice(0, 4).map((entry, index) => {
+    // 纯字符串选项：`"6 秒"` → id 用 `opt1`，label 用它本身。
+    if (typeof entry === "string" || typeof entry === "number") {
+      const label = asText(entry) || `选项 ${index + 1}`;
+      return { id: `opt${index + 1}`, label, description: "" };
+    }
+    const record = entry && typeof entry === "object" && !Array.isArray(entry)
+      ? entry as Record<string, unknown>
+      : undefined;
+    if (!record) return { id: `opt${index + 1}`, label: `选项 ${index + 1}`, description: "" };
+    const base = asText(record.id) || `opt${index + 1}`;
+    // 选项 id 也要去重：模型常给两个都叫 `a` 的选项。
+    let id = base;
+    let suffix = 2;
+    while (usedIds.has(id) && suffix < 100) id = `${base}_${suffix++}`;
+    usedIds.add(id);
+    return {
+      id,
+      label: asText(record.label) || asText(record.name) || asText(record.text) || base,
+      description: asText(record.description) || asText(record.desc) || ""
+    };
+  });
+}
+
+/**
+ * 把模型给的选择题参数归一成渲染端能画的结构。
+ *
+ * **返回"可纠正的说明"而不是抛错**：这个工具的入参完全由模型生成，形状五花八门，
+ * 而它又是后端闸门唯一的出口（不给用户选择题 = 闸门永远关不上 = 死循环）。
+ * 所以宁可回一句话让模型改，也绝不能让 SDK 静默跳过整个调用。
+ *
+ * 返回 `{ error }` 时调用方直接把它当工具回执返回（模型据此改正）。
+ */
+export function normalizeAgentQuestions(raw: unknown): { questions: AgentQuestion[] } | { error: string } {
+  // 容器归一：数组 / 单个字符串（={"问这一个"}）/ 对象映射（`{ q1: "几秒？" }`）。
+  const list: unknown[] = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+      ? (raw.trim() ? [raw] : [])
+      : raw && typeof raw === "object"
+        ? Object.values(raw as Record<string, unknown>)
+        : [];
+
+  if (list.length === 0) {
+    return { error: "没有要问的问题（questions 是空的）。如果确实需要用户拍板，请给出 1–3 个问题、每题 2–4 个选项；否则直接按最合理的方式继续。" };
+  }
+
+  const usedIds = new Set<string>();
+  const questions: AgentQuestion[] = [];
+  for (let index = 0; index < list.length && questions.length < 3; index += 1) {
+    const item = list[index];
+    const record = typeof item === "string"
+      ? { question: item }
+      : item && typeof item === "object" && !Array.isArray(item)
+        ? item as Record<string, unknown>
+        : undefined;
+    if (!record) continue; // 该条读不出来就跳过这一条，别让整批失效
+
+    const header = asText(record.header) || asText(record.title) || "";
+    const question = asText(record.question) || asText(record.text) || header;
+    if (!question) continue;
+    const options = normalizeOptions(record.options);
+    if (options.length === 0) {
+      return { error: `第 ${questions.length + 1} 个问题没有任何选项。请为它提供 2–4 个互斥选项（每个带 label 与 description），再调用一次；不需要问的话就直接继续。` };
+    }
+    const position = questions.length;
+    questions.push({
+      id: uniqueQuestionId(asText(record.id) || `q${position + 1}`, usedIds, position),
+      header: header || `问题 ${position + 1}`,
+      question,
+      multiSelect: asBoolean(record.multiSelect ?? record.multiple),
+      options: options.slice(0, 4)
+    });
+  }
+
+  if (questions.length === 0) {
+    return { error: "没有要问的问题（每个问题都缺少 question 字段）。请给出 1–3 个问题，每个带一句话的问题描述与 2–4 个选项；否则直接按最合理的方式继续。" };
+  }
+  return { questions };
+}
+
 /** 从打包产物读取智能体框架版本（agentVersion.ts 由构建脚本从 node_modules/ai 同步）。 */
 export async function bundledFrameworkVersion(): Promise<string> {
   const { frameworkVersion } = await import("../../shared/agentVersion.js");
@@ -1356,78 +1476,32 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
 
 一次调用最多 3 个问题，每个问题 2–4 个选项。用户可以选择不回答（超时或跳过），此时你必须按自己认为最合理的方式继续，不要卡住不动。`,
         inputSchema: z.object({
-          questions: z.array(z.object({
-            // **这几个字段一律可选**（实测同类坑第十四处）：模型很自然只写
-            // `{ id, question, options }`，省掉 `header`，或选项只给 `{ id, label }`
-            // 不给 `description`。必填时 AI SDK 在 `parseToolCall` 阶段抛
-            // `InvalidToolInputError`，整个调用被**静默跳过**——探针实测
-            // request_user_input 连续 20 次没执行，界面上连选择题卡片都不出现，
-            // 用户只看到「本轮工具调用已结束，没有产生可展示的产物」。
-            // 缺的值在 execute 里补默认（`formatAnswers` 本来也对缺字段做了兜底）。
-            id: z.string().nullish().describe("问题标识（英文短名，如'video_duration'），用于回传答案时对应。"),
-            header: z.string().nullish().describe("很短的中文标签，最多 12 个字（如'视频时长'）。"),
-            question: z.string().nullish().describe("完整问题，一句话说清要用户在什么之间做选择。"),
-            // **`.optional()` 只允许 undefined，不允许 null**（同类坑第十九处）：
-            // 模型写 `multiSelect: null` 时 zod 会拒掉整个对象 → 调用被静默跳过。
-            multiSelect: z.boolean().nullish().describe("是否允许多选。只有确实可以同时选多个时才设为 true。"),
-            // **不要在这里写 min(2).max(4)**（实测同类坑第五处）：模型只给 1 个选项时，
-            // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
-            // 整个调用被**静默跳过** → 模型收不到回执 → 反复重试 → 20 步预算烧光。
-            // 数量约束改在 execute 里夹取（见下），越界只会少一两个选项，不会让整轮失效。
-            // **空数组也收**（同类坑的收尾）：`questions: []` / `options: []` 在 schema 层
-            // 被拒会让整个调用静默跳过；这些交到 execute 里给一句可纠正的说明更合适。
-            options: z.array(z.object({
-              id: z.string().nullish().describe("选项标识（英文短名）。"),
-              label: z.string().nullish().describe("选项显示文字，简短（如'8 秒'）。"),
-              description: z.string().nullish().describe("这个选项意味着什么，一句话。")
-            })).describe("互斥选项，建议 2–4 个。").nullish()
-          })).describe("问题清单，建议 1–3 个。").nullish()
+          // **整个 questions 只声明"是数组"，元素一律 unknown**（实测第二十处同类坑，
+          // 也是危害最大的一处：`probe-question-shapes` 实测 9 种参数形状里 **7 种被拒**——
+          // options 写成字符串数组、questions 写成对象、multiSelect 写 "yes"、label 写数字……
+          // 每一种都会让 SDK 在 parseToolCall 阶段抛 `InvalidToolInputError`，
+          // 整个调用被**静默跳过**，界面上连卡片都不出现。
+          //
+          // 这次格外致命的理由：后端闸门（22f67da）唯一的出口就是让模型调这个工具问用户。
+          // 调用被跳过 → `backendSettled` 永远置不上位 → 闸门永远关着 → 模型反复重试 →
+          // 20 步烧光。真机 pelican 探针里已经出现过一次
+          // 「1 次工具调用没有真正执行（涉及：request_user_input）」。
+          //
+          // 所以这里**连"必须是数组"都不声明**（`z.unknown()`）：模型还会写
+          // `questions: "几秒？"`（当成单个问题）或 `{q1:"几秒？"}`（当成映射），
+          // 实测这两种照样被 `z.array()` 拒掉。形状归一全交给 `normalizeAgentQuestions`。
+          questions: z.unknown().describe(
+            "问题清单（1–3 个），通常写成数组。每个是对象：{ id?, header?, question, multiSelect?, options }。" +
+            "options 是 2–4 个互斥选项，可为 { id?, label, description? } 或直接写字符串。"
+          )
         }),
         execute: async (params) => {
-          // `questions` / `options` 已放宽为 nullish（见 schema 处说明）：
-          // **缺键与空数组是同一件事的两种写法**，都回一句可纠正的说明，
-          // 而不是让 SDK 静默拒掉整个调用。
-          const rawQuestions = Array.isArray(params.questions) ? params.questions : [];
-          if (rawQuestions.length === 0) {
-            return "没有要问的问题（questions 是空的）。如果确实需要用户拍板，请给出 1–3 个问题、每题 2–4 个选项；否则直接按最合理的方式继续。";
-          }
-          const emptyOptions = rawQuestions.findIndex((question) => !Array.isArray(question.options) || question.options.length === 0);
-          if (emptyOptions >= 0) {
-            return `第 ${emptyOptions + 1} 个问题没有任何选项。请为它提供 2–4 个互斥选项（每个带 label 与 description），再调用一次；不需要问的话就直接继续。`;
-          }
-          // **夹取而不是拒绝**（见 schema 处的说明）：渲染端能正常画 1 个选项的卡片，
-          // 超过 3 个问题/4 个选项则截断——少问一个总比整轮报废好。
-          //
-          // 缺字段在这里补默认（schema 已放宽为可选，见上面的说明）：
-          // - `id` 缺失时按下标生成，否则回传答案时对不上题（`formatAnswers` 按 id 匹配）；
-          // - `header` / `label` 缺失时退回「问题 N」/ 选项 id——渲染端会画出一个空标签的芯片；
-          // - `question` 缺失时用 header 顶上，总比一张只有标签的空卡片强。
-          //
-          // **id 必须去重**（实测缺陷）：模型偶尔把两个问题都写成同一个 id（复制粘贴、
-          // 或干脆都写 `q`）。而答案回传是按 id 查表的（`formatAnswers` 里
-          // `answers[question.id]`），同 id 会让**后一题顶用前一题的答案**——
-          // 用户只答了"时长 6 秒"，回执里"画幅"也变成"用户选择：横屏"
-          // （其实是第一题被选中的那个选项在第二题里的同名 id）。
-          // 渲染端与 formatAnswers 用的都是这份 `clipped`，在源头改一次即可。
-          const usedIds = new Set<string>();
-          const clipped = {
-            questions: rawQuestions.slice(0, 3).map((question, index) => ({
-              id: uniqueQuestionId(question.id?.trim() || `q${index + 1}`, usedIds, index),
-              header: question.header?.trim() || `问题 ${index + 1}`,
-              question: question.question?.trim() || question.header?.trim() || `请选择第 ${index + 1} 项的取值`,
-              // `boolean | null` → `boolean | undefined`：下游 `AgentQuestion.multiSelect?: boolean`
-              // 与 `PgQuestionCard` 都按三态之外的二态判断，塞 null 会走"非 true"分支（能跑），
-              // 但类型上不干净，且在 IPC 里会序列化成 `null`。统一归成 undefined。
-              multiSelect: question.multiSelect ?? undefined,
-              options: (question.options ?? []).slice(0, 4).map((option, optionIndex) => ({
-                id: option.id?.trim() || `opt${optionIndex + 1}`,
-                label: option.label?.trim() || option.id?.trim() || `选项 ${optionIndex + 1}`,
-                description: option.description?.trim() || ""
-              }))
-            }))
-          };
+          // **归一而不是拒绝**（见 schema 处的说明）：形状读不出来就降级，
+          // 但绝不能让整轮因参数形状失效——这个工具是闸门的唯一出口。
+          const normalized = normalizeAgentQuestions(params.questions);
+          if ("error" in normalized) return normalized.error;
           try {
-            return await callbacks.requestUserInput(clipped);
+            return await callbacks.requestUserInput(normalized);
           } catch (error) {
             // 用户没回答不算失败：必须让模型继续，而不是让它在这里死等或反复重试。
             return `未获得用户回答（${describeError(error, "用户选择了跳过或未在时限内回答")}）。请按你认为最合理的方式继续执行，并在回复里说明你做了哪些默认假设。`;

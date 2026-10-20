@@ -1329,6 +1329,13 @@ ${tableNote}` : ""}`;
           const reversedNote = slice.reversed
             ? `\n（注意：你给的 startLine=${params.startLine} 大于 endLine=${params.endLine}，范围是反的。已按起始行显示一行。要看这一段，把两个数字对调；要从某行读到结尾，只给 startLine。）`
             : "";
+          // **起点超出文件末尾也要说**（实测缺口）：模型要读第 9999 行、而文件只有 8 行时，
+          // 回执是「共 8 行，本次显示第 8–8 行」——没有任何"你要的范围不存在"的提示。
+          // 它据此以为自己拿到了想要的那段（其实是文件的最后一行），
+          // 于是基于错误内容继续改，还会困惑"为什么第 9999 行是这个"。
+          const beyondNote = Number.isFinite(params.startLine) && Number(params.startLine) > slice.totalLines
+            ? `\n（注意：你请求从第 ${params.startLine} 行开始，但${realRowCount !== undefined ? "本次能读到的" : "这份文件"}只有 ${slice.totalLines} 行。上面给的是**最后一行**。要读结尾附近的内容，用 startLine=${Math.max(1, slice.totalLines - 19)} 之类靠近末尾的行号，或用 keyword 定位。）`
+            : "";
           // **标题必须用"实际读到的那个文件"**：`nameNote` 已在上方（keyword 分支之前）
           // 算好——那里提前返回，放这里就看不到回落说明了。
           //

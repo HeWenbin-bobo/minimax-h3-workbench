@@ -586,11 +586,21 @@ function TaskCard({ task, index, onError, allowDemoPlaceholder = true, onRetried
   const bundledPoster = `${import.meta.env.BASE_URL}demo-videos/showcase-0${index + 1}.jpg`;
   const media = task?.outputPath ? `h3media://local/file?path=${encodeURIComponent(task.outputPath)}` : task ? "" : showDemo ? bundledMedia : "";
   const [retrying, setRetrying] = useState(false);
+  /**
+   * 同步守卫（`retrying` 只管按钮文案）。
+   *
+   * **`useState` 挡不住双击**（实测缺陷 probe-double-retry）：同一 tick 内连点两次，
+   * 两次都读到 `retrying === false`，于是发出两次 `retryTask` ——
+   * 后端实测建出**两个新任务组**，而云端重试是**真扣费**的（RB 扣卡密次数）。
+   * 与 `submitVideo` 早已用 `videoSubmittingRef` 修过的是同一类问题。
+   */
+  const retryingRef = useRef(false);
   // 视频加载失败（文件被手动删除、被过期清理、磁盘故障）时 <video> 只显示黑屏，
   // 用户以为"生成坏了"。这里记下失败并在原位给出可执行提示。
   const [mediaBroken, setMediaBroken] = useState(false);
   async function retry() {
-    if (!task || retrying) return;
+    if (!task || retryingRef.current) return;
+    retryingRef.current = true;
     setRetrying(true);
     // IPC 可能 reject（不只是返回 ok:false）。不兜住的话按钮永远停在「重试中…」。
     try {
@@ -602,6 +612,7 @@ function TaskCard({ task, index, onError, allowDemoPlaceholder = true, onRetried
     } catch (error) {
       onError(error);
     } finally {
+      retryingRef.current = false;
       setRetrying(false);
     }
   }

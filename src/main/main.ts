@@ -1116,6 +1116,16 @@ function registerIpc(
           const asked = normalizeBackendKind(requested);
           const userSaid = backendMentionedInText(userText);
           const usableBackends = (await videoBackendAvailability(turnSettings)).filter((entry) => !entry.reason);
+          // **用户本轮原话优先于会话记忆**（实测缺陷 probe-change-mind）：
+          // 轮 1 说「用本机」→ 记进会话；轮 2 改口「改用瞬映」时，如果只看
+          // `backendSettled`（记忆里已是 true）就会整块跳过，`userSaid` 根本不被读取，
+          // 于是仍按 local 生成。用户说了新选择，软件照旧选择执行。
+          // 所以这里**先读本轮原话**，它永远能覆盖记忆值。
+          if (userSaid && usableBackends.some((entry) => entry.kind === userSaid)) {
+            backendFromUser = userSaid;
+            backendSettled = true;
+            sessionChosenBackend.set(session, userSaid);
+          }
           if (usableBackends.length > 1 && !backendSettled) {
             const userPick = userSaid ? usableBackends.find((entry) => entry.kind === userSaid) : undefined;
             if (userPick) {

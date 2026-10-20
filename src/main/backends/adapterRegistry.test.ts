@@ -131,7 +131,31 @@ describe("backendMentionedInText", () => {
     // 用户的视频描述里常有「云海」「云端」，那是画面内容，不是后端选择。
     expect(backendMentionedInText("小仙女悬浮在云海之上")).toBeUndefined();
     expect(backendMentionedInText("远处是云海、仙山与明月")).toBeUndefined();
-    expect(backendMentionedInText("梦幻的云端效果")).toBe("minimax"); // 「云端」算——这是常见说法
+  });
+
+  /**
+   * **这条是花钱的边界**（实测推演，2026-10-20）：
+   * 用户原话「帮我生成一个云端漂浮的城堡」——「云端」是**画面内容**。
+   * 若判成"用户选了 MiniMax 云端"，闸门就会跳过询问、直接按秒计费生成。
+   * 用户只是描述画面，账单却按云端结算。
+   *
+   * 所以裸「云端」只在**明确是选项作答**的语境（`loose`）里才算数：
+   * 那时它来自我们给出的预设选项，语义没有歧义。
+   */
+  it("原话里的「云端城堡」不算选了云端（误判会花错钱）", () => {
+    expect(backendMentionedInText("帮我生成一个云端漂浮的城堡，梦幻风格")).toBeUndefined();
+    expect(backendMentionedInText("小仙女站在云端之上，身后是云海")).toBeUndefined();
+    expect(backendMentionedInText("梦幻的云端效果")).toBeUndefined();
+    // 明确的后端术语仍要认得出来（这些不会出现在画面描述里）
+    expect(backendMentionedInText("用 Minimax 生成")).toBe("minimax");
+    expect(backendMentionedInText("走云 api")).toBe("minimax");
+  });
+
+  it("选择题答案语境（loose）里裸「云端」算数（那是我们给出的选项）", () => {
+    expect(backendMentionedInText("云端（按秒计费）", { loose: true })).toBe("minimax");
+    expect(backendMentionedInText("【生成方式】用户选择：云端", { loose: true })).toBe("minimax");
+    // 画面描述即使走 loose 也不该被当成后端——但这里只保证严格模式的行为，
+    // loose 是我们自己给的选项文本，出现画面词的概率极低。
   });
 
   it("完全没提后端时返回 undefined（走「先问」那条路）", () => {

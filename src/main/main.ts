@@ -1622,7 +1622,11 @@ ${tableNote}` : ""}`;
             // 用户答了但答的是时长、没提后端时，也应该允许模型自己定——
             // 否则它会为了"凑一个后端名"再问一次，白烧步骤。
             backendSettled = true;
-            const picked = backendMentionedInText(answer);
+            // **选项答案走 loose**：那里的文本是我们自己给出的选项（「云端（按秒计费）」），
+            // 出现「云端」没有歧义。而 `userText`（用户原话）必须是严格模式——
+            // 用户描述画面说「云端漂浮的城堡」时被判成"选了云端"会直接跳过询问、
+            // 按秒计费生成（实测误判，花的是真钱）。
+            const picked = backendMentionedInText(answer, { loose: true });
             if (picked) backendFromUser = picked;
             return answer;
           } catch (error) {

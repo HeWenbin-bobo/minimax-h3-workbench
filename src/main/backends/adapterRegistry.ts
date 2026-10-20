@@ -35,21 +35,30 @@ export function backendKindLabel(kind: BackendKind): string {
 }
 
 /**
- * 用户这句话里有没有**明确**说要走哪个后端。
+ * 这段话里有没有**明确**说要走哪个后端。
  *
  * 用途：有多个后端可用时，`generate_video` 要求模型先问用户；但如果用户自己已经说了
  * 「用本机的」「走云端」，再拦着不让动手就是刁难。这里只认**明确的指名**，
  * 不做任何推断——认不出来就返回 `undefined`（走"先问"那条路，宁多问一句）。
  *
- * 词表刻意保守：`云海`/`4K 云端渲染` 这类正文里的词不该被当成"选了云端"，
- * 所以 minimax 只认 `minimax` / `云 api` / `云端` / `走云`，不认单个「云」字。
+ * **误判的代价不对称**：判成"用户选了云端"会跳过询问，直接按秒计费/扣卡密（花真钱）；
+ * 判不出来只是多问一句。所以词表刻意保守。
+ *
+ * @param options.loose 用于**选择题答案**语境。那里的文本是我们自己给出的选项
+ *   （如「云端（按秒计费）」），出现「云端」没有歧义；而用户**原话**里的「云端」
+ *   多半是画面内容（「云端漂浮的城堡」），不能当成选了后端——实测这条会花错钱。
  */
-export function backendMentionedInText(text: unknown): BackendKind | undefined {
-  if (typeof text !== "string" || !text) return undefined;
-  if (/瞬映|卡密|`rb`|\brb\b/i.test(text)) return "rb";
-  if (/minimax|云\s*api|云端|走云|云生成/i.test(text)) return "minimax";
-  if (/ssh|远程显卡/i.test(text)) return "ssh";
-  if (/本机|本地|comfy\s*ui|comfy/i.test(text)) return "local";
+export function backendMentionedInText(value: unknown, options?: { loose?: boolean }): BackendKind | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  const loose = options?.loose === true;
+  if (/瞬映|卡密|`rb`|\brb\b/i.test(value)) return "rb";
+  // 「云端」只在 loose 下无条件算：原话里的「云端城堡」「站在云端」都是画面描述。
+  // 严格模式下只认**指令形态**——"用/走/选 云端"或"云端 生成/跑/渲染"，
+  // 这两种说法不可能是画面描述。
+  if (/minimax|云\s*api|走云|云生成/i.test(value)) return "minimax";
+  if (loose ? /云端/.test(value) : /(?:用|走|选|要)\s*云端|云端\s*(?:生成|跑|渲染)/.test(value)) return "minimax";
+  if (/\bssh\b|远程显卡/i.test(value)) return "ssh";
+  if (/本机|本地|comfy\s*ui|comfy/i.test(value)) return "local";
   return undefined;
 }
 

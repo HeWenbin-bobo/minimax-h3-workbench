@@ -59,6 +59,7 @@ import { buildCompactedHistory, summarizeHistory } from "./modules/compaction";
 import { withPlanMode } from "../shared/planMode";
 import { contextWindowFor } from "../shared/modelWindows";
 import { sliceSafe } from "../shared/text";
+import { decodeTextBytes, decodeTextPreview } from "./modules/textFile";
 
 /**
  * 每个会话的上下文预算状态（按 sessionId 隔离，对齐 Codex 的 per-thread window）。
@@ -1684,36 +1685,11 @@ ${tableNote}` : ""}`;
     }
     if ([".txt", ".md", ".json", ".csv", ".srt", ".vtt", ".log"].includes(extension)) {
       if (info.size > 2 * 1024 * 1024) throw new Error("文本附件超过 2MB 上限，请只粘贴相关片段。");
-      // **必须容忍非 UTF-8 编码**（实测，两次都踩到）：
-      //
-      // ① **GBK/GB18030**：Windows 记事本、Excel「另存为 CSV」在中文系统上默认写它，
-      //    按 UTF-8 读会得到一整片 `���Ĳ���`——用户看不出原因（文件在自己电脑上明明正常），
-      //    模型拿到的也是乱码，只会答非所问。
-      // ② **UTF-16LE / UTF-16BE（带 BOM）**：记事本「另存为 → 编码：Unicode」就是这个格式，
-      //    而它是**中文 Windows 用户的另一个默认选择**。它的字节里含 0xFF/0xFE 与大量 0x00，
-      //    恰好也能被 GB18030 解出来（不抛错），于是得到 `��-N噀Km諎` 这种乱码——
-      //    比完全解不开更糟：用户以为附件发上去了，模型看到的却是一堆噪声。
-      //
-      // 顺序：**先看 BOM**（最确定的信号）→ 严格 UTF-8（`fatal: true` 会抛而不是静默替换）
-      // → GB18030（向下兼容 GBK/GB2312，是 Windows 中文环境的实际默认）。
-      const bytes = await readFile(filePath);
-      let raw: string;
-      if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
-        raw = new TextDecoder("utf-16le").decode(bytes.subarray(2));
-      } else if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
-        raw = new TextDecoder("utf-16be").decode(bytes.subarray(2));
-      } else {
-        try {
-          // `ignoreBOM: false`（默认）会把 UTF-8 BOM 剥掉——留着它，正文第一个字符
-          // 就是不可见的 U+FEFF，模型复制片段时会把那个隐形字符一起带回去。
-          raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-        } catch {
-          raw = new TextDecoder("gb18030").decode(bytes);
-        }
-      }
-      // BOM 兜底：部分工具写的是「UTF-8 BOM + GBK 正文」这类混合，上面的分支剥不掉。
-      // 统一在入口去掉一个开头的 U+FEFF（它只有"编码标记"这一个含义，正文不该带）。
-      if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
+      // **必须容忍非 UTF-8 编码**（GBK / UTF-16，见 `modules/textFile.ts` 的文件头说明）：
+      // 直接按 UTF-8 读不会报错，只会给出一片乱码——用户看不出原因（文件在自己电脑上明明正常），
+      // 模型拿到的也是噪声，只会答非所问。**产物预览走同一个函数**：
+      // 两处各写一遍的话，只会修其中一处（本项目已经因此踩过多次）。
+      const raw = decodeTextBytes(await readFile(filePath));
       // 截断必须**如实上报**：原实现静默 `.slice(0, 100_000)`，用户以为整份文件都发给了模型，
       // 模型也只看到前一段——文件更长时两边都不知道（违反「出错/取舍必须让人看见」）。
       // 同样用 sliceSafe：这段正文会发回模型，不能留孤立代理项。
@@ -1857,8 +1833,11 @@ ${tableNote}` : ""}`;
       try {
         const buffer = Buffer.alloc(MAX_PREVIEW_BYTES);
         const { bytesRead } = await handle.read(buffer, 0, MAX_PREVIEW_BYTES, 0);
-        // 只截到完整字符边界：末尾可能被砍在多字节字符中间。
-        const head = buffer.subarray(0, bytesRead).toString("utf8").replace(/�+$/, "");
+        // **同一个解码函数**（见 `modules/textFile.ts`）：产物是模型写的（UTF-8），
+        // 但用户完全可能用记事本把它另存成 GBK/UTF-16 再回来预览。旧实现直接
+        // `toString("utf8")`，那样存过的 .md/.csv 预览出来是一整片乱码。
+        // 截断只落在完整字符边界上（函数内部处理了末尾的半个字符）。
+        const { text: head } = decodeTextPreview(buffer.subarray(0, bytesRead), MAX_PREVIEW_BYTES);
         // 同 xlsx：截断说明走 `note`。表格预览拿 `text` 直接解析，拼进去会变成一行假数据。
         return {
           text: head,
@@ -1868,7 +1847,7 @@ ${tableNote}` : ""}`;
         await handle.close();
       }
     }
-    return { text: await readFile(resolved, "utf8") };
+    return { text: decodeTextBytes(await readFile(resolved)) };
   });
   /**
    * 会话被彻底删除（用户点「彻底删除」或回收站 7 天到期）时清掉它的产物目录。

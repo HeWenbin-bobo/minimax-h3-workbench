@@ -1031,6 +1031,24 @@ function normalizeDeletedAt(value: unknown): string | undefined {
   return new Date().toISOString();
 }
 
+/**
+ * 产物 kind 的归一化（读取侧）。
+ *
+ * 为什么需要：预览面板三个分支全是 `artifact.kind === "html" / "sheet" / "doc"` 的
+ * **精确比对**，任何其它值都会让三个分支全不命中——用户点「预览」看到一片空白面板，
+ * 既没有报错也没有内容。而 localStorage 是外部数据（旧版本写脏、手改、半截写入）。
+ *
+ * 判据：认得的三个值原样保留；否则**按文件名扩展名推断**；再推不出来按 doc 兜底
+ * （文档预览是纯文本渲染，最不容易出错）。
+ */
+function normalizeArtifactKind(value: unknown, name: unknown): ArtifactKind {
+  if (value === "html" || value === "sheet" || value === "doc") return value;
+  const lower = typeof name === "string" ? name.toLowerCase() : "";
+  if (/\.html?$/.test(lower)) return "html";
+  if (/\.xlsx?$/.test(lower)) return "sheet";
+  return "doc";
+}
+
 /** 读盘后的会话归一化。**导出以便单测**：坏元素的容错逻辑读代码看不出来，必须能断言。 */
 export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
   if (!Array.isArray(raw)) return [];
@@ -1128,7 +1146,12 @@ export function normalizeStoredSessions(raw: unknown): PlaygroundSession[] {
         artifacts: asArray<NonNullable<PlaygroundMessage["artifacts"]>[number]>(rest.artifacts)?.filter(
           (a) => Boolean(a) && typeof a === "object" && typeof (a as { name?: unknown }).name === "string"
             && typeof (a as { path?: unknown }).path === "string"
-        )
+          // **`kind` 也要归一**（实测缺口）：预览面板三个分支全是
+          // `artifact.kind === "html" / "sheet" / "doc"` 的精确比对，而这里只校验了
+          // name/path —— 旧版本写进去的未知 kind（拼错、数字、缺失）会让
+          // **三个分支全不命中**：用户点「预览」看到一片空白面板，没有任何报错。
+          // （`size` 的脏值不用在这里处理：`sizeLabel(unknown)` 对非有限数字返回空串。）
+        )?.map((a) => ({ ...a, kind: normalizeArtifactKind(a.kind, a.name) }))
       };
       // `questions`（挂起的选择题）同样不能跨重启保留：它靠主进程内存里的
       // `questionBridge` 兑现，重启后 requestId 全部失效——卡片还在、点了永远无效。

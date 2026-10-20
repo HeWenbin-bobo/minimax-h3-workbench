@@ -197,6 +197,27 @@ describe("normalizeStoredSessions 坏数据容错", () => {
     expect(result[0].title).toBe("甲");
   });
 
+  // 实测缺口：预览面板三个分支全是 `artifact.kind === "html" / "sheet" / "doc"` 的
+  // 精确比对，而读取侧只校验了 name/path。kind 是脏值（旧版本写错、手改 localStorage）
+  // 时三个分支全不命中 —— 用户点「预览」看到一片空白面板，没有任何报错。
+  it("产物的脏 kind 按扩展名归一（否则预览面板一个分支都不命中）", () => {
+    const result = normalizeStoredSessions([{
+      id: "a",
+      messages: [{
+        id: "m1", role: "assistant", content: "x",
+        artifacts: [
+          { name: "a.html", path: "/a/a.html", size: 1, kind: "???" },
+          { name: "b.xlsx", path: "/a/b.xlsx", size: 1, kind: 42 },
+          { name: "c.md", path: "/a/c.md", size: 1, kind: "doc" }
+        ]
+      }]
+    }]);
+    const kinds = result[0].messages[0].artifacts?.map((a) => a.kind);
+    expect(kinds).toEqual(["html", "sheet", "doc"]);
+    // 认得的合法值原样保留（不能被扩展名推断改掉）。
+    expect(kinds?.every((k) => k === "html" || k === "sheet" || k === "doc")).toBe(true);
+  });
+
   it("残留 streaming 标记被清掉（重启后不留闪烁光标）", () => {
     const result = normalizeStoredSessions([
       { id: "a", messages: [{ role: "assistant", content: "半截", streaming: true }] }

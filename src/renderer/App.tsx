@@ -1209,6 +1209,31 @@ const PgMarkdown = memo(function PgMarkdown({ content }: { content: string }) {
   return <>{renderMarkdown(content)}</>;
 });
 
+/** 用户气泡的默认显示上限（字符）。超出的部分折叠，点一下展开。 */
+const USER_TEXT_PREVIEW = 1_200;
+
+/**
+ * 用户消息正文渲染（**长文本必须折叠**）。
+ *
+ * 实测（probe-long-attachment，2026-10-20）：把一个 3000 行的文本文件当附件发出去后，
+ * `send()` 会把附件全文拼进用户消息（模型需要它），而这里原样全量渲染 ——
+ * 气泡实测 **54091px 高**。用户只是想发"看下这份纪要"，结果自己那条消息变成一整面墙，
+ * 往下翻很久才能看到 AI 的回复。
+ *
+ * 折叠只影响**显示**：发给模型的历史完全不变（构造历史用的是消息原内容），
+ * 也不动会话存储格式——所以老会话里已经存下的长消息同样受益，不需要迁移。
+ */
+const PgUserText = memo(function PgUserText({ content }: { content: string }) {
+  const [open, setOpen] = useState(false);
+  if (content.length <= USER_TEXT_PREVIEW || open) return <>{renderMarkdown(content)}</>;
+  return <>
+    <div className="pg-user-clip">{renderMarkdown(sliceSafe(content, USER_TEXT_PREVIEW))}</div>
+    <button className="pg-user-more" onClick={() => setOpen(true)}>
+      展开全文（还有 {content.length - USER_TEXT_PREVIEW} 字）
+    </button>
+  </>;
+});
+
 /**
  * 游乐场输入区草稿的模块级缓存。
  *
@@ -2100,7 +2125,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
               {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
-              <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <PgToolSteps steps={msg.toolSteps} running={Boolean(msg.streaming)} />}{msg.content ? <PgMarkdown content={msg.content} /> : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
+              <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <PgToolSteps steps={msg.toolSteps} running={Boolean(msg.streaming)} />}{msg.content ? (msg.role === "user" ? <PgUserText content={msg.content} /> : <PgMarkdown content={msg.content} />) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
                 // 优先用主进程推来的已落盘产物（元数据，内容在磁盘上）。
                 // 回落到扫描正文围栏：兼容历史消息，以及模型没用工具、直接在回复里写文件内容的老路径。
                 if (msg.role === "assistant" && msg.artifacts?.length) {

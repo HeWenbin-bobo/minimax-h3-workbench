@@ -472,6 +472,13 @@ button { cursor: pointer; }
 .pg-msg.assistant .pg-bubble { background: var(--surface); border: 0; border-radius: 0; padding: 0; }
 .pg-msg.assistant { max-width: 100%; }
 .pg-msg.user .pg-bubble { background: var(--brand-gradient); color: #fff; border: 0; }
+/* 长用户消息（附件全文会拼进来）：默认只显示开头，避免一整面墙把 AI 回复顶到很远。
+   实测 3000 行附件曾把气泡撑到 54091px 高（probe-long-attachment）。
+   这里再加一层高度上限兜底：即使预览段本身很长，也不会无界撑开。 */
+.pg-msg.user .pg-user-clip { max-height: 220px; overflow: hidden; position: relative; }
+.pg-msg.user .pg-user-clip::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 48px; background: linear-gradient(rgba(122, 39, 255, 0), rgba(122, 39, 255, 0.92)); pointer-events: none; }
+.pg-msg.user .pg-user-more { margin-top: 6px; background: rgba(255, 255, 255, 0.18); color: #fff; border: 0; border-radius: 8px; padding: 3px 10px; font-size: 11px; cursor: pointer; }
+.pg-msg.user .pg-user-more:hover { background: rgba(255, 255, 255, 0.3); }
 .pg-msg.user .pg-bubble code { background: rgba(255, 255, 255, 0.18); color: #fff; }
 .pg-msg.user .pg-bubble a { color: #fff; }
 .pg-msg.assistant .pg-bubble p { margin: 0 0 8px; }

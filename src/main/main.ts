@@ -1127,23 +1127,17 @@ function registerIpc(
             sessionChosenBackend.set(session, userSaid);
           }
           if (usableBackends.length > 1 && !backendSettled) {
-            const userPick = userSaid ? usableBackends.find((entry) => entry.kind === userSaid) : undefined;
-            if (userPick) {
-              // 用户自己在消息里点名了 → 直接用，不必再问（"能动手就不问"）。
-              backendFromUser = userPick.kind;
-              // **记进会话**：下一轮（计划执行轮）不该再问一遍同一个问题。
-              sessionChosenBackend.set(session, userPick.kind);
-            } else {
-              return [
-                `**还没有确定用哪个后端，任务没有创建。** 现在有 ${usableBackends.length} 个可用的生成方式：`,
-                usableBackends.map((entry) => `- ${backendKindLabel(entry.kind)}（\`${entry.kind}\`）— ${entry.note}`).join("\n"),
-                `它们的花费差别很大（本机不额外计费、云端按秒计费、瞬映扣卡密次数），不能替用户默认挑一个。`,
-                userSaid
-                  ? `另外：你传了 \`backend="${requested}"\`，但用户这句话里并没有明确选定后端（或是你说要问的那一步还没做）。请先用 \`request_user_input\` 问清楚。`
-                  : `请先用 \`request_user_input\` 问用户用哪一个（选择题里把上面几个都列上），拿到答复后再带 \`backend\` 重新调用本工具。`,
-                `如果用户已经明确说了用哪个（如"用本机""走云端"），直接把那个值放进 \`backend\` 再调用。`
-              ].join("\n");
-            }
+            // 走到这里说明：本轮原话没点名后端（否则上一块已置位），会话记忆里也没有
+            // （否则 `backendSettled` 初值就是 true）——**必须先问用户**。
+            return [
+              `**还没有确定用哪个后端，任务没有创建。** 现在有 ${usableBackends.length} 个可用的生成方式：`,
+              usableBackends.map((entry) => `- ${backendKindLabel(entry.kind)}（\`${entry.kind}\`）— ${entry.note}`).join("\n"),
+              `它们的花费差别很大（本机不额外计费、云端按秒计费、瞬映扣卡密次数），不能替用户默认挑一个。`,
+              userSaid
+                ? `另外：用户提到了「${userSaid}」，但那个后端现在不可用（或不在可用清单里）。请先把现状告诉用户，再问要不要换一个。`
+                : `请先用 \`request_user_input\` 问用户用哪一个（选择题里把上面几个都列上），拿到答复后再带 \`backend\` 重新调用本工具。`,
+              `如果用户已经明确说了用哪个（如"用本机""走云端"），直接把那个值放进 \`backend\` 再调用。`
+            ].join("\n");
           }
           const backend: BackendKind = backendFromUser ?? asked ?? turn.value.defaultBackend;
           // **提交前必须确认这个后端此刻能不能用**（实测缺陷 probe-nocred-backend）：

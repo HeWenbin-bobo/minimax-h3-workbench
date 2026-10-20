@@ -962,9 +962,15 @@ export async function chatAgent(
           // 这种常见叫法时，AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
           // 整个调用被**静默跳过** → 收不到回执 → 反复重试 → 20 步预算烧光，
           // 探针实测「20 步、0 产物」。改成字符串 + 执行侧归一。
-          kind: z.string().describe("文件类型：html（网页/小工具/游戏）、csv 或 tsv（结构化数据，存为 .xlsx）、md（文档/报告）。常见别名（excel/xlsx/word/doc/markdown）也会被识别。"),
-          name: z.string().describe("文件名。带不带扩展名都行（如「科技新闻」或「科技新闻.html」）——扩展名会按 kind 自动补齐/纠正；留空时会自动命名。"),
-          content: z.string().describe("完整文件内容。csv/tsv 首行为表头；html 为完整网页（含 <!DOCTYPE html>）；md 为 markdown 正文。不能为空。")
+          // **三个字段都允许缺省**（实测同类坑第十六处）：模型偶尔只给
+          // `{ kind, name }`（"先建个空文件、下一步再写"的思路），或干脆省略 `name`。
+          // 必填时 AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
+          // **整个调用被静默跳过**——探针实测 create_file 连续 20 次没执行，
+          // 气泡只剩「本轮工具调用已结束，没有产生可展示的产物」。
+          // 缺省值在 execute 里补（content 为空会给一句可纠正的说明，见下）。
+          kind: z.string().nullish().describe("文件类型：html（网页/小工具/游戏）、csv 或 tsv（结构化数据，存为 .xlsx）、md（文档/报告）。常见别名（excel/xlsx/word/doc/markdown）也会被识别。"),
+          name: z.string().nullish().describe("文件名。带不带扩展名都行（如「科技新闻」或「科技新闻.html」）——扩展名会按 kind 自动补齐/纠正；留空时会自动命名。"),
+          content: z.string().nullish().describe("完整文件内容。csv/tsv 首行为表头；html 为完整网页（含 <!DOCTYPE html>）；md 为 markdown 正文。不能为空。")
         }),
         execute: async (params) => {
           // **内容为空要说清楚**（而不是让 schema 拒掉整个调用）：模型偶尔会在
@@ -975,14 +981,23 @@ export async function chatAgent(
           // **kind 归一**（见 schema 处说明）：把模型的口语化叫法映射到四种规范值。
           // 认不出来时**不在这里拒绝**——交给 `saveArtifactFile` 抛中文错误并回给模型
           // （工具层返回文本比抛异常好：抛出去会让 AI SDK 判整轮失败、回落普通对话）。
-          const rawKind = String(params.kind || "").trim().toLowerCase();
+          // `kind` 缺省时按内容猜：含 `<!DOCTYPE`/`<html` → html，含逗号或制表的多行 → xlsx，
+          // 其余按 md——总比落成一个"未知类型"卡片强。
+          const rawKind = String(params.kind ?? "").trim().toLowerCase();
+          const body = String(params.content ?? "");
+          const guessed = /<!doctype|<html[\s>]/i.test(body)
+            ? "html"
+            : body.split("\n").length >= 2 && /[,\t]/.test(body)
+              ? "xlsx"
+              : "md";
           // 类型上仍是四种规范值 + 未知原样（未知走 `saveArtifactFile` 的中文报错）。
           const kind = (/^(html?|web|page|网页|页面)$/.test(rawKind) ? "html"
             : /^(csv|tsv|xlsx?|excel|sheet|table|表格)$/.test(rawKind) ? "xlsx"
               : /^(md|markdown|docx?|word|text|文档|报告)$/.test(rawKind) ? "md"
-                : rawKind) as "html" | "csv" | "tsv" | "md" | "xlsx";
+                : rawKind || guessed) as "html" | "csv" | "tsv" | "md" | "xlsx";
           try {
-            return await callbacks.createFile({ ...params, kind });
+            // `name` 缺省时传空串：`saveArtifactFile` 会落到 `artifact` 这个兜底名。
+            return await callbacks.createFile({ kind, name: String(params.name ?? ""), content: body });
           } catch (error) {
             return `保存文件失败：${describeError(error, "未知错误")}。请把内容改写成围栏代码块直接输出，并在回复里说明文件未能保存。`;
           }

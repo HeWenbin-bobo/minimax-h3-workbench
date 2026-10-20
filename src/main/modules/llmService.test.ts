@@ -568,6 +568,22 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
     }
   });
 
+  // 实测复现（probe-missing-content）：模型只给 `{ kind, name }`（"先建个空文件、
+  // 下一步再写"的思路）时，`content` 缺键会让 parseToolCall 拒掉整个调用——
+  // create_file 连续 20 次没执行，气泡只剩「没有产生可展示的产物」。
+  it("create_file：省略 content / name / kind 也能进工具层", async () => {
+    const s = (await schemas()).create_file;
+    for (const value of [
+      { kind: "html", name: "空壳" },
+      { kind: "html", content: "<p>x</p>" },
+      { name: "a", content: "y" },
+      {}
+    ]) {
+      const parsed = s.safeParse(value);
+      expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
+
   it("generate_video：越界时长/数量交给代码夹取，不在 schema 拒", async () => {
     const s = (await schemas()).generate_video;
     for (const value of [

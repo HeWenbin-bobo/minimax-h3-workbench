@@ -1158,12 +1158,17 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
         inputSchema: z.object({
           explanation: z.string().describe("一句话说明这次更新的原因（如'已完成搜索，开始整理数据'）。仅当状态变化需要解释时才写。").optional(),
           plan: z.array(z.object({
-            step: z.string().describe("步骤描述，写清要做什么，如'搜索 2025 年国产显卡价格'。"),
+            // **`step` / `status` 也必须是可选**（实测同类坑第十七处）：
+            // 模型很自然只写 `{ plan: [{ step: "搜索资料" }] }`——省略 status。
+            // 必填时 AI SDK 在 `parseToolCall` 阶段抛错，调用被**静默跳过**。
+            // 探针实测 `update_plan` 连续 20 次没执行、步骤清单卡片一次都没渲染出来；
+            // 而这个工具几乎每步都会被调用，等于把整轮的进度可视化全部废掉。
+            step: z.string().nullish().describe("步骤描述，写清要做什么，如'搜索 2025 年国产显卡价格'。"),
             // **不要用 z.enum**（同一类坑第八处）：模型常写 `done` / `in-progress` / `doing`，
             // 枚举一拒，AI SDK 在 `parseToolCall` 阶段抛错、**整个调用被静默跳过**——
             // 而 update_plan 几乎每步都调，等于把整轮的进度可视化全部废掉，
             // 还白白烧步数。改在 execute 里归一（见下）。
-            status: z.string().describe("步骤状态：pending（未开始）/ in_progress（进行中，全清单最多一项）/ completed（已完成）。")
+            status: z.string().nullish().describe("步骤状态：pending（未开始）/ in_progress（进行中，全清单最多一项）/ completed（已完成）。")
           // **`.min(1)` 也不要**：模型偶尔会给空数组（"这轮没步骤"），
           // schema 一拒就是整个调用被静默跳过。空清单在 execute 里回一句说明即可。
           })).describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。")
@@ -1182,13 +1187,17 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           };
           // **最多一项 in_progress**：模型常说"全都进行中"，渲染端的语义是"最多一个"。
           // 多出来的降级为 pending（不丢步骤，只修状态）。
+          // `step` 缺省时补一个占位：schema 已放宽为可选（见上），但下游 `PlanStep`
+          // 要求它必须是字符串——空串会让清单里出现一行没有任何文字的条目，
+          // 所以给「步骤 N」而不是 ""。
           let sawInProgress = false;
-          const plan = params.plan.map((entry) => {
+          const plan = params.plan.map((entry, index) => {
+            const step = String(entry.step ?? "").trim() || `步骤 ${index + 1}`;
             const status = normalizeStatus(entry.status);
-            if (status !== "in_progress") return { ...entry, status };
-            if (sawInProgress) return { ...entry, status: "pending" as const };
+            if (status !== "in_progress") return { step, status };
+            if (sawInProgress) return { step, status: "pending" as const };
             sawInProgress = true;
-            return { ...entry, status };
+            return { step, status };
           });
           try {
             return await callbacks.updatePlan({ ...params, plan });

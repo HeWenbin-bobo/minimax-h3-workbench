@@ -657,6 +657,21 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
     expect(parsed.success, parsed.error?.issues[0]?.message).toBe(true);
   });
 
+  // 实测复现（probe-plan-missing）：模型只写 `{ plan: [{ step: "搜索资料" }] }`，省略 status。
+  // 必填时 AI SDK 在 parseToolCall 阶段抛错 → 调用被静默跳过：探针实测连 20 次没执行、
+  // 步骤清单卡片一次都没渲染。而这个工具几乎每步都调，等于废掉整轮的进度可视化。
+  it("update_plan：省略 step / status 也能进工具层", async () => {
+    const s = (await schemas()).update_plan;
+    for (const value of [
+      { plan: [{ step: "搜索资料" }] },
+      { plan: [{ status: "done" }] },
+      { plan: [{}, {}] }
+    ]) {
+      const parsed = s.safeParse(value);
+      expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
+
   // 实测复现（probe-schema-question-field）：模型只写 `{ id, question, options }`，
   // 省掉 `header`、或选项只给 `{ id, label }` 不给 `description`。
   // 必填时 AI SDK 在 `parseToolCall` 阶段抛错 → 调用被**静默跳过**：

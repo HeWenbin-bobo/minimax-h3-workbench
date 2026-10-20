@@ -398,6 +398,15 @@ describe("extractArtifact 围栏语言别名", () => {
     expect(extractArtifact("```csv\n只有一行\n```")).toBeUndefined();
   });
 
+  // 实测缺陷：旧判据按 lang 猜分隔符（`tsv` → 制表符，其余 → 逗号），
+  // 于是 ```xlsx / ```csv 里放**制表符分隔**的数据时直接返回 undefined——
+  // **卡片完全不出**，而落盘路径（`saveArtifactFile` → `parseCsvRows`）本来就会自动识别。
+  it("```xlsx / ```csv 里放制表符分隔的数据也要认（不按 lang 猜分隔符）", () => {
+    for (const lang of ["xlsx", "excel", "csv", "tsv"]) {
+      expect(extractArtifact("```" + lang + "\n城市\t销量\n北京\t10\n```")?.kind, lang).toBe("sheet");
+    }
+  });
+
   it("```html 优先于其它围栏", () => {
     const text = "```csv\na,b\n1,2\n```\n\n```html\n<!DOCTYPE html><p>x</p>\n```";
     expect(extractArtifact(text)?.kind).toBe("html");

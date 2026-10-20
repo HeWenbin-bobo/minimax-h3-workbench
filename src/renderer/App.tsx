@@ -2227,10 +2227,18 @@ export function extractArtifact(content: string): { kind: ArtifactKind; content:
   for (const [, lang, body] of fences) {
     const code = body.trim();
     if (/^(csv|tsv|xlsx|excel)$/i.test(lang)) {
-      // CSV/TSV 围栏要有结构化数据的样子（≥2 行且含分隔符），排除随手贴的单行文本。
-      // xlsx/excel 别名：create_file 工具成功后回注的围栏用模型调用的 kind 命名，可能标成 xlsx。
-      const sep = /tsv/i.test(lang) ? "\t" : ",";
-      if (code.split("\n").length >= 2 && code.includes(sep)) return { kind: "sheet", content: code };
+      // **分隔符不能按 lang 猜**（实测缺陷）：旧写法是
+      //   `const sep = /tsv/i.test(lang) ? "\t" : ",";` + `code.includes(sep)`
+      // 于是 ```` ```xlsx ```` / ```` ```csv ```` 里放**制表符分隔**的数据时，
+      // 判据直接失败 → `extractArtifact` 返回 undefined → **卡片完全不出**，
+      // 而落盘路径（`saveArtifactFile` → `parseCsvRows`）本来就会自动识别制表符，
+      // 两边对"这是不是一张表"的判断不一致。
+      //
+      // 改用同一个共享解析器：**切出来至少 2 行、且有行是多列**才算表格。
+      // 这样逗号、制表符、以及"表头列数与数据行不一致"的脏数据都能过，
+      // 而随手贴的单行文本/纯段落仍然被挡住。
+      const rows = parseCsvRows(code);
+      if (rows.length >= 2 && rows.some((row) => row.length > 1)) return { kind: "sheet", content: code };
     }
     // `md` 必须收下：它正是 create_file 的 kind 枚举值之一（html/csv/tsv/md），
     // 模型自己写围栏时也最常用它。漏掉这条时，```md 的文档**一张卡片都挂不上**——

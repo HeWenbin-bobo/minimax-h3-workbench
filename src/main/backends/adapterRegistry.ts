@@ -214,6 +214,38 @@ export class AdapterRegistry {
     this.sshAdapter = undefined;
   }
 
+  /**
+   * 这个后端**现在能不能发出去**——在建任务**之前**调用。
+   *
+   * 为什么需要（实测缺陷 probe-retry-nocred）：`retry()` 只做参数校验（`validateRequest`），
+   * 而凭据要到 `runTask()` → `RbAdapter.generate()` 里才检查。于是"卡密已被删掉"时点重试：
+   * **先建出一条注定失败的任务**，界面留下一张 failed 卡片，用户还得手动删掉。
+   * 与 `generate_video` 早先那处（`probe-nocred-backend`）是同一类，只是那条路已在前置检查过。
+   *
+   * 放在 registry 这一个出口上：`submit()` / `retry()` 都经过它，改一处即全覆盖。
+   * **只比空串，不记录、不打印密钥内容**（CLAUDE.md 红线）。
+   */
+  async assertUsable(kind: BackendKind): Promise<void> {
+    const settings = await this.settingsStore.get();
+    if (kind === "minimax") {
+      const key = await this.settingsStore.getSecret("minimaxApiKey");
+      if (!key) throw new Error("请先在连接设置中保存 MiniMax API Key。");
+      return;
+    }
+    if (kind === "rb") {
+      const card = await this.settingsStore.getSecret("rbCardCode");
+      if (!card) throw new Error("请先在连接设置中保存瞬映卡密。");
+      return;
+    }
+    if (kind === "local") {
+      if (!settings.localComfyUrl) throw new Error("请先在连接设置中填写本机 ComfyUI 地址。");
+      return;
+    }
+    if (kind === "ssh") {
+      if (!settings.ssh.host || !settings.ssh.username) throw new Error("请先在连接设置中填写 SSH 主机与用户名。");
+    }
+  }
+
   close(): void {
     this.invalidate();
   }

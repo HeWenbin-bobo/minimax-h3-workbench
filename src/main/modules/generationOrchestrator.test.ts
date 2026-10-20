@@ -25,9 +25,13 @@ function makeTask(overrides: Partial<GenerationTask> = {}): GenerationTask {
 function makeOrchestrator(tasks: GenerationTask[]) {
   const store = { load: vi.fn(), save: vi.fn(async () => undefined) } as unknown as TaskStore;
   const listener = vi.fn();
-  const orchestrator = new GenerationOrchestrator(store, {} as AdapterRegistry, listener);
+  // `submit` / `retry` 现在会先调 `adapters.assertUsable(backend)`（建任务前确认凭据可用），
+  // 而这里原本用 `{}` 当空对象——缺这个方法会让所有 submit 路径抛 TypeError。
+  // 默认放行（"凭据已配好"）；需要拒绝的用例自行 `mockRejectedValueOnce`。
+  const adapters = { assertUsable: vi.fn(async () => undefined) } as unknown as AdapterRegistry;
+  const orchestrator = new GenerationOrchestrator(store, adapters, listener);
   (orchestrator as unknown as { tasks: GenerationTask[] }).tasks = tasks;
-  return { orchestrator, store, listener };
+  return { orchestrator, store, listener, adapters };
 }
 
 describe("GenerationOrchestrator 回收站", () => {

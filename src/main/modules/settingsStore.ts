@@ -214,7 +214,17 @@ export class SettingsStore {
     // 与 update 共用同一条队列：密钥写入同样是读-改-写，并发会丢键/写坏 tmp。
     return this.serialize(async () => {
       const secrets = await this.readSecrets();
-      secrets[name] = safeStorage.encryptString(value).toString("base64");
+      // **空值 = 删除该键**（实测缺陷 probe-retry-nocred）：
+      // `encryptString("")` 是成功的，于是存下一个"能解开但内容为空"的密文——
+      // `hasSecret` 据此报 true（界面显示「已保存」），而 `getSecret` 返回空串
+      // （真正调用时又报"请先保存卡密"）。两处结论相反，用户无从判断到底存没存。
+      // 删键之后 `hasSecret` 自然为 false，语义与用户预期一致。
+      if (!value) {
+        if (!(name in secrets)) return; // 本来就没有：不必写盘
+        delete secrets[name];
+      } else {
+        secrets[name] = safeStorage.encryptString(value).toString("base64");
+      }
       await this.atomicWrite(this.secretPath, secrets);
     });
   }

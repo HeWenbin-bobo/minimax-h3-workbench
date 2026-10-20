@@ -221,6 +221,11 @@ export class GenerationOrchestrator {
 
   async submit(request: GenerationRequest): Promise<GenerationTask[]> {
     validateRequest(request);
+    // **建任务之前先确认这个后端能用**（实测缺陷 probe-retry-nocred）：
+    // 凭据要到 `runTask()` 里才检查，届时任务已经建出来并写进列表，
+    // 用户看到的是一张注定失败的卡片（得手动删）。放这里等于把"能不能发出去"
+    // 提前到"要不要建这条记录"之前。
+    await this.adapters.assertUsable(request.backend);
     const parentId = randomUUID();
     const now = new Date().toISOString();
     // 只在**没给**时才用默认 4。旧写法 `request.count || 4` 把显式的 0 也当成"没给"，
@@ -285,6 +290,9 @@ export class GenerationOrchestrator {
     // - 非法的 duration/preset 组合会真的发到云端（失败照样扣卡密次数）。
     // 放在建任务之前：脏记录应当被明确拒绝，而不是先建一条注定失败、还会计费的任务。
     validateRequest(request);
+    // **重试同样要先确认后端可用**（实测缺陷 probe-retry-nocred）：任务创建时卡密还在、
+    // 之后用户把它删了，点重试会先建出一条注定失败的记录（again 得手动删）。
+    await this.adapters.assertUsable(request.backend);
     // 和 submit 一样补齐可缺省字段：老记录（或手改过的 tasks.json）可能没有
     // width/height/ratio/resolution，直接透传会让工作流缺必填输入。
     const normalized = normalizeRequest(request);

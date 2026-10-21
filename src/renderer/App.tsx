@@ -3333,6 +3333,22 @@ function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: 
   // confirm 在 Electron 里会弹阻塞式原生对话框，且自动化（CDP）会被挂住；
   // 本项目对 prompt 已有同样教训（"prompt() is not supported"），统一步调。
   const [confirmingId, setConfirmingId] = useState<string>();
+  // **Esc 关闭**（与预览面板、重命名/分类输入框保持一致）：
+  // 这是个有遮罩的模态面板，用户按 Esc 想关掉它是很自然的预期。
+  // 注意 Esc **只关闭面板本身**，不取消"二次确认"状态——两次操作语义不同，
+  // 混在一起会让"按一下 Esc 结果把待确认的彻底删除也撤了"这种事发生（虽然更安全，
+  // 但会让"取消"与"关闭"两个动作互相干扰）。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
   return <div className="pg-trash-overlay" onClick={onClose}>
     <section className="pg-trash" onClick={(e) => e.stopPropagation()}>
       <header><strong>会话回收站</strong><small>删除的会话保留 {retentionDays} 天，到期自动清除</small><button className="text-button" onClick={onClose}>关闭</button></header>

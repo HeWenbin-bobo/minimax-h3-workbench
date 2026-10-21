@@ -83,7 +83,14 @@ export function normalizeSettings(raw: Partial<AppSettings>, defaults: AppSettin
       )).filter((entry) => entry !== currentOutput).slice(-MAX_OUTPUT_DIR_HISTORY)
     : [];
   return {
-    localComfyUrl: str(raw.localComfyUrl, defaults.localComfyUrl),
+    // **地址必须允许空串**（实测缺陷 probe-no-backend, 2026-10-21）：
+    // 这里原来用 `str()`，空串会回落成默认值 `http://127.0.0.1:8188`。
+    // 于是用户清空地址（表达"我不想用本机"）后，磁盘上又变回默认地址，
+    // `backendAvailability` 判"本机可用" → `generate_video` 的准入闸门放行 →
+    // **在用户没有任何可用后端的情况下建出一条注定失败的任务**，
+    // 工具回执还写着「已创建 1 个视频生成任务：后端=本机 ComfyUI」。
+    // 空串在这里是有语义的"未配置"，与 host / username / comfyuiRoot 同一口径。
+    localComfyUrl: maybeStr(raw.localComfyUrl, defaults.localComfyUrl),
     outputDirectory: currentOutput,
     outputDirectoryHistory: history,
     comfyuiRoot: maybeStr(raw.comfyuiRoot, defaults.comfyuiRoot),

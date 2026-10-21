@@ -708,6 +708,26 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
     }).success).toBe(true);
   });
 
+  /**
+   * `edits` 的元素此前也是 `z.object(...)`（与 `update_plan` 同一处漏网）：
+   * 元素写成字符串、或用了 `old`/`new` 这类字段名时，整个调用会被静默跳过，
+   * 或者每条都变成空对象后被"oldText 为空"退回——两种都白烧步数。
+   */
+  it("edit_artifact_batch：字符串元素与口语字段名都不能拒掉整轮", async () => {
+    const s = (await schemas()).edit_artifact_batch;
+    for (const value of [
+      { name: "a.html", edits: ["把第 12 行的 M.ident 改成 M.identity"] },
+      { name: "a.html", edits: [{ old: "a", new: "b" }] },
+      { name: "a.html", edits: [{ search: "a", replace: "b" }] },
+      { name: "a.html", edits: [{ from: "a", to: "" }] },
+      { name: "a.html", edits: [{ oldText: null, newText: null }] },
+      { name: "a.html", edits: [null, 42] }
+    ]) {
+      const parsed = s.safeParse(value);
+      expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
+
   it("open_page：不带协议的地址由代码补 https", async () => {
     expect((await schemas()).open_page.safeParse({ url: "example.com/foo" }).success).toBe(true);
   });

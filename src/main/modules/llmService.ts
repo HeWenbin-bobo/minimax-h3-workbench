@@ -1357,23 +1357,16 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           name: z.string().nullish().describe("要修改的产物文件名，带扩展名。不能为空。"),
           // **`.nullish()` 同样必须有**（实测同类坑第十八处）：`edits` **整个键缺失**时
           // `z.array()` 会拒掉整个调用，和空数组是两条不同路径。两者都交到 execute 里说。
-          edits: z.array(z.object({
-            // **同单处编辑**：`.min(1)` 会让空串在 `parseToolCall` 阶段被拒、
-            // 整个调用被静默跳过；而工具层对空 oldText 本就有「第 N 条修改的 oldText 为空」的说明。
-            oldText: z.string().nullish().describe("被替换的原文，逐字符一致且在（前序修改后的）文件中唯一。不能为空。"),
-            newText: z.string().nullish().describe("替换成的新内容。允许为空字符串（删除）。")
-          // **下限必须是 1**（实测踩到）：原来写 `min(2)`，模型只给 1 条时
-          // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
-          // **整个调用被静默跳过**（toolCall 记进历史但不执行）——
-          // 模型看不到任何回执，会一直重试同一条，20 步预算全烧光，
-          // 而界面把原因归成"参数被上游截断"（完全误导）。
           //
-          // 而且这条约束本来就没有依据：`applyExactEdits` 对 1 条编辑照常工作，
-          // "2 条以上才值得批量"是给模型的**建议**，不该做成硬校验。
-          // **上限也不要写成 `.max(20)`**（实测同类坑第十处）：模型一次给 25 条时同样会在
-          // `parseToolCall` 阶段被拒、整个调用被静默跳过。改在 execute 里截断（保留前 20 条）
-          // 并把"只应用了前 N 条"如实告知——少改几处总比整轮报废好。
-          })).describe("修改列表，建议 1–20 条（超过 20 条只应用前 20 条）。按数组顺序依次应用。").min(0).nullish()
+          // **元素级也不能硬校验**（与 `update_plan` 那处同一个漏网）：原来写的是
+          // `z.array(z.object({oldText, newText}))`，模型很自然会给出两种更口语的形态：
+          // ① 元素是字符串 `["第 12 行改成 X"]` → 元素不是对象 → `InvalidToolInputError`
+          //    → 整个调用被**静默跳过**（execute 不跑、无回执），模型反复重试烧步数；
+          // ② 元素用了 `old` / `new` / `search` / `replace` 这类字段名 → zod 默认剥掉未知键
+          //    → 每条 edits 都变成空对象 → `oldText` 为空 → 工具回「第 N 条修改的 oldText 为空」，
+          //    模型照原样重发，一步一步耗光预算。
+          // 字段名归一放在 execute 里（见 `toEditPairs`）——代码能纠正的就不该让 schema 硬拒。
+          edits: z.array(z.unknown()).describe("修改列表，建议 1–20 条（超过 20 条只应用前 20 条）。每条形如 {oldText, newText}；写成字符串会按\"old → new\"改写时无法拆分，会被退回说明。按数组顺序依次应用。").min(0).nullish()
         }),
         execute: async (params) => {
           const safeName = String(params.name ?? "");
@@ -1389,10 +1382,30 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           // `oldText` / `newText` 缺省（nullish）时补空串：`applyExactEdits` 对空 oldText
           // 本就有「第 N 条修改的 oldText 为空」的中文说明——那是可纠正的，
           // 比 schema 层静默拒掉整个调用好（本会话已修 17 处同一类坑）。
-          const edits = rawEdits.slice(0, 20).map((edit) => ({
-            oldText: String(edit.oldText ?? ""),
-            newText: String(edit.newText ?? "")
-          }));
+          //
+          // 元素是 unknown（见 schema 处说明）：这里把模型实际会写的字段名统一过来。
+          // 只认 `oldText` / `newText` 时，写成 `old` / `new` / `search` / `replace` 的那批
+          // 会整条变空、然后被"oldText 为空"退回，模型照原样重发，白烧步数。
+          const editField = (entry: Record<string, unknown>, keys: readonly string[]): string => {
+            for (const key of keys) {
+              const value = entry[key];
+              if (typeof value === "string") return value;
+            }
+            return "";
+          };
+          const toEditPair = (edit: unknown): { oldText: string; newText: string } => {
+            // 字符串元素没有"改成什么"这一半，拆不出来：交给下游按空 oldText 处理，
+            // 由 `applyExactEdits` 回「第 N 条修改的 oldText 为空」——比整轮被跳过好。
+            if (typeof edit === "string") return { oldText: edit, newText: "" };
+            if (!edit || typeof edit !== "object") return { oldText: "", newText: "" };
+            const record = edit as Record<string, unknown>;
+            return {
+              oldText: editField(record, ["oldText", "old_text", "old", "search", "find", "from"]),
+              // `newText` 允许是空串（删除），所以只要字段存在就取它——不能因为"值为假"跳过。
+              newText: editField(record, ["newText", "new_text", "new", "replace", "replacement", "to"])
+            };
+          };
+          const edits = rawEdits.slice(0, 20).map(toEditPair);
           try {
             const result = await callbacks.editArtifactBatch({ name: safeName, edits });
             // 截断要明说：否则模型以为 25 条都改了，后面自检会对着"没改的部分"困惑。

@@ -105,13 +105,39 @@ await withApp({}, async (cdp) => {
   check("切页回来后不再显示「停止」", state.stopVisible === false, String(state.stopVisible));
   check("切页回来后会话不再标记为生成中", state.running === false, String(state.running));
 
-  // 发送按钮在**输入框为空时**本就该禁用（`disabled={!input.trim() && attachments.length === 0}`），
-  // 直接读 `disabled` 会把"空输入"误判成"卡住发不出消息"（本套件第一版就是这么错的）。
-  // 所以先填一句话，再判可用性。
+  // 收尾后必须能继续发消息（`llm:done` 丢了会让发送守卫永久占位）。
   await setPrompt(cdp, "第二条");
   await delay(300);
   const canSend = await cdp.eval(`(() => { const b = document.querySelector('.pg-input-row .primary'); return b ? !b.disabled : false; })()`);
   check("收尾后填入内容即可继续发消息", canSend === true, String(canSend));
+
+  // ---------- 连续多轮切页：验证「读一次就清」没有把后续轮次的补齐能力弄坏 ----------
+  // `llm:turn-state` 是**读一次就删**（避免下一轮开始时读到上一轮的 done=true）。
+  // 如果这个清理错了对象，第一轮能补齐、之后几轮就会静默失效——只在单轮测试里看不出来。
+  // 这里再跑两轮，每轮都切走超过整轮流式时长。
+  for (const round of [2, 3]) {
+    await setPrompt(cdp, `第${round}轮`);
+    await delay(300);
+    await cdp.eval(`document.querySelector('.pg-input-row .primary').click()`);
+    await delay(1200);
+    await cdp.eval(`document.querySelector('[data-page="studio"]').click()`);
+    await delay(7000);
+    await cdp.eval(`document.querySelector('[data-page="playground"]').click()`);
+    for (let i = 0; i < 12; i++) {
+      if (await cdp.eval(`document.querySelector('.pg-session.running') === null`)) break;
+      await delay(1000);
+    }
+    await delay(1000);
+    const got = JSON.parse(await cdp.eval(`(() => {
+      const texts = Array.from(document.querySelectorAll('.pg-bubble')).map((b) => b.textContent || '');
+      const last = texts.filter((t) => t.includes('段')).pop() || '';
+      const seen = new Set((last.match(/段(\\d+)/g) || []).map((m) => Number(m.replace('段', ''))));
+      const missing = [];
+      for (let i = 0; i < ${SEGMENTS}; i++) if (!seen.has(i)) missing.push(i);
+      return JSON.stringify({ last: last.slice(0, 40), missing, running: document.querySelector('.pg-session.running') !== null });
+    })()`));
+    check(`第 ${round} 轮切页后内容仍完整（补齐通道可重复使用）`, got.missing.length === 0 && got.running === false, JSON.stringify(got));
+  }
 });
 
 server.close();

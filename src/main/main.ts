@@ -36,6 +36,7 @@ import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapsho
 import { QuestionBridge } from "./modules/questionBridge";
 import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, SHEET_REQUEST_EXTS } from "./modules/artifactDir";
 import { applyExactEdit, applyExactEdits, countLines, findMatchingLines, MAX_READ_CHARS, sliceWithLineNumbers } from "./modules/artifactEdit";
+import { extractColumn, summarizeColumn, type NumericSummary } from "./modules/artifactStats";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { isPathInside, resolveWithinRoot, resolveWithinRootDetailed } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
@@ -1933,6 +1934,58 @@ ${tableNote}` : ""}`;
             backendSettled = true;
             throw error;
           }
+        },
+        /**
+         * compute：对本会话产物的一列做**精确统计**。
+         *
+         * 真机依据（2026-10-21）：模型统计 5000 行 CSV 的温度均值时拒绝心算——
+         * 「我没有可执行的代码工具…只靠逐行心算平均值得出的数字是编出来的」。
+         * 那是正确回答，但也说明"数据统计"这类任务它只能给部分结论。
+         *
+         * 安全边界：**只读本会话产物目录**（与 read_artifact 同一套 `resolveArtifactQueued`
+         * 与路径白名单），只做确定性统计，**不执行任何用户/模型提供的代码**。
+         */
+        compute: async (params: { name: string; column?: string | number; values?: number[] }) => {
+          // ① 直接给了一串数字：不走文件
+          if (Array.isArray(params.values) && params.values.length > 0) {
+            const summary = summarizeColumn(params.values);
+            return formatSummary(summary, "你提供的数值");
+          }
+          const safeName = path.basename(String(params.name || "").trim());
+          if (!safeName) return "统计失败：name 是空的。请填上要统计的产物文件名（带扩展名）。";
+          if (params.column === undefined || params.column === null || params.column === "") {
+            return "统计失败：column 是空的。请说明要统计哪一列（表头名或 0 起的列序号）。";
+          }
+          const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+          const found = await resolveArtifactQueued(dir, safeName);
+          if (!found) {
+            return `统计失败：本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致；如果数据是别人给的，可以先用 create_file 存成 csv 再来统计。`;
+          }
+          // ② xlsx 是二进制：用与 read_artifact 相同的 SheetJS 反解（不新增依赖）
+          let text: string;
+          if (/\.xlsx$/i.test(found.path)) {
+            const XLSX = await loadXlsx();
+            try {
+              const book = XLSX.readFile(found.path);
+              const first = book.SheetNames[0];
+              text = first ? XLSX.utils.sheet_to_csv(book.Sheets[first]) : "";
+            } catch (error) {
+              return `统计失败：表格文件无法读取（${describeError(error, "未知错误")}）。`;
+            }
+          } else if (/\.(csv|tsv|txt|md)$/i.test(found.path)) {
+            text = decodeTextBytes(await readFile(found.path));
+          } else {
+            return `统计失败：${found.name} 不是表格/文本产物，无法按列统计（支持 csv / tsv / xlsx / txt / md）。`;
+          }
+          const columnValues = extractColumn(text, params.column);
+          if (!columnValues) {
+            // **列出实际有哪些列**：只说"列不存在"模型只能瞎猜一个再试，白烧一步。
+            const headerLine = text.replace(/\r\n/g, "\n").split("\n").find((line) => line.trim()) ?? "";
+            const columns = headerLine.split(/[,\t;|]/).map((c) => c.trim()).filter(Boolean).slice(0, 30);
+            return `统计失败：在 ${found.name} 里找不到列「${params.column}」。这个文件的表头是：${columns.join(" / ") || "（没有表头）"}。请从里面选一个列名，或用 0 起的列序号。`;
+          }
+          const summary = summarizeColumn(columnValues);
+          return formatSummary(summary, `${found.name} 的「${params.column}」列（共 ${columnValues.length} 行）`);
         }
       };
       let result: AgentRunResult | undefined;
@@ -2735,6 +2788,33 @@ function resolveArtifactQueued(
   requestedName: string
 ): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" | "ext" | "alias" } | undefined> {
   return artifactWriteQueue.run(() => resolveArtifactForTool(dir, requestedName));
+}
+
+/**
+ * 把统计结果写成模型能直接用的中文说明。
+ *
+ * **必须写清样本数与跳过数**（实测需要）：`parseNumber` 会把 `"N/A"`、空单元格这类跳过，
+ * 如果只报"平均 24.4"，模型会当成"全表算完了"——而实际上可能只算了一半的行。
+ * 被跳过很多时还要提示"列名可能选错了"，让它自己纠正而不是硬编结论。
+ */
+function formatSummary(summary: NumericSummary, label: string): string {
+  if (summary.count === 0) {
+    return `${label}：没有可统计的数字（共 ${summary.skipped} 个值都不是数字）。请确认列名选对了，或数据本身不是数值型。`;
+  }
+  const lines = [
+    `${label}：样本 ${summary.count} 个${summary.skipped > 0 ? `，另有 ${summary.skipped} 个非数字值已跳过` : ""}。`,
+    `- 最小值：${summary.min}`,
+    `- 最大值：${summary.max}`,
+    `- 求和：${summary.sum}`,
+    `- 平均值：${summary.mean}`,
+    `- 中位数：${summary.median}`,
+    `- 标准差：${summary.stdDev}`
+  ];
+  if (summary.skipped > 0) {
+    lines.push(`（统计只基于上面这 ${summary.count} 个数字。如果跳过数很多，可能是列名选错了——先用 read_artifact 看一眼表头。）`);
+  }
+  lines.push("以上是精确计算结果，请直接采用，不要自己再心算一遍。");
+  return lines.join("\n");
 }
 
 /**

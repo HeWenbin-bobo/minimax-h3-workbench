@@ -439,6 +439,18 @@ export interface AgentToolCallbacks {
    * 与"拿到了答案"，从而按最佳判断继续而不是以为用户什么都没选。
    */
   requestUserInput: (params: { questions: AgentQuestion[] }) => Promise<string>;
+  /**
+   * 算数工具（compute）：对**本会话产物**里的某一列做确定性统计。
+   *
+   * 为什么需要（真机实测，2026-10-21）：让模型统计 5000 行 CSV 的温度均值，
+   * 它读了 400 行后拒绝给平均值——「我没有可执行的代码工具用来对 399 个数求和，
+   * 只靠逐行心算平均值得出的数字是编出来的」。那是**正确**的回答，
+   * 但也说明我们缺了 Codex 有而我们没有的一环：算数能力。
+   *
+   * **只做确定性统计，不做任意代码执行**（没有 shell / eval / vm）：
+   * 本应用的安全红线不允许，也不需要——min/max/sum/mean/median/stdDev 覆盖绝大多数场景。
+   */
+  compute: (params: { name: string; column?: string | number; values?: number[] }) => Promise<string>;
 }
 
 /** 交互提问的一道题。与 Codex `request_user_input` 的 schema 一致。 */
@@ -781,6 +793,22 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       const done = /（(\d+)\/(\d+)\s*已完成）/.exec(output);
       return done ? `步骤 ${done[1]}/${done[2]} 已完成` : "步骤清单已更新";
     }
+    case "compute": {
+      // **不登记这个分支时步骤条会显示「工具调用完成（完成）」**——用户看不出 AI 干了什么
+      // （实测：compute 刚上线时就是这样）。这里把最有用的两点抽出来：多少样本、最小值/最大值。
+      // 平均值单独给一档：数据统计里用户最先想看的就是它。
+      const count = /样本\s*(\d+)\s*个/.exec(output)?.[1];
+      const min = /最小值：(-?[\d.]+)/.exec(output)?.[1];
+      const max = /最大值：(-?[\d.]+)/.exec(output)?.[1];
+      const mean = /平均值：(-?[\d.]+)/.exec(output)?.[1];
+      if (/没有可统计的数字/.test(output)) return "这一列没有可统计的数字";
+      if (/找不到列|找不到产物/.test(output)) return "没找到要统计的列或文件";
+      const parts: string[] = [];
+      if (count) parts.push(`${count} 个样本`);
+      if (min !== undefined && max !== undefined) parts.push(`范围 ${min}~${max}`);
+      if (mean !== undefined) parts.push(`均值 ${mean}`);
+      return parts.length > 0 ? parts.join("，") : "统计完成";
+    }
     case "open_page": {
       // 正文长度比正文本身有用：用户只想知道"读到了没有、读了多少"。
       //
@@ -840,6 +868,14 @@ export function humanizeToolInput(toolName: string, input: unknown): string {
     // 实测真机：`→ 正在打开网页：{"url":"https://post.smzdm.com/p/awwnml6g/"}`，用户看到的是代码。
     if (toolName === "open_page" && typeof record.url === "string") {
       return sliceSafe(record.url.replace(/^https?:\/\//, ""), 120);
+    }
+    // compute：显示"文件 + 列名"，用户一眼能看出在算哪一列。
+    if (toolName === "compute") {
+      const file = typeof record.name === "string" ? record.name : "";
+      const column = record.column;
+      if (file && (typeof column === "string" || typeof column === "number")) return sliceSafe(`${file} · ${column}`, 120);
+      if (Array.isArray(record.values)) return `${record.values.length} 个数值`;
+      return sliceSafe(file || "统计数据", 120);
     }
     if (toolName === "generate_video") {
       const prompt = typeof record.prompt === "string" ? sliceSafe(record.prompt, 80) : "";
@@ -1508,6 +1544,51 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
         }
       })
       }),
+      // compute：**算数工具**（对齐 Codex 有而本应用此前没有的一环）。
+      //
+      // 真机依据（2026-10-21，deepseek-v4.1-flash）：让它统计 5000 行 CSV 的温度均值，
+      // 它读了 400 行后明确拒绝给平均值——「我没有可执行的代码工具用来对 399 个数求和，
+      // 只靠逐行心算平均值得出的数字是编出来的」。它说得对，但这意味着
+      // "数据统计"这类任务我们永远只能给部分结论。
+      //
+      // 为什么不做代码执行（shell / eval / vm）：本应用的安全红线不允许（渲染端 sandbox、
+      // 主进程不跑用户代码）；而且这里真正缺的只是"求和"这类确定性运算，
+      // 用穷举式原语覆盖即可，不必引入沙箱逃逸面。
+      compute: tool({
+        description: `对**本会话产物文件**里的一列数据做精确统计（最小值/最大值/求和/平均/中位数/标准差）。
+
+何时使用：产物是表格（csv/xlsx）且用户要"统计/汇总/算出平均/找最大最小"时；**必须用这个工具，不要靠心算**——
+逐行心算几千个数必然出错，而报一个错的数字比说"算不了"更糟。也可以直接传 values（一小串已知数字）做统计。
+
+何时不用：只是读内容（用 read_artifact）；要改文件（用 edit_artifact）；要生成新表格（用 create_file）。
+
+返回里会写明参与统计的样本数与**跳过的非数字个数**——如果跳过很多，说明列名可能选错了。`,
+        inputSchema: z.object({
+          // 与其他工具一致：不用 `.min(1)`、不用 `z.enum`——那些会让 AI SDK 在 parseToolCall
+          // 阶段拒掉整个调用（本项目已修 20+ 处同类坑），一律交给 execute 回可纠正的说明。
+          name: z.string().nullish().describe("产物文件名（带扩展名，如 data.csv / 报表.xlsx）。用 values 直接算时可省略。"),
+          column: z.union([z.string(), z.number()]).nullish().describe("要统计的列：表头名（如「温度」）或 0 起的列序号。"),
+          values: z.array(z.union([z.number(), z.string()])).nullish().describe("也可以直接给一串数字做统计（不走文件）。"),
+          decimals: z.union([z.number(), z.string()]).nullish().describe("结果保留几位小数，默认 4。")
+        }),
+        execute: async (params) => {
+          const rawValues = Array.isArray(params.values) ? params.values : undefined;
+          const hasFile = typeof params.name === "string" && params.name.trim().length > 0;
+          if (!rawValues && !hasFile) {
+            return "统计失败：要么给 name（产物文件名）+ column，要么直接给 values。两者都没有。";
+          }
+          try {
+            return await callbacks.compute({
+              name: String(params.name ?? ""),
+              column: params.column ?? undefined,
+              // 原样传下去：字符串数值（"1,234"/"85%"）由统计层归一，这里不提前转换。
+              values: rawValues as number[] | undefined
+            });
+          } catch (error) {
+            return `统计失败：${describeError(error, "未知错误")}。可以先用 read_artifact 确认列名与文件内容，再重试。`;
+          }
+        }
+      }),
       // request_user_input（对齐 Codex `request_user_input_spec.rs`）：把选择题做成工具，
       // 而不是让模型在回复里手写 A/B/C 等用户打字——手写选项用户得自己复述，容易理解错。
       // 主进程会挂起等渲染端回答，超时则按"无回答、按最佳判断继续"收尾。
@@ -1745,9 +1826,10 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
       readArtifact: async () => "（探测）",
       editArtifact: async () => "（探测）",
       editArtifactBatch: async () => "（探测）",
-      // 探测不需要真的弹选择题/改清单：给个无害的返回值即可。
+      // 探测不需要真的弹选择题/改清单/做统计：给个无害的返回值即可。
       updatePlan: async () => "（探测）",
-      requestUserInput: async () => "（探测）"
+      requestUserInput: async () => "（探测）",
+      compute: async () => "（探测）"
     }, () => { sent += 1; }, AbortSignal.timeout(60_000));
     const supported = result.toolCalls > 0 || result.textLength > 0;
     if (!supported) return { supported: false, message: "模型未返回任何内容，可能不支持工具调用（智能体模式不可用），将自动改用普通对话。" };

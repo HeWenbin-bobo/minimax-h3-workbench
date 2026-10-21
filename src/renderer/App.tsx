@@ -1389,7 +1389,10 @@ const TOOL_LABELS: Record<string, string> = {
   edit_artifact: "修改文件",
   edit_artifact_batch: "批量修改文件",
   update_plan: "更新步骤清单",
-  request_user_input: "向你提问"
+  request_user_input: "向你提问",
+  // **新增工具必须在这里登记**：漏了会显示成「工具调用完成（完成）」——
+  // 用户根本看不出 AI 做了什么（实测：compute 上线后步骤条就是这么显示的）。
+  compute: "统计数据"
 };
 const toolLabelOf = (tool: string) => TOOL_LABELS[tool] ?? "工具调用";
 

@@ -1840,6 +1840,21 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
     if (underlyingError || aborted) throw underlyingError ?? error;
     // ③ 真正的"steps 不可用"：按 0 计
   }
+  /**
+   * **`onError` 被调用过 ≠ 这一轮失败**（实测回归 test-09, 2026-10-21）。
+   *
+   * SDK 的 `maxRetries` 会在首次请求失败时先调 `onError`，然后**自动重试并成功**——
+   * 此时 `underlyingError` 里留着那次失败，但整轮其实拿到了正常回复。
+   * 我第一版无条件 `throw underlyingError`，于是"重试后正常回复"变成了
+   * 「assistant error: 重试后正常回复请求失败：Response stream ended without a finish」。
+   *
+   * 判据改成「**这一轮什么都没拿到**」才算失败：有正文就说明重试成功了，
+   * 那次失败只该当作过程记录（真错误会在没有内容的路径上暴露出来）。
+   */
+  const gotAnything = textLength > 0 || toolCalls > 0;
+  if (!gotAnything && underlyingError) {
+    throw underlyingError;
+  }
   // 工具调用全程在 streamText 内部完成；这里只等最终收尾。
   let finalFinishReason: string | undefined;
   try {
@@ -1847,7 +1862,10 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
   } catch (error) {
     // 有底层错误就抛它（调用方才能按"网络失败"还是"模型不支持工具"分流并给出可行动的中文提示）；
     // 没有则原样抛 AI SDK 的占位错误。
-    throw underlyingError ?? error;
+    // **只在什么都没拿到时抛**：拿到正文说明 SDK 的重试已经成功（见上面 `gotAnything` 的说明）。
+    // 拿到内容时把 finishReason 当作 "stop"（这一轮实际已经正常结束），继续往下走正常收尾。
+    if (!gotAnything) throw underlyingError ?? error;
+    finalFinishReason = "stop";
   }
   /**
    * **上游报错必须抛出去**（实测缺陷 probe-overflow-sideeffect, 2026-10-21）。
@@ -1869,10 +1887,12 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
    * ① `noteContextOverflow` 靠错误文本判断要不要压缩并重试；
    * ② 内容被安全策略拒绝时要在历史末尾注入改写指引后重试。
    * 吞掉错误等于把这两条补救路径全部废掉。
+   *
+   * **但判据必须带上"什么都没拿到"**（回归 test-09）：SDK 的 `maxRetries` 会先调 `onError`、
+   * 再自动重试成功，那时 `underlyingError` 里留着第一次的失败、而整轮其实拿到了正常回复。
+   * 无条件抛出会把"重试成功"误报成失败。上面 `if (!gotAnything && underlyingError)` 已统一处理，
+   * 这里不再重复判断一次（同一判据写两处必然会漂移）。
    */
-  if (underlyingError) {
-    throw underlyingError;
-  }
   // usage 用于上下文压缩的基线记账（inputTokens 是"本窗口的输入起点"）。
   // 上游不返回 usage 时字段为 undefined——调用方回落字符估算，不能当成 0。
   let usage: { inputTokens: number } | undefined;

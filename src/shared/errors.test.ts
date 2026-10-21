@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeError, isNetworkError } from "./errors";
+import { describeError, isNetworkError, isRetriableLoadAbort } from "./errors";
 
 // 背景：undici 的裸 "fetch failed" 会一路透传到卡片/toast/聊天气泡，用户看不懂也定位不了。
 // 这里固化"网络层英文异常必须翻成中文、业务异常必须原样保留"两条契约。
@@ -181,5 +181,42 @@ describe("describeError 文件系统错误", () => {
 
   it("普通业务异常仍原样返回（不误判）", () => {
     expect(describeError(new Error("尚未保存瞬映卡密。"), "兜底")).toBe("尚未保存瞬映卡密。");
+  });
+});
+/**
+ * 用户报「工作台启动失败」时截的图里，弹窗内容是
+ * `ERR_ABORTED (-3) loading 'file:///…/dist/index.html'`。
+ *
+ * 这个码的语义是**本次导航被取消**，不是文件不存在（-6）。受控复现（Electron 43）：
+ * 加载发起后 30ms 再发起一次导航 → 首次 loadFile 立刻 -3 失败 → 紧接着重试一次就成功。
+ * 所以它是"再来一次就好"的那类，必须在 loadApp 里自动重试，而不是弹窗把用户挡在门外。
+ */
+describe("isRetriableLoadAbort", () => {
+  it("ERR_ABORTED（code 字段）判定为可重试", () => {
+    const error = Object.assign(new Error("ERR_ABORTED (-3) loading 'file:///x/dist/index.html'"), { code: "ERR_ABORTED" });
+    expect(isRetriableLoadAbort(error)).toBe(true);
+  });
+
+  it("只有 message 带 ERR_ABORTED 也认（Electron 有些路径不带 code）", () => {
+    expect(isRetriableLoadAbort(new Error("ERR_ABORTED (-3) loading 'file:///x/dist/index.html'"))).toBe(true);
+  });
+
+  it("文件不存在不能当成可重试（重试必然同样失败，白让用户等）", () => {
+    const error = Object.assign(new Error("ERR_FILE_NOT_FOUND (-6) loading 'file:///x/dist/index.html'"), { code: "ERR_FILE_NOT_FOUND" });
+    expect(isRetriableLoadAbort(error)).toBe(false);
+  });
+
+  it("其它加载失败码都不重试", () => {
+    for (const code of ["ERR_ACCESS_DENIED", "ERR_CONNECTION_REFUSED", "ERR_FAILED", "ERR_NAME_NOT_RESOLVED"]) {
+      expect(isRetriableLoadAbort(Object.assign(new Error(code), { code })), code).toBe(false);
+    }
+  });
+
+  it("脏入参不抛错（错误对象可能不是 Error、甚至不是对象）", () => {
+    for (const value of [null, undefined, 0, "", "ERR_ABORTED", [], {}]) {
+      expect(() => isRetriableLoadAbort(value)).not.toThrow();
+    }
+    // 字符串形式（非对象）不认——那是调用方传错，不该据此触发重试
+    expect(isRetriableLoadAbort("ERR_ABORTED (-3)")).toBe(false);
   });
 });

@@ -152,6 +152,29 @@ export function describeError(error: unknown, fallback: string): string {
 }
 
 /**
+ * "页面加载被中途打断"这类错误能否直接重试。
+ *
+ * 只认 `ERR_ABORTED (-3)`：它的语义是**这次导航被取消**，而不是文件不存在（-6）。
+ * 实测（本机 Electron 43，同一份 dist/index.html）：加载发起后 30ms 再发起一次导航，
+ * 首次 `loadFile` 立刻以 `ERR_ABORTED (-3) loading 'file:///…/dist/index.html'` 失败，
+ * 紧接着重试一次就成功——用户看到的却是「工作台启动失败」弹窗并被挡在门外。
+ *
+ * 为什么单独抽成纯函数：`loadApp` 在 main.ts 里依赖 BrowserWindow，没法直接单测；
+ * 判定规则放这里就能用普通对象覆盖全部错误码。
+ *
+ * 为什么只认这一个码：其它码重试无益甚至有害——`-6` 说明文件真的不在
+ * （`npm run build` 的 `clean` 正在跑），重试只会让用户多等一会儿才看到正确提示；
+ * 权限/崩溃同理。错误码优先于文案（文案随 Chromium 版本变化，code 才是稳定契约），
+ * 但 Electron 某些路径只把码塞进 message，故两者都看。
+ */
+export function isRetriableLoadAbort(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as { code?: unknown; message?: unknown };
+  if (record.code === "ERR_ABORTED") return true;
+  return /ERR_ABORTED/.test(String(record.message ?? ""));
+}
+
+/**
  * 网络层异常判定（连接重置/超时/拒绝等），用于"整轮重试"这类网络专项兜底。
  * 与 describeError 分开：这里要的是布尔判断，且作用在原始异常对象上（含 AI SDK 的多层包裹）。
  */

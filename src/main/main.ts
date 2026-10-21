@@ -19,7 +19,7 @@ import {
 import { AdapterRegistry, backendAvailability, backendKindLabel, backendMentionedInText, backendPickedFromQuestions, normalizeBackendKind } from "./backends/adapterRegistry";
 import { mediaMime, parseByteRange } from "./modules/mediaRange";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
-import { describeError, isNetworkError } from "../shared/errors";
+import { describeError, isNetworkError, isRetriableLoadAbort } from "../shared/errors";
 import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmArtifactEvent, LlmDoneEvent, LlmPlanEvent, LlmQuestionEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, SecretName } from "../shared/types";
 import { downloadAndInstall, onDownloadProgress } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
@@ -315,9 +315,17 @@ app.whenReady().then(async () => {
   // 留在半初始化状态比退出更糟（协议 handler / IPC 可能只注册了一半）。
   const message = describeError(error, "未知错误");
   console.error("[main] 启动失败：", message);
+  // **提示要能对得上真实原因**（实测缺陷：用户截的图里是 ERR_ABORTED，
+  // 而弹窗让他"检查磁盘剩余空间与应用程序权限"、"删除 settings.json"——三条全都无关）。
+  // 加载被中断是"再启动一次就好"的那类问题（`loadApp` 已自动重试 3 次），
+  // 所以这里明确告诉用户重开，而不是让他去删配置。
+  const aborted = isRetriableLoadAbort(error);
+  const nextStep = aborted
+    ? "· 直接重新打开工作台即可（这次是页面加载被中途打断，重开通常就好）\n· 若反复出现：关闭其它正在运行的工作台窗口后再试"
+    : "· 检查磁盘剩余空间与应用目录权限\n· 删除用户数据目录下的 settings.json / tasks.json 后重试（会重置设置）";
   dialog.showErrorBox(
     "MiniMax H3 工作台启动失败",
-    `${message}\n\n可尝试：\n· 检查磁盘剩余空间与应用目录权限\n· 删除用户数据目录下的 settings.json / tasks.json 后重试（会重置设置）\n· 若反复出现，请附带本提示的完整内容反馈`
+    `${message}\n\n可尝试：\n${nextStep}\n· 若反复出现，请附带本提示的完整内容反馈`
   );
   app.exit(1);
 });
@@ -396,10 +404,41 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
+/**
+ * 加载渲染产物。
+ *
+ * **`ERR_ABORTED (-3)` 必须重试**（实测缺陷，用户报「工作台启动失败」）：
+ * 这个错误码的意思是"这次导航被**取消**了"，而不是"文件不存在"（那是 -6）。
+ * 触发它的真实场景是**加载进行中又发生了一次导航**——例如开关一次显示器/切换远程桌面
+ * 让 Chromium 重建渲染进程、或用户双击两次快捷方式时第二个实例抢锁前的短暂窗口。
+ * 受控复现（本机 Electron 43，同一份 dist）：
+ *   first loadFile → `ERR_ABORTED (-3) loading 'file:///…/dist/index.html'`
+ *   紧接着重试一次 → 成功。
+ * 也就是说这条错误**不可恢复地把用户挡在门外**，而它只需要再来一次就好。
+ *
+ * 只对 `-3` 重试（最多 2 次、间隔 250ms）：
+ * - `-6 ERR_FILE_NOT_FOUND` 重试必然同样失败（文件真的没有，比如 `npm run build` 的
+ *   `clean` 正在跑），重试只会让用户多等 0.5 秒才看到真正的提示；
+ * - 其它错误码（权限、崩溃）同理，重试无益。
+ */
 async function loadApp(window: BrowserWindow): Promise<void> {
   const devUrl = process.env.VITE_DEV_SERVER_URL;
-  if (devUrl) await window.loadURL(devUrl);
-  else await window.loadFile(path.join(__dirname, "../../dist/index.html"));
+  const navigation = async () => {
+    if (devUrl) await window.loadURL(devUrl);
+    else await window.loadFile(path.join(__dirname, "../../dist/index.html"));
+  };
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await navigation();
+      return;
+    } catch (error) {
+      // 判定抽在 `shared/errors.isRetriableLoadAbort`（纯函数，可单测——loadApp 本身依赖 BrowserWindow）。
+      if (!isRetriableLoadAbort(error) || attempt >= MAX_ATTEMPTS) throw error;
+      if (attempt === 1) console.warn("[main] 页面加载被中途打断（ERR_ABORTED），自动重试");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
 }
 
 function registerIpc(

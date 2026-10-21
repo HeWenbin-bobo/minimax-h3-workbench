@@ -1216,7 +1216,12 @@ function registerIpc(
       const artifactRoot = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
       const artifactFiles = await readdir(artifactRoot)
         .then(async (entries) => {
-          const wanted = entries.filter((name) => /\.(html?|md|xlsx)$/i.test(name));
+          // **覆盖所有可读产物扩展名**（实测缺陷 probe-real-compute-natural）：
+          // 原来只认 `.html|.md|.xlsx`，于是 `saveArtifact` 存下的 `.csv` / `.tsv` / `.txt`
+          // **不在清单里**——模型看不到它，就好像这个会话从没产出过这份数据，
+          // 于是它回一句"我这边看不到你的文件，麻烦上传或粘贴"（实测就是这样）。
+          // 而 `saveArtifact` 与产物预览都支持这些类型，清单必须与之一致。
+          const wanted = entries.filter((name) => /\.(html?|md|xlsx|csv|tsv|txt|json)$/i.test(name));
           const withTime = await Promise.all(wanted.map(async (name) => {
             const info = await stat(path.join(artifactRoot, name)).catch(() => undefined);
             return { name, mtime: info?.mtimeMs ?? 0 };

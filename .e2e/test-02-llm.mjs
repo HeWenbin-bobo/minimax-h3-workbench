@@ -114,6 +114,53 @@ await withApp({}, async (cdp) => {
   await cdp.eval(`document.querySelector('[data-page="playground"]').click()`);
   await new Promise(r => setTimeout(r, 400));
   check("刷新后会话恢复", await cdp.eval(`document.querySelectorAll('.pg-session').length >= 1 && Boolean(document.querySelector('.pg-msg'))`));
+
+  /**
+   * **普通对话（关闭智能体）成功时也必须收尾**。
+   *
+   * 回归护栏（2026-10-21）：一次重构把普通对话分支写成 `runPlainChat().catch(...).finally(...)`，
+   * **漏了 `.then(() => done({ ok: true }))`** —— 成功路径上什么都不发，
+   * 渲染端收不到 `llm:done`，会话**永久卡在「生成中」**（停止键一直在、再也发不出新消息）。
+   *
+   * 为什么此前没被发现：游乐场**默认开启智能体**，而智能体路径有独立的收尾逻辑。
+   * 绝大多数测试与探针连跑都没关过智能体，于是这条最常走的路径一直没被覆盖。
+   * 抓到它的是 test-08（并发下两个会话，一个收尾一个不收尾，对比明显）。
+   *
+   * 这里显式关掉智能体，并**分别断言三件事**：
+   * ① 正文到了；② `done` 到了（停止键消失）；③ 能继续发下一条（守卫已清）。
+   */
+  // **点击与验证要分成两次 eval**：React 的 className 是异步提交的，
+  // 在同一个同步块里 `click()` 完立刻读 `className` 拿到的还是旧值
+  // （我第一版就是这么写的，于是"已关闭"这条永远 FAIL）。
+  await cdp.eval(`(() => {
+    const c = [...document.querySelectorAll('.pg-chip')].find((x) => (x.title || '').includes('智能体'));
+    if (c && c.className.includes('on')) c.click();
+    return true;
+  })()`);
+  await new Promise(r => setTimeout(r, 300));
+  const agentOff = await cdp.eval(`(() => {
+    const c = [...document.querySelectorAll('.pg-chip')].find((x) => (x.title || '').includes('智能体'));
+    return Boolean(c && !c.className.includes('on'));
+  })()`);
+  check("普通对话：已关闭「智能体」（本用例要覆盖普通对话路径）", agentOff === true);
+  sseBehavior = "text";
+  await cdp.eval(`(() => { ${setReactInput}; window.__set(document.querySelector('.pg-input-row textarea'), '普通对话收尾测试'); })()`);
+  await cdp.eval(`document.querySelector('.pg-input-row .primary').click()`);
+  // 等它退出生成态（不能只等正文——正文先到、收尾后到，本次 bug 正是卡在后者）
+  let leftGenerating = false;
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    if (await cdp.eval(`document.querySelector('.pg-chip.stop') === null`)) { leftGenerating = true; break; }
+  }
+  check("普通对话：一轮结束后退出「生成中」（done 事件必须到达）", leftGenerating);
+  check("普通对话：回复正文已显示", await cdp.eval(`(() => {
+    const b = Array.from(document.querySelectorAll('.pg-msg.assistant .pg-bubble'));
+    return Boolean(b[b.length - 1]?.textContent?.trim());
+  })()`));
+  // 守卫要清干净，否则下一条发不出去
+  await cdp.eval(`(() => { ${setReactInput}; window.__set(document.querySelector('.pg-input-row textarea'), '再发一条'); })()`);
+  const canSendAgain = await cdp.eval(`(() => { const b = document.querySelector('.pg-input-row .primary'); return Boolean(b && !b.disabled); })()`);
+  check("普通对话：结束后还能继续发消息（并发守卫已释放）", canSendAgain === true);
 });
 
 server.close();

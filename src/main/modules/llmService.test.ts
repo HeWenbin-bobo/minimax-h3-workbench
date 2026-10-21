@@ -771,6 +771,33 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
       expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
     }
   });
+
+  /**
+   * `update_plan` 此前是 `z.array(z.object({...}))`——**元素级**仍是硬校验（实测 probe-plan-shapes）。
+   *
+   * 两种模型实际会写的形态都撞上它：
+   * ① 纯字符串数组 → 元素不是对象 → `InvalidToolInputError` → 整个调用被静默跳过，
+   *    气泡只留一句"本轮有 1 次工具调用没有真正执行（涉及：update_plan）"；
+   * ② `{ name: "…" }`（字段名换了）→ zod 剥掉未知键、元素变成空对象，
+   *    清单照常显示但全是「步骤 1 / 步骤 2」占位，模型写的内容全丢——**不报错**，更隐蔽。
+   *
+   * 判据与其他工具一致：代码本来就能纠正（补 step 名、归一 status），就不该让 schema 硬拒。
+   */
+  it("update_plan：字符串数组 / name 字段名 / 缺键都不能拒掉整轮", async () => {
+    const s = (await schemas()).update_plan;
+    for (const value of [
+      { plan: ["搜索资料", "整理数据", "写报告"] },
+      { plan: [{ name: "搜索资料" }, { name: "整理数据" }] },
+      { plan: [{ title: "搜索资料" }] },
+      { plan: [{ step: "搜索资料", status: "done" }] },
+      { plan: [] },
+      {},
+      { plan: null }
+    ]) {
+      const parsed = s.safeParse(value);
+      expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
 });
 
 // 智能体路径端点：AI SDK 固定拼 /chat/completions，但 MiniMax 官方是 /text/chatcompletion_v2。

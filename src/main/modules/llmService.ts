@@ -1428,27 +1428,24 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           // `parseToolCall` 抛错 → 调用被静默跳过（与必填字段缺失同一后果）。
           // 用 `.nullish()` 收下，再在 execute 里把 null 归一成 undefined。
           explanation: z.string().nullish().describe("一句话说明这次更新的原因（如'已完成搜索，开始整理数据'）。仅当状态变化需要解释时才写。"),
-          plan: z.array(z.object({
-            // **`step` / `status` 也必须是可选**（实测同类坑第十七处）：
-            // 模型很自然只写 `{ plan: [{ step: "搜索资料" }] }`——省略 status。
-            // 必填时 AI SDK 在 `parseToolCall` 阶段抛错，调用被**静默跳过**。
-            // 探针实测 `update_plan` 连续 20 次没执行、步骤清单卡片一次都没渲染出来；
-            // 而这个工具几乎每步都会被调用，等于把整轮的进度可视化全部废掉。
-            step: z.string().nullish().describe("步骤描述，写清要做什么，如'搜索 2025 年国产显卡价格'。"),
-            // **不要用 z.enum**（同一类坑第八处）：模型常写 `done` / `in-progress` / `doing`，
-            // 枚举一拒，AI SDK 在 `parseToolCall` 阶段抛错、**整个调用被静默跳过**——
-            // 而 update_plan 几乎每步都调，等于把整轮的进度可视化全部废掉，
-            // 还白白烧步数。改在 execute 里归一（见下）。
-            status: z.string().nullish().describe("步骤状态：pending（未开始）/ in_progress（进行中，全清单最多一项）/ completed（已完成）。")
-          // **`.min(1)` 也不要**：模型偶尔会给空数组（"这轮没步骤"），
-          // schema 一拒就是整个调用被静默跳过。空清单在 execute 里回一句说明即可。
-          // **`.nullish()` 同样必须有**（实测同类坑第十八处）：整个 `plan` 键缺失
-          // 与"给了空数组"是两条不同路径，只修后者仍会静默跳过。
-          })).describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。").nullish()
+          // **整个 plan 只声明"是数组"，元素一律 unknown**（实测缺陷 probe-plan-shapes）：
+          // 元素级 `z.object({...})` 仍然守住了一道**硬校验**，而模型给出口语化清单的两种
+          // 常见形态都会撞上它，后果都是"整轮进度可视化失效"：
+          // ① `plan: ["搜索资料", "整理数据", "写报告"]`（纯字符串数组）——
+          //    元素不是对象，AI SDK 在 `parseToolCall` 抛 `InvalidToolInputError`，
+          //    整个调用被**静默跳过**（execute 不跑、无回执）、模型反复重试、步数烧光。
+          //    实测气泡里出现"本轮有 1 次工具调用没有真正执行（涉及：update_plan）"。
+          // ② `plan: [{ name: "搜索资料" }]`（字段名叫 name 而不是 step）——
+          //    zod 默认剥掉未知键，于是元素对象里**一个字段都不剩**，
+          //    清单照常显示但全是「步骤 1 / 步骤 2」这种占位，模型自己写的内容全丢。
+          //    这一种更隐蔽：没有报错、没有跳过提示，用户只看到一份没有信息的清单。
+          //
+          // 与本轮已修的其他工具同一口径：**只要代码本来就能纠正（这里能补 step 名、
+          // 能把口语 status 归一），就不该让 schema 硬拒**。形状归一全部交给 execute。
+          plan: z.unknown().describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。通常是数组，元素可以是字符串或 { step, status } 对象。").nullish()
         }),
         execute: async (params) => {
-          // `plan` 已放宽为 nullish（见 schema 处说明）：缺键与空数组是同一件事，
-          // 都回一句可纠正的说明，而不是让 SDK 静默拒掉整个调用。
+          // `plan` 是 unknown（见 schema 处说明）：缺键、空数组、非数组都当作"没给"。
           const rawPlan = Array.isArray(params.plan) ? params.plan : [];
           if (rawPlan.length === 0) {
             return "步骤清单是空的：请给出至少一步（每步写清要做什么 + 当前 status）。如果这轮不需要清单，就不用调用本工具。";
@@ -1463,13 +1460,25 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           };
           // **最多一项 in_progress**：模型常说"全都进行中"，渲染端的语义是"最多一个"。
           // 多出来的降级为 pending（不丢步骤，只修状态）。
-          // `step` 缺省时补一个占位：schema 已放宽为可选（见上），但下游 `PlanStep`
-          // 要求它必须是字符串——空串会让清单里出现一行没有任何文字的条目，
-          // 所以给「步骤 N」而不是 ""。
+          // `step` 缺省时补一个占位：下游 `PlanStep` 要求它必须是字符串——空串会让清单里
+          // 出现一行没有任何文字的条目，所以给「步骤 N」而不是 ""。
+          //
+          // 元素是字符串时**直接用那串当步骤**（`plan: ["搜索资料"]`）。这一种此前被 schema
+          // 挡在门外；现在能进来了就必须读对，否则变成了"步骤 1 / 步骤 2"的占位清单，
+          // 等于白收下这次调用。
+          const stepNameOf = (entry: unknown, index: number): string => {
+            if (typeof entry === "string") return entry.trim() || `步骤 ${index + 1}`;
+            if (!entry || typeof entry !== "object") return `步骤 ${index + 1}`;
+            const record = entry as Record<string, unknown>;
+            // 字段名不叫 step 的也要认：name / title / text 都是模型实际会写的叫法。
+            // 只认 step 时清单会全是占位（见 schema 处实测）。
+            const raw = record.step ?? record.name ?? record.title ?? record.text;
+            return String(raw ?? "").trim() || `步骤 ${index + 1}`;
+          };
           let sawInProgress = false;
           const plan = rawPlan.map((entry, index) => {
-            const step = String(entry.step ?? "").trim() || `步骤 ${index + 1}`;
-            const status = normalizeStatus(entry.status);
+            const step = stepNameOf(entry, index);
+            const status = normalizeStatus((entry && typeof entry === "object") ? (entry as Record<string, unknown>).status : undefined);
             if (status !== "in_progress") return { step, status };
             if (sawInProgress) return { step, status: "pending" as const };
             sawInProgress = true;

@@ -1540,7 +1540,7 @@ function registerIpc(
           // 时，若先按 `safeName` 判扩展名 → 没有 `.html` → 直接报"只能自检 html 产物"，
           // 而文件其实就在那里、也确实能跑。解析器已支持无扩展名补全，先让它找出实际文件。
           const found = await resolveArtifactQueued(dir, safeName);
-          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          if (!found) throw new Error(describeMissingArtifact(safeName));
           if (!/\.html?$/i.test(found.name)) throw new Error(`「${found.name}」不是 html 产物，无法自检（csv/md 没有可运行的脚本）。`);
           const resolved = found.path;
           const actualName = found.name;
@@ -1581,7 +1581,7 @@ function registerIpc(
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
           const found = await resolveArtifactForTool(dir, safeName);
-          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          if (!found) throw new Error(describeMissingArtifact(safeName));
           const resolved = found.path;
           // xlsx 是二进制，但**不能因此拒绝**（实测真机，表格案例）：模型好不容易
           // 生成出 xlsx，却完全无法核验内容——`read_artifact` 抛"二进制"、
@@ -1801,7 +1801,7 @@ ${tableNote}` : ""}`;
           // 后者会再排一次队，等于自己等自己，永久挂起（与 `readArtifact` 那条注释同理）。
           return artifactWriteQueue.run(async (): Promise<string> => {
             const found = await resolveArtifactForTool(dir, safeName);
-            if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+            if (!found) throw new Error(describeMissingArtifact(safeName));
             const resolved = found.path;
             // 下落必须说出来，且**分清成因**（名字不存在 / 已过期 / 没写扩展名 / csv 落成 xlsx）。
             // 不说的话模型以为改的就是自己点的那份（界面上同名只展示最新版）。
@@ -1867,7 +1867,7 @@ ${tableNote}` : ""}`;
           // 界面只展示最新版，用户看到"一点没变"。
           return artifactWriteQueue.run(async (): Promise<string> => {
             const found = await resolveArtifactForTool(dir, safeName);
-            if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+            if (!found) throw new Error(describeMissingArtifact(safeName));
             const resolved = found.path;
             const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
             if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
@@ -1993,7 +1993,7 @@ ${tableNote}` : ""}`;
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const found = await resolveArtifactQueued(dir, safeName);
           if (!found) {
-            return `统计失败：本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致；如果数据是别人给的，可以先用 create_file 存成 csv 再来统计。`;
+            return `统计失败：${describeMissingArtifact(safeName, "如果数据是别人给的，可以先用 create_file 存成 csv 再来统计。")}`;
           }
           // ② xlsx 是二进制：用与 read_artifact 相同的 SheetJS 反解（不新增依赖）
           let text: string;
@@ -2858,6 +2858,22 @@ function resolveArtifactQueued(
  * 如果只报"平均 24.4"，模型会当成"全表算完了"——而实际上可能只算了一半的行。
  * 被跳过很多时还要提示"列名可能选错了"，让它自己纠正而不是硬编结论。
  */
+/**
+ * "本会话里找不到这个产物"的统一文案。
+ *
+ * 抽出来的理由（2026-10-21）：这句话原本在 `inspect_artifact` / `read_artifact` /
+ * `edit_artifact` / `edit_artifact_batch` 四处**逐字重复**，`compute` 里还有第五份变体。
+ * 本项目已经因为"同一判定写两处"踩过两次（收尾合并规则、自检摘要优先级），
+ * 五处各自维护必然漂移——改一处措辞、其余四处就变成旧说法。
+ *
+ * @param name 用户/模型给的文件名
+ * @param hint 额外提示（如 compute 那句"数据是别人给的，可以先 create_file 存成 csv"）
+ */
+function describeMissingArtifact(name: string, hint?: string): string {
+  const base = `本会话里找不到产物「${name}」。请确认文件名（带扩展名）与 create_file 生成的一致。`;
+  return hint ? `${base}${hint}` : base;
+}
+
 function formatSummary(summary: NumericSummary, label: string): string {
   if (summary.count === 0) {
     return `${label}：没有可统计的数字（共 ${summary.skipped} 个值都不是数字）。请确认列名选对了，或数据本身不是数值型。`;

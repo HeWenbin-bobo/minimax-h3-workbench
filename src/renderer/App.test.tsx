@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { renderMarkdown } from "./markdown";
-import { normalizeStoredSessions, extractArtifact, foldArtifactVersions, stripTransientForPersist } from "./App";
+import { normalizeStoredSessions, extractArtifact, foldArtifactVersions, stripTransientForPersist, mergeLongerText } from "./App";
 import { PLAN_BLOCK_CLOSE, PLAN_BLOCK_OPEN } from "../shared/planMode";
 
 const render = (text: string) => renderToStaticMarkup(createElement("div", null, renderMarkdown(text)));
@@ -623,5 +623,51 @@ describe("CRLF 换行的内容（Windows 另存 / 回灌）", () => {
     expect(extractArtifact(["```html", "<!DOCTYPE html><html></html>", "```"].join(CRLF))?.kind).toBe("html");
     expect(extractArtifact(["```md", "# T", "```"].join(CRLF))?.kind).toBe("doc");
     expect(extractArtifact(["```csv", "a,b", "1,2", "```"].join(CRLF))?.kind).toBe("sheet");
+  });
+});
+
+/**
+ * 收尾合并规则：**取更长的那个**。
+ *
+ * 这条规则原先在两处各写了一遍（`onLlmDone` 与切页回来的 `turnState` 补齐），
+ * 是"多会话并发 + 切页"时最容易漂移的地方：两处口径不一致，就会出现
+ * "在线路径正常、切页回来正文缺一段"或反之。抽成纯函数后在这里锁住语义。
+ *
+ * 两个方向都必须成立（只测一个方向等于没测）：
+ *   ① 主进程那份更长 → 用它补齐中间缺的段落（切页期间 chunk 被丢弃）；
+ *   ② 本地更长 → 保留本地（极端时序：done 先于最后一个 chunk 到达）。
+ */
+describe("收尾合并（mergeLongerText）", () => {
+  it("主进程那份更长时用它补齐", () => {
+    expect(mergeLongerText("甲乙", "甲乙丙丁戊")).toBe("甲乙丙丁戊");
+  });
+
+  it("本地更长时保留本地（真实回复不被更短版本覆盖）", () => {
+    expect(mergeLongerText("甲乙丙丁戊", "甲乙")).toBe("甲乙丙丁戊");
+  });
+
+  it("等长时保留本地（不无谓替换引用）", () => {
+    const local = "甲乙丙";
+    expect(mergeLongerText(local, "丁戊己")).toBe(local);
+  });
+
+  it("本地为空时用传入的", () => {
+    expect(mergeLongerText("", "甲乙")).toBe("甲乙");
+    expect(mergeLongerText(undefined, "甲乙")).toBe("甲乙");
+  });
+
+  it("传入为空时保留本地（不能把已有内容抹成空串）", () => {
+    expect(mergeLongerText("甲乙", "")).toBe("甲乙");
+    expect(mergeLongerText("甲乙", undefined)).toBe("甲乙");
+  });
+
+  it("两边都空时得到空串（不是 undefined）", () => {
+    expect(mergeLongerText(undefined, undefined)).toBe("");
+  });
+
+  it("不把内容拼起来（拼接会造成重复：切页补齐时前缀已在本地）", () => {
+    // 这条反例很关键：若实现写成 `current + incoming`，切页回来会变成
+    // "甲乙" + "甲乙丙丁" = "甲乙甲乙丙丁"，用户看到重复的整段。
+    expect(mergeLongerText("甲乙", "甲乙丙丁")).toBe("甲乙丙丁");
   });
 });

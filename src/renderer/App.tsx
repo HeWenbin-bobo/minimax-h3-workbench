@@ -1233,6 +1233,25 @@ export function stripTransientForPersist(sessions: PlaygroundSession[]): Playgro
   }));
 }
 
+/**
+ * 收尾时把「本地已渲染的正文」与「主进程带来的全量正文」合成一份。
+ *
+ * 规则只有一条：**取更长的那个**。它同时解决两个方向的问题——
+ * - 切页期间 `llm:chunk` 被丢弃 → 主进程那份更长，用它补齐中间缺的段落；
+ * - 本地已经渲染出来的比主进程那份还长（极端时序：done 事件先于最后一个 chunk 到达）
+ *   → 保留本地的，避免真实回复被更短的版本覆盖（"发消息没回复"那类）。
+ *
+ * **必须只有一个实现**：这条规则原先在两处各写了一遍（`onLlmDone` 与
+ * `turnState` 补齐），抽出来是为了让"多会话并发 + 切页"时两边口径不可能漂移。
+ * 注意它**只处理同一会话内**的合并；跨会话串台由调用方按 `sessionId` 定位气泡来保证
+ * （实测 probe-concurrent-switch：两会话同时流式、切页再切回，各自 10/10 字无串台）。
+ */
+export function mergeLongerText(current: string | undefined, incoming: string | undefined): string {
+  const existing = current ?? "";
+  const next = incoming ?? "";
+  return next.length > existing.length ? next : existing;
+}
+
 function loadSessions(): PlaygroundSession[] {
   try {
     return normalizeStoredSessions(JSON.parse(localStorage.getItem(pgSessionsKey) || "[]"));
@@ -1692,8 +1711,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       }
       if (targetId) {
         setSessions((all) => patchLast(all, targetId, (msg) => {
-          // 收尾取缓冲区与消息内容的较长者：避免真实回复被空 content 覆盖（"发消息没回复"）。
-          const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
+          // 收尾取缓冲区与消息内容的较长者（规则见 `mergeLongerText`）：
+          // 避免真实回复被空 content 覆盖（"发消息没回复"）。
+          const base = mergeLongerText(msg.content, buffered);
           const failed = !event.ok && Boolean(event.message);
           // 收尾把缓冲里**尚未出现**的任务并入（保持"哪几路是一起提交的"）。
           //
@@ -1969,9 +1989,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           const wasPlanTurn = planTurnRef.current.has(target);
           planTurnRef.current.delete(target);
           setSessions((all) => patchLast(all, target, (msg) => {
-            const base = state.fullText && state.fullText.length > (msg.content?.length ?? 0)
-              ? state.fullText
-              : msg.content;
+            const base = mergeLongerText(msg.content, state.fullText);
             const failed = !state.ok && Boolean(state.message);
             return {
               ...msg,

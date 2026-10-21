@@ -950,6 +950,32 @@ describe("非流式响应体取内容（空串不能被当成有内容）", () =
       const text = await failureFrom(500, JSON.stringify({ error: { message: "x".repeat(500) } }), "application/json");
       expect(text.length).toBeLessThan(400);
     });
+
+    /**
+     * 模型不收图片时要给出**能照做的**结论（实测 probe-image-unsupported）。
+     *
+     * 通用文案是「请检查连接设置中的地址、Key 与模型名」——而这三样都是对的，
+     * 用户改哪个都没用。图片是我们按模型名猜能力后自己拼进请求的（`normalizeHistory`），
+     * 猜错时它才会留在请求里，所以这里能确定问题出在图。
+     */
+    it("400 提到图片不被支持时，指向「换视觉模型 / 去掉图片」", async () => {
+      const text = await failureFrom(400, JSON.stringify({ error: { message: "invalid_request_error: image_url is not supported by this model" } }), "application/json");
+      expect(text).toContain("不接受图片输入");
+      expect(text).toContain("视觉模型");
+      // 不能再说"检查 Key 与模型名"——那两个都没问题，会把人引偏。
+      expect(text).not.toContain("检查连接设置中的地址、Key 与模型名");
+    });
+
+    it("中文「不支持图片」也认", async () => {
+      const text = await failureFrom(400, JSON.stringify({ error: { message: "该模型不支持图片输入" } }), "application/json");
+      expect(text).toContain("不接受图片输入");
+    });
+
+    it("与图片无关的 400 仍给通用建议（不误报成图片问题）", async () => {
+      const text = await failureFrom(400, JSON.stringify({ error: { message: "context length exceeded" } }), "application/json");
+      expect(text).not.toContain("不接受图片输入");
+      expect(text).toContain("HTTP 400");
+    });
   });
 });
 

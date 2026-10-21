@@ -313,12 +313,21 @@ function firstNonEmpty(...values: Array<string | undefined>): string | undefined
  * 时才截取其中的 message。HTML / 空体一律不回显。
  */
 function httpFailureMessage(status: number, body: string): string {
+  const detail = extractApiErrorMessage(body);
+  // **400 里有一类能直接给出结论的**（实测 probe-image-unsupported）：模型不收图片时，
+  // 上游回的是 `image_url is not supported by this model`，而通用文案会让用户去改
+  // API Key 与模型名——Key 是对的、模型名也是对的，改哪个都没用。
+  // 图片是我们自己拼进请求的（`normalizeHistory` 按模型名猜它能不能收图，猜错时把图留下了），
+  // 所以这里能确定"图上出了问题"，并给出真正可行的两步。
+  if ((status === 400 || status === 422) && /image|图像|图片|multi.?modal|vision/i.test(detail)
+    && /not support|unsupported|invalid|不支持/i.test(detail)) {
+    return `当前模型不接受图片输入（服务商说明：${detail}）。可以：① 到「连接设置」换一个视觉模型；② 去掉图片，改用文字描述后再发一次。`;
+  }
   const hint = status === 401 || status === 403 ? "请到「连接设置」检查 API Key 是否正确、是否已过期。"
     : status === 404 ? "请检查 API 地址与模型名（有些服务商的路径不是 /v1）。"
       : status === 429 ? "请求过于频繁或额度已用尽，请稍后重试。"
         : status >= 500 ? "服务商侧异常（可能是临时故障或网关错误），请稍后重试。"
           : "请检查连接设置中的地址、Key 与模型名。";
-  const detail = extractApiErrorMessage(body);
   return `LLM 请求失败（HTTP ${status}）。${hint}${detail ? `\n服务商说明：${detail}` : ""}`;
 }
 

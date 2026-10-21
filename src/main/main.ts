@@ -2599,6 +2599,21 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   // kind=html + name="page.md" 同理：落盘 page.md，卡片按 md 渲染一个 HTML 文件。
   let base = path.basename(String(name || "")).replace(/[\\/:*?"<>|]/g, "_").trim();
   base = base.replace(/\.(html?|csv|tsv|md|xlsx)$/i, "").trim();
+  /**
+   * **Windows 的额外两条硬约束**（实测 probe-special-filenames 逐个验过）：
+   *
+   * ① **尾部点与空格**：Windows 会静默把它们去掉——`尾部点号...md` 写下去，
+   *    磁盘上的名字可能变成 `尾部点号.md`，而我们回给卡片的 `name` 仍是带点的那个。
+   *    卡片名字与磁盘对不上，用户按卡片名去找文件就找不到。
+   *    统一在落盘前剥掉，让"回给模型的名字"永远等于"磁盘上的名字"。
+   *
+   * ② **保留设备名**（`con` / `prn` / `aux` / `nul` / `com1..9` / `lpt1..9`）：
+   *    在不带扩展名时是设备引用。现代 Win10/11 的 NTFS 对 `con.md` 已放宽（实测可写可删），
+   *    但旧系统/某些网络盘会直接报错——而模型完全可能给产物起名叫 `con`。
+   *    加前缀而不是替换，保留用户可读性（`_con` 比 `___` 好认）。
+   */
+  base = base.replace(/[. ]+$/, "");
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) base = `_${base}`;
   const safeName = `${base || "artifact"}${ext}`;
   // 目录名规则与清理共用同一函数（见 artifactDir.ts 的注释）。
   const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(sessionId));

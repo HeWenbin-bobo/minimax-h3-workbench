@@ -123,3 +123,35 @@ describe("inspectH3Readiness", () => {
     }
   });
 });
+
+/**
+ * **真实形态夹具**（按本机 ComfyUI 0.3.47 源码抄下来的，不是想象出来的）：
+ *
+ * `nodes.py` 里 `UNETLoader.INPUT_TYPES()` 返回
+ *   `{"required": {"unet_name": (folder_paths.get_filename_list("diffusion_models"), ), ...}}`
+ * 而 `get_filename_list()` 的返回类型是 `list[str]`。Python 元组 `(list,)` 经 JSON 序列化后
+ * 就是 `[[...], {}]`——**裸数组**，不是 `["COMBO", {...}]`。
+ *
+ * 这一条锁的是：普通节点（老式 `INPUT_TYPES`）走裸数组这条路，必须能读出来。
+ * 它与上面的 `["COMBO", {options}]` 是**两条并存**的路径，不是"新旧版二选一"——
+ * 老式节点在 0.3.47 里仍然大量存在（UNETLoader / CLIPLoader / VAELoader 都是）。
+ * 早先我把 COMBO 当成"新版唯一写法"，这个夹具就是为了防止那种误解再被写回代码。
+ */
+describe("真实 /object_info 形态（按 ComfyUI 0.3.47 源码）", () => {
+  it("普通节点走裸数组：[[...], {}] 能读出模型名", () => {
+    const info = plainInfo();
+    const required = info.UNETLoader.input.required as Record<string, unknown>;
+    // 与 Python `(list,)` 的 JSON 序列化完全一致：第一项是数组、第二项是空对象
+    required.unet_name = [[NAMES[0], NAMES[1]], {}];
+    (info.VAELoader.input.required as Record<string, unknown>).vae_name = [[NAMES[3], NAMES[4]], {}];
+    expect(inspectH3Readiness(info).missingModels.map((item) => item.name)).toEqual([]);
+  });
+
+  it("两种形态混在同一份 /object_info 里也要都对（真实站点就是混的）", () => {
+    const info = plainInfo();
+    (info.UNETLoader.input.required as Record<string, unknown>).unet_name = [[NAMES[0], NAMES[1]], {}];
+    (info.CLIPLoader.input.required as Record<string, unknown>).clip_name = [["COMBO", { options: [NAMES[2]] }], {}];
+    (info.VAELoader.input.required as Record<string, unknown>).vae_name = [["COMBO", { options: [NAMES[3], NAMES[4]] }], {}];
+    expect(inspectH3Readiness(info).missingModels.map((item) => item.name)).toEqual([]);
+  });
+});

@@ -1,6 +1,7 @@
 import { describeError, isNetworkError } from "../../shared/errors";
 import type { ChatMessage, LlmStreamEvent } from "../../shared/types";
 import { sliceSafe } from "../../shared/text";
+import { retryDelayMs } from "./errorRecovery";
 import { searchWeb } from "./webSearch";
 
 export interface LlmServiceOptions {
@@ -76,10 +77,19 @@ export class LlmService {
         return;
       } catch (error) {
         const aborted = error instanceof DOMException && error.name === "AbortError";
-        const retryable = !aborted && !produced.any && attempt < MAX_ATTEMPTS && isNetworkError(error);
+        // **限流与临时故障也值得重试一次**（实测缺口）：原先只重试"网络类错误"，
+        // 于是上游明确回 429「retry after 2 seconds」时，我们**一次都不等就直接失败** ——
+        // 明明等两秒就能成功。Codex 的 `responses_retry.rs` 正是为此尊重 retry-after。
+        // 只放 429 与 5xx：401/403/404/400 这类重试必然同样失败，白等一轮。
+        const status = (error as { status?: number }).status;
+        const retriableStatus = status === 429 || (typeof status === "number" && status >= 500);
+        const retryable = !aborted && !produced.any && attempt < MAX_ATTEMPTS
+          && (isNetworkError(error) || retriableStatus);
         if (!retryable) throw error;
-        // 退避 800ms：给中转的抖动窗口一点时间，又不至于让用户觉得卡住。
-        await new Promise((resolve) => setTimeout(resolve, 800));
+        // 退避：默认 800ms（给中转的抖动窗口一点时间，又不至于让用户觉得卡住）；
+        // 服务端给了 retry-after 就听它的（上限 30 秒——超过就按自己的节奏试完再如实回落，
+        // 让用户早点看到结果，好过守着一个遥远的约定）。
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(error, 800)));
       }
     }
   }
@@ -138,7 +148,17 @@ export class LlmService {
       }
       if (!response.ok || !response.body) {
         const detail = await response.text().catch(() => "");
-        throw new Error(httpFailureMessage(response.status, detail));
+        const failure = new Error(httpFailureMessage(response.status, detail)) as Error & {
+          status?: number;
+          responseHeaders?: Record<string, string>;
+        };
+        // **把状态码与响应头带出来**（实测缺口）：上层重试逻辑要用 `retry-after` 决定等多久，
+        // 而原先只抛一个字符串，头信息在这里就丢了——于是 `parseRetryAfter` 永远读不到
+        // 服务端明写的 "retry after 2 seconds"，429 只能直接失败。
+        failure.status = response.status;
+        const retryAfter = response.headers.get("retry-after");
+        if (retryAfter !== null) failure.responseHeaders = { "retry-after": retryAfter };
+        throw failure;
       }
       // 流式响应走 SSE 解析；服务商忽略 stream:true 返回完整 JSON 时，从非流式结构取内容。
       const contentType = response.headers.get("content-type") || "";

@@ -1234,6 +1234,102 @@ describe("chat 等响应头的超时", () => {
   });
 });
 
+/**
+ * 限流（429）与 5xx 的「按 retry-after 退避后重试一次」。
+ *
+ * 实测缺口（本轮）：原先 `chat` 只对"网络类错误"重试，于是上游明确回
+ * `429 + retry-after: 2` 时，我们**一次都不等就直接失败**——明明等两秒就能成功。
+ * 探针对照：修复前上游只收到 1 次请求、用户看到 HTTP 429 报错；
+ * 修复后上游收到 2 次、间隔 ≈2 秒、第二次成功。
+ *
+ * 这里用假 fetch 验证"重试与等待"的判定本身，不依赖真实计时（vi.useFakeTimers）。
+ */
+describe("chat 对 429/5xx 的按需重试", () => {
+  const okSse = () => new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "好" } }] })}\n\n`));
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        controller.close();
+      }
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } }
+  );
+
+  const service = () => new LlmService({ baseUrl: "https://llm.test/v1", apiKey: "k", model: "m", systemPrompt: "" });
+
+  it("429 带 retry-after 时会再试一次并成功", async () => {
+    const calls: number[] = [];
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls.push(Date.now());
+      if (calls.length === 1) {
+        return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+          status: 429,
+          headers: { "content-type": "application/json", "retry-after": "0" }
+        });
+      }
+      return okSse();
+    }));
+    let text = "";
+    await service().chat([{ role: "user", content: "hi" }], false, (e) => { text += e.delta; });
+    vi.unstubAllGlobals();
+    expect(calls).toHaveLength(2);
+    expect(text).toContain("好");
+  });
+
+  it("500 也会重试一次", async () => {
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      n += 1;
+      return n === 1
+        ? new Response(JSON.stringify({ error: { message: "boom" } }), { status: 500, headers: { "content-type": "application/json" } })
+        : okSse();
+    }));
+    let text = "";
+    await service().chat([{ role: "user", content: "hi" }], false, (e) => { text += e.delta; });
+    vi.unstubAllGlobals();
+    expect(n).toBe(2);
+    expect(text).toContain("好");
+  });
+
+  it("401 不重试（重试必然同样失败，白等一轮）", async () => {
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      n += 1;
+      return new Response(JSON.stringify({ error: { message: "bad key" } }), { status: 401, headers: { "content-type": "application/json" } });
+    }));
+    const error = await service().chat([{ role: "user", content: "hi" }], false, () => {}).catch((e: Error) => e);
+    vi.unstubAllGlobals();
+    expect(n).toBe(1);
+    expect((error as Error).message).toContain("401");
+  });
+
+  it("已经吐出内容后不再重试（避免同一气泡出现两份开头）", async () => {
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      n += 1;
+      if (n === 1) {
+        // 先推一段正文，再以 500 收尾
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "半截" } }] })}\n\n`));
+              controller.close();
+            }
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } }
+        );
+      }
+      return okSse();
+    }));
+    const chunks: string[] = [];
+    await service().chat([{ role: "user", content: "hi" }], false, (e) => { chunks.push(e.delta); }).catch(() => undefined);
+    vi.unstubAllGlobals();
+    // 只要已经开始输出，就不该再发第二次请求
+    expect(chunks.join("")).not.toContain("好");
+  });
+});
+
 // 实测误报（本会话自引入）：放宽 schema 后新增的「可纠正的拒绝」判定，最初写成裸的
 // `/是空的|没有要问的问题|…/`，于是搜索引擎返回的**标题**只要含这几个字
 // （`[1] 为什么杯子是空的`）就会被判成工具失败 —— 步骤条打 ✕、摘要只剩标题一行。

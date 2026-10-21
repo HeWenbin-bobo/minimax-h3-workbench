@@ -149,18 +149,30 @@ export function extractColumn(text: string, name: string | number): unknown[] | 
   const header = splitRow(lines[0], delimiter).map((cell) => cell.replace(/^﻿/, "").trim());
 
   /**
-   * **无表头检测**（实测缺陷 2026-10-21）：
+   * **无表头检测**（实测缺陷 2026-10-21，真机复现）：
    * 纯数据文件（Excel 导出常没有表头）的第一行会被当成表头**整个丢掉**——
-   * 用户统计 3 行数据时只得到 2 行，而且界面上看不出少了什么。
+   * 用户统计 5000 行只得到 4999 行，而且界面上看不出少了什么。
    * 这种"静默少算"比报错更糟：结论看起来正常，只是数字是错的。
    *
    * 只在**按列序号**访问时才做这个判断：
    * 按列名访问说明调用方知道表头长什么样，那时首行就该当表头。
-   * 判据是"首行每一格都能解析成数字"——表头里几乎不可能全是数字，
-   * 而数据行的典型形态就是全数字。
+   *
+   * **判据不能要求"每一格都是数字"**（我第一版就是这么写的，真机立刻打脸）：
+   * 真实数据行常常是混合的——`1,城市1,24.9,31.0,...` 里既有序号也有城市名，
+   * 只要有一格不是数字，"每格都是数字"就为假，首行照样被丢掉，于是 5000 行只算出 4999。
+   *
+   * 改用"**首行里有没有文字型的单元格**"：
+   * - 表头的典型形态是每格都是短词语（`城市` / `温度` / `序号`），**没有一格能解析成数字**；
+   * - 数据行几乎必然至少有一格是数字（序号、度量值、日期里的数字…）。
+   * 所以判据是：首行**一格数字都没有**→ 当表头；否则 → 当数据。
+   * 这个判据对"全是文字的表格"（如只有姓名列）会误判成有表头——那种表本来也没有数值可统计。
    */
-  const firstRowAllNumeric = header.length > 0 && header.every((cell) => cell !== "" && parseNumber(cell) !== undefined);
-  const hasHeader = typeof name === "string" || !firstRowAllNumeric;
+  const firstRowHasNumber = header.some((cell) => cell !== "" && parseNumber(cell) !== undefined);
+  // **有数字 → 首行是数据（无表头）；没数字 → 首行是表头。**
+  // 我这里第一版写成了 `|| firstRowHasNumber`（有数字就当表头），
+  // 方向完全反了：真机立刻表现为"5000 行只统计出 4999 行"。
+  // 判据的方向性极容易写反，所以这行单独注释、并用"无表头/有表头"两组用例锁住。
+  const hasHeader = typeof name === "string" || !firstRowHasNumber;
 
   let index = -1;
   if (typeof name === "number") {

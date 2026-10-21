@@ -137,10 +137,16 @@ function splitRow(line: string, delimiter: string): string[] {
  * @returns 列值（不含表头）；列不存在返回 undefined。
  */
 export function extractColumn(text: string, name: string | number): unknown[] | undefined {
-  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim());
+  // **先剥 BOM**（Excel / WPS 另存的 CSV 开头常带 `﻿`）：
+  // 不剥的话它黏在第一个列名前面，`indexOf("城市")` 会失配。
+  // 现在只是因为后面还有一层"包含匹配"才侥幸切到——而包含匹配会带来歧义
+  // （「温度」与「体感温度」两列时，精确匹配必须优先，不能被 BOM 逼到模糊分支）。
+  const cleaned = String(text || "").replace(/^﻿/, "");
+  const lines = cleaned.replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim());
   if (lines.length === 0) return undefined;
   const delimiter = detectDelimiter(lines[0]);
-  const header = splitRow(lines[0], delimiter).map((cell) => cell.trim());
+  // 每个单元格也剥一次 BOM：有些工具只在**首行首个单元格**带它
+  const header = splitRow(lines[0], delimiter).map((cell) => cell.replace(/^﻿/, "").trim());
   let index = -1;
   if (typeof name === "number") {
     index = Number.isInteger(name) && name >= 0 && name < header.length ? name : -1;

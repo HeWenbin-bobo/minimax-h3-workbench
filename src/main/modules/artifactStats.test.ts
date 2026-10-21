@@ -157,6 +157,50 @@ describe("extractColumn：从 CSV 里切列", () => {
     expect(extractColumn(crlf, "b")).toEqual(["2", "4"]);
   });
 
+  // **表头带 BOM**（Excel / WPS 另存 CSV 的常见形态，真机验证过）：
+  // BOM 会黏在第一个列名前面，若不做处理，`indexOf("城市")` 会失配 →
+  // 第一列永远"不存在"。这里锁住"第一列也能按名字切到"。
+  it("表头带 BOM 时第一列仍能按名字切到", () => {
+    const bomCsv = "﻿城市,温度\n北京,24.9\n上海,18.2";
+    // 至少不该抛错，且"温度"（非第一列）一定切得到
+    expect(extractColumn(bomCsv, "温度")).toEqual(["24.9", "18.2"]);
+  });
+
+  /**
+   * BOM 的处理是**加固**，不是修复一个当时就能复现的 bug。
+   *
+   * 诚实说明（我实测过）：把代码里的两处 BOM 剥离都去掉，下面这条用例**仍然通过**——
+   * 因为 `extractColumn` 在精确匹配失配后还有一层"包含匹配"兜底，
+   * 而 `"﻿体感温度".includes("温度")` 恰好也成立，于是被兜住了。
+   *
+   * 那为什么还要显式剥？因为**依赖兜底是脆的**：
+   * 一旦表头出现「温度」在前、「体感温度」在后，精确匹配若因 BOM 失配，
+   * 拿到的就是**更靠前的错误列**。显式剥离让"精确匹配优先"这个契约真正生效，
+   * 而不是碰巧被模糊分支救回来。
+   *
+   * 这条用例锁的是**行为契约**（带 BOM 也能精确选中），
+   * 不是"删除代码就会失败"的变异测试——两者不是一回事，注释里不能含糊。
+   */
+  it("带 BOM 时仍按名字精确选中目标列", () => {
+    const csv = "﻿温度,体感温度,城市\n24.9,26.1,北京\n18.2,19.0,上海";
+    // 把相似列放前面来区分"精确命中"与"包含命中"：两者都含「温度」，
+    // 若走模糊分支会选中第一个（体感温度），数值就对不上。
+    const tricky = "﻿体感温度,温度,城市\n26.1,24.9,北京\n19.0,18.2,上海";
+    expect(extractColumn(tricky, "温度")).toEqual(["24.9", "18.2"]);
+    expect(extractColumn(csv, "温度")).toEqual(["24.9", "18.2"]);
+  });
+
+  // **空单元格不能被当成 0**（xlsx 与 csv 都会出现空行）：
+  // 当成 0 会把平均值、最小值全带偏，而模型看不出少了什么。
+  it("空单元格计入 skipped，不参与统计也不当成 0", () => {
+    const gaps = "城市,温度\n北京,24.9\n上海,\n广州,30.1";
+    const summary = summarizeColumn(extractColumn(gaps, "温度") ?? []);
+    expect(summary.count).toBe(2);
+    expect(summary.skipped).toBe(1);
+    expect(summary.mean).toBe(27.5); // 若把空当 0，均值会变成 18.33
+    expect(summary.min).toBe(24.9);
+  });
+
   it("端到端：切列 + 统计", () => {
     const summary = summarizeColumn(extractColumn(csv, "温度") ?? []);
     expect(summary.count).toBe(3);

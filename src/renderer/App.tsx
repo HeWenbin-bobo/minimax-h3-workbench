@@ -3164,6 +3164,14 @@ function PgQuestionCard({ questions, onSubmit, onSkip }: {
       AI 想先确认几件事
       {questions.length > 1 && <span className="pg-question-step">第 {step + 1}/{questions.length} 题</span>}
     </div>
+    {/* **必须告诉用户"不答会怎样、还剩多少时间"**（真机实测）：
+        主进程挂起等回答的时限是 180 秒（`DEFAULT_QUESTION_TIMEOUT_MS`），
+        超时后会自动按最佳判断继续。但卡片上此前一个字都没写——
+        用户看到卡片只以为"必须现在答"，去接杯水回来发现 AI 已经自己决定了，
+        或者反过来干等着以为不答就会卡住。两种误解都源于没说明规则。 */}
+    <div className="pg-question-hint">
+      不答也行：{Math.round(180 / 60)} 分钟后会按最合理的方式自动继续，你也可以直接点「跳过，你决定」。
+    </div>
     <div className="pg-question">
       <div className="pg-question-title">{question.header && <span className="pg-question-chip">{question.header}</span>}{question.question}</div>
       <div className="pg-question-options">

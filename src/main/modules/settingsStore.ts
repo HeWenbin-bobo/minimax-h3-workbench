@@ -106,7 +106,13 @@ export function normalizeSettings(raw: Partial<AppSettings>, defaults: AppSettin
       // 主机可以为空（未配置），但不能是数字。
       host: maybeStr(ssh.host, defaults.ssh.host),
       port: num(ssh.port, defaults.ssh.port, 1, 65_535),
-      username: str(ssh.username, defaults.ssh.username),
+      // **用户名也必须允许空串**（实测缺陷 probe-assert-usable）：这里原来用 `str()`，
+      // 而 `str()` 对空串会回落到默认值 `"root"`。于是用户在连接设置里**清空用户名**
+      // 并保存后，磁盘上写回的却还是 `root`——界面看起来清空了、读回来又是 root，
+      // 更糟的是 `assertUsable("ssh")` 判据是"host 与 username 都非空"，
+      // 被这个假值骗过、放行提交，建出一条注定失败的任务（用户还得手动删）。
+      // 空串在这里是有语义的"未配置"，与 host / comfyuiRoot 同一口径。
+      username: maybeStr(ssh.username, defaults.ssh.username),
       privateKeyPath: maybeStr(ssh.privateKeyPath, defaults.ssh.privateKeyPath),
       hostFingerprint: maybeStr(ssh.hostFingerprint, defaults.ssh.hostFingerprint),
       remoteComfyHost: str(ssh.remoteComfyHost, defaults.ssh.remoteComfyHost),

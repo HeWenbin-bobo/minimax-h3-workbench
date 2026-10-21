@@ -92,3 +92,36 @@ describe("normalizeSettings", () => {
     expect(normalizeSettings({}, defaults)).toEqual(defaults);
   });
 });
+
+/**
+ * 用户名**空串是有语义的**（未配置），不能回落到默认值 `"root"`。
+ *
+ * 实测缺陷（probe-assert-usable）：用户在连接设置里清空用户名并保存后，
+ * `str()` 把空串换成默认 `"root"` 写回磁盘——界面看起来清空了、读回来又是 root；
+ * 更糟的是 `assertUsable("ssh")` 的判据是"host 与 username 都非空"，
+ * 被这个假值骗过而放行，建出一条注定失败的任务（用户还得手动删）。
+ *
+ * 与 `host` / `comfyuiRoot` 同一口径：空串 = 未配置，原样保留。
+ */
+describe("normalizeSettings：ssh 用户名允许为空", () => {
+  it("显式传空串时保持空（不回落到 root）", () => {
+    expect(normalizeSettings({ ssh: { username: "" } as never }, defaults).ssh.username).toBe("");
+  });
+
+  it("只填空格也视为空（trim 后为空同样是未配置）", () => {
+    const result = normalizeSettings({ ssh: { username: "   " } as never }, defaults);
+    // 保留原值还是 trim 成空串都可以接受，唯独不能变成 "root"。
+    expect(result.ssh.username.trim()).toBe("");
+  });
+
+  it("非字符串（数字/null/对象）仍回落默认值", () => {
+    for (const bad of [123, null, {}, []]) {
+      expect(normalizeSettings({ ssh: { username: bad } as never }, defaults).ssh.username, JSON.stringify(bad))
+        .toBe(defaults.ssh.username);
+    }
+  });
+
+  it("不传 username 时仍是默认值（区分'没给'与'给了空串'）", () => {
+    expect(normalizeSettings({ ssh: { host: "1.2.3.4" } as never }, defaults).ssh.username).toBe(defaults.ssh.username);
+  });
+});

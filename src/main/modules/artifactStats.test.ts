@@ -251,3 +251,44 @@ describe("extractColumn：无表头文件", () => {
     expect(extractColumn(dataOnly, "温度")).toBeUndefined();
   });
 });
+
+/**
+ * **真实数据形态**：混合列（既有序号也有文字列），而不是"全数字"的理想数据。
+ *
+ * 这条是补漏的——此前的无表头用例都用 `10,20,30` 这种全数字行，
+ * 而真实 CSV 的数据行几乎总是混合的（`1,城市1,24.9,31.0,7.4,2026-10-02`）。
+ * 我第一版判据要求"每格都是数字"才认作无表头，正是栽在这个差异上：
+ * 全数字用例能过，真实数据却永远被当成有表头、少算一行（真机 5000 → 4999）。
+ */
+describe("真实形态：混合列的无表头文件", () => {
+  // 与真实 CSV 同形：序号 + 文字 + 若干度量值 + 日期
+  const rows = [
+    "1,城市1,24.9,31.0,7.4,2026-10-02",
+    "2,城市2,36.2,36.0,5.2,2026-10-03",
+    "3,城市3,18.5,42.0,3.1,2026-10-04"
+  ];
+  const headerless = rows.join("\n");
+
+  it("首行是混合列数据时，不能被当成表头", () => {
+    // 第 3 列（序号 2）是温度
+    expect(extractColumn(headerless, 2)).toEqual(["24.9", "36.2", "18.5"]);
+  });
+
+  it("统计行数等于真实数据行数（不是少一行）", () => {
+    const summary = summarizeColumn(extractColumn(headerless, 2) ?? []);
+    expect(summary.count).toBe(3);
+    expect(summary.min).toBe(18.5);
+    expect(summary.max).toBe(36.2);
+  });
+
+  it("同形数据加上真实表头时，行为仍然正确（不能矫枉过正）", () => {
+    const withHeader = ["序号,城市,温度,湿度,风速,日期", ...rows].join("\n");
+    expect(extractColumn(withHeader, "温度")).toEqual(["24.9", "36.2", "18.5"]);
+    expect(extractColumn(withHeader, 2)).toEqual(["24.9", "36.2", "18.5"]);
+  });
+
+  it("CRLF 换行（Windows 导出）时同样正确", () => {
+    const crlf = rows.join("\r\n");
+    expect(extractColumn(crlf, 2)).toEqual(["24.9", "36.2", "18.5"]);
+  });
+});

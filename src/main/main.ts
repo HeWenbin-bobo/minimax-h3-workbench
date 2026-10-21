@@ -1011,7 +1011,10 @@ function registerIpc(
       // 本地模型表把窗口估小了——记下来，并在气泡里说清"下一轮会自动压缩"，
       // 而不是把上游的英文报错原样糊给用户。
       sessionBudgets.set(session, { ...budgetFor(session), window: markWindowExceeded(budgetFor(session).window) });
-      chunk({ seq: 1, delta: "（本轮上下文超出模型可接受的长度。已记录，下一条消息会自动压缩历史后再发送；也可点输入框右侧的「上下文」按钮立即压缩。）\n\n" });
+      // 文案要与实际行为一致：普通对话会在当轮自动压缩并重试（见下面的 catch），
+      // 所以这里**不能**再说"下一条消息会自动压缩"——那会让人以为要手动重发
+      // （旧文案就是这样，实测用户真的去重发了一遍）。
+      chunk({ seq: 1, delta: "（本轮上下文超出模型可接受的长度，正在自动压缩历史后重试…）\n\n" });
       return true;
     };
     // 上下文压缩前置：超阈值才动手，未超时原样透传（零回归）。
@@ -1086,13 +1089,51 @@ function registerIpc(
     if (normalized.notes.length > 0) chunk({ seq: 0, delta: `${normalized.notes.join("\n")}\n\n` });
     if (!agent) {
       // 普通对话同样要能吃下"上游报超窗"这一信号（LlmService 用状态码+错误体摘要构造 message）。
-      void service.chat(effective, webSearch || browserOnly, chunk, browserOnly)
-        .then(() => done({ ok: true }))
-        .catch((error: unknown) => {
-          // 用户主动停止（abort）不算错误：正常收尾，不显示红色报错。
+      //
+      // **超窗必须在当轮自己救回来**（对齐 Codex `compact.rs` 的
+      // "报超窗 → 丢最老的再重试"）：
+      // 旧实现只是记下 `forceCompact` 并提示"下一条消息会自动压缩"——
+      // 也就是这一轮**直接失败**，用户得自己再发一次才拿得到回答。
+      // 实测（probe-real-overflow-recovery）：第一轮气泡是「请再发一次」，
+      // 第二轮才成功；用户视角是"我说了话，它让我重说一遍"。
+      //
+      // 现在的做法：捕获超窗 → 立刻 `forceCompact` → **当轮重新压缩并重试一次**。
+      // 只重试一次：压完还超窗说明是"单条消息本身就太大"（压缩保留策略保不住），
+      // 再试只会重复烧 token（对齐 Codex 的 `guardian_budget_compacted`）。
+      const runPlainChat = () => service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
+      void runPlainChat()
+        .catch(async (error: unknown) => {
           const aborted = error instanceof DOMException && error.name === "AbortError";
-          if (!aborted) noteContextOverflow(error);
-          done({ ok: aborted, message: aborted ? undefined : describeError(error, "对话失败") });
+          if (aborted) {
+            done({ ok: true });
+            return;
+          }
+          if (!noteContextOverflow(error)) {
+            done({ ok: false, message: describeError(error, "对话失败") });
+            return;
+          }
+          // 走到这里说明确实是超窗：上面已置 forceCompact，重新压缩后再试一次。
+          try {
+            const retried = await maybeCompact(session, safeHistory, "auto", controller.signal);
+            effective = retried.messages;
+            if (retried.info?.reason) {
+              // 压缩提示走同一条通道：用户要能看到"历史被改写了"（同上文 turnState 的理由）。
+              turnState.compactionNotices.push({
+                reason: retried.info.reason,
+                before: retried.info.before,
+                after: retried.info.after
+              });
+            }
+            await runPlainChat();
+            done({ ok: true });
+          } catch (retryError: unknown) {
+            // 压缩后仍失败：如实报出，不再循环重试。
+            const retryAborted = retryError instanceof DOMException && retryError.name === "AbortError";
+            done({
+              ok: retryAborted,
+              message: retryAborted ? undefined : `上下文超长，自动压缩后仍未能发出：${describeError(retryError, "对话失败")}`
+            });
+          }
         })
         .finally(() => { sessionAborters.delete(session); });
       return true;
@@ -1936,10 +1977,48 @@ ${tableNote}` : ""}`;
         } catch (error) {
           if (controller.signal.aborted) { done({ ok: true }); return; }
           agentError = error;
-          // 上游报"上下文超窗"：与普通对话同一套处理（记录 forceCompact，下一轮无条件压缩）。
-          // 必须在这里就停：重试同一段超长历史必然同样被拒，回落普通对话也会同样超窗——
-          // 提前拦下，避免用户看到"发了半天全是同一堵墙"。追加提示即使已有输出也安全（不重发正文）。
-          if (noteContextOverflow(error)) { done({ ok: true }); return; }
+          // 上游报"上下文超窗"：**当轮自己救回来**（与普通对话同一套，对齐 Codex
+          // "报超窗 → 丢最老的再重试"）。旧实现只记录 forceCompact 就 `done` 收尾，
+          // 用户得手动再发一次（实测 probe-real-overflow-recovery 量到：第一轮失败、
+          // 第二轮才成功）。这里改成压缩后在同一轮内重试一次。
+          //
+          // **只在没有产出副作用时重试**：这一轮可能已经 create_file / 建了任务，
+          // 重跑会让它再落一份或再扣一次费（这与下面 `producedSideEffects` 是同一条判据）。
+          if (noteContextOverflow(error)) {
+            const alreadyProduced = agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0 || agentQuestionCount > 0;
+            if (alreadyProduced) { done({ ok: true }); return; }
+            try {
+              const retried = await maybeCompact(session, safeHistory, "auto", controller.signal);
+              effective = retried.messages;
+              if (retried.info?.reason) {
+                turnState.compactionNotices.push({
+                  reason: retried.info.reason,
+                  before: retried.info.before,
+                  after: retried.info.after
+                });
+              }
+              // 压缩后重跑**同一轮智能体**：`agentSent` 仍是 0（超窗时还没出正文），
+              // 所以不会出现"两份回答拼接"。
+              result = await chatAgent(agentOptions, injectWorldState(effective, worldStateText), agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
+                turnState.toolSteps.push({ phase: "start", tool, input });
+                sendLlmTool({ tool, input, phase: "start", sessionId: session });
+              }, (tool, summary, ok) => {
+                turnState.toolSteps.push({ phase: "end", tool, result: summary, ok });
+                sendLlmTool({ tool, input: "", phase: "end", result: summary, ok, sessionId: session });
+              }, planArg === "plan");
+              break;
+            } catch (retryError: unknown) {
+              if (controller.signal.aborted) { done({ ok: true }); return; }
+              // 压缩后仍超窗：如实收尾，不再循环（与普通对话同一判断）。
+              agentError = retryError;
+              if (agentSent > 0) throw retryError;
+              const reason = describeError(retryError, "智能体请求失败");
+              chunk({ seq: 1, delta: `（上下文超长，自动压缩后仍未成功：${reason}，已自动改用普通对话模式）\n\n` });
+              await service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
+              done({ ok: true, fellBack: true });
+              return;
+            }
+          }
           // 内容被安全策略拒绝：原样重试同一个 prompt 必然同样被拒，得先注入改写指引。
           // 注入在历史末尾（作为一条普通 user 消息），下一轮重试就会带上它。
           //

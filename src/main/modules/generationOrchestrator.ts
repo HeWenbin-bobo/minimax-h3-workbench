@@ -408,7 +408,13 @@ export class GenerationOrchestrator {
         // 是否已启动。」看不出失败的是谁——是本机 ComfyUI 忘了启动，还是云端地址填错？
         // 两者该做的事完全不同（去启动本地服务 vs 去改设置里的地址）。
         // 任务卡片上没有别的地方显示后端名，只能在这里补。
-        this.update(task, "failed", task.progress, `${backendName(request.backend)}：${messageOf(error)}`);
+        //
+        // **还要带上实际连的地址**（实测 probe-backend-down）：只说"请检查地址、端口"时，
+        // 用户改过端口、或同时装了两份 ComfyUI，就只能自己猜该启动哪一个。
+        // `describeEndpoint` 只返回地址、不含任何凭据（那条字符串会显示给用户）。
+        const endpoint = await this.adapters.describeEndpoint(request.backend).catch(() => "");
+        const where = endpoint ? `（${endpoint}）` : "";
+        this.update(task, "failed", task.progress, `${backendName(request.backend)}${where}：${messageOf(error)}`);
         task.errorCode = "GENERATION_FAILED";
       }
     } finally {

@@ -225,6 +225,27 @@ export class AdapterRegistry {
    * 放在 registry 这一个出口上：`submit()` / `retry()` 都经过它，改一处即全覆盖。
    * **只比空串，不记录、不打印密钥内容**（CLAUDE.md 红线）。
    */
+  /**
+   * 这个后端**实际连的是哪里**（用于失败时把地址写进提示）。
+   *
+   * 为什么需要（实测 probe-backend-down）：ComfyUI 没启动时，任务卡的失败原因是
+   * 「本机 ComfyUI：网络连接失败：目标服务未在监听（连接被拒绝）。请检查地址、端口与服务是否已启动。」
+   * ——说清了"该去启动服务"，但**没说是哪个地址**。用户改过端口、或同时装了两份 ComfyUI 时，
+   * 只能自己猜该启动哪一个。把实际地址带进消息里，一眼就能核对。
+   *
+   * **只返回地址，不返回任何凭据**（这条字符串会显示给用户；CLAUDE.md 红线：密钥绝不外泄）。
+   */
+  async describeEndpoint(kind: BackendKind): Promise<string> {
+    const settings = await this.settingsStore.get();
+    if (kind === "local") return settings.localComfyUrl || "（未配置地址）";
+    if (kind === "minimax") return settings.minimaxBaseUrl || "（未配置地址）";
+    if (kind === "rb") return settings.rbBaseUrl || "（未配置地址）";
+    // SSH：只显示用户名 / 主机 / 远端 ComfyUI 端口——**不带密码、不带私钥路径**
+    const ssh = settings.ssh;
+    if (!ssh?.host) return "（未配置主机）";
+    return `${ssh.username || "?"}@${ssh.host} → ${ssh.remoteComfyHost}:${ssh.remoteComfyPort}`;
+  }
+
   async assertUsable(kind: BackendKind): Promise<void> {
     const settings = await this.settingsStore.get();
     if (kind === "minimax") {

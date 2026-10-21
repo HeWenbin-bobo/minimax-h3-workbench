@@ -28,7 +28,14 @@ function makeOrchestrator(tasks: GenerationTask[]) {
   // `submit` / `retry` 现在会先调 `adapters.assertUsable(backend)`（建任务前确认凭据可用），
   // 而这里原本用 `{}` 当空对象——缺这个方法会让所有 submit 路径抛 TypeError。
   // 默认放行（"凭据已配好"）；需要拒绝的用例自行 `mockRejectedValueOnce`。
-  const adapters = { assertUsable: vi.fn(async () => undefined) } as unknown as AdapterRegistry;
+  //
+  // `describeEndpoint` 是失败文案里"实际连的地址"的来源（probe-backend-down）。
+  // 桩里必须给上：不给的话 `.catch(() => "")` 会兜住，测出来的文案就少一段，
+  // 而那条兜底只是生产环境的保险，不该在测试里当常态。
+  const adapters = {
+    assertUsable: vi.fn(async () => undefined),
+    describeEndpoint: vi.fn(async (kind: string) => (kind === "local" ? "http://127.0.0.1:8188" : "https://example.test"))
+  } as unknown as AdapterRegistry;
   const orchestrator = new GenerationOrchestrator(store, adapters, listener);
   (orchestrator as unknown as { tasks: GenerationTask[] }).tasks = tasks;
   return { orchestrator, store, listener, adapters };

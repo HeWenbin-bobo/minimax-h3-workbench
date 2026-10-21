@@ -2305,6 +2305,17 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           ? msg
           : { ...msg, streaming: false, content: msg.content || "（已停止生成）" }
       )));
+      // **执行计划被中途停止时，把「继续执行」还回去**（实测缺陷 probe-plan-stop）。
+      // `executePlan()` 发请求前就抹掉了计划标记，只靠 `offDone` 在"没干成"时恢复——
+      // 而它的判据是 `!event.ok || event.fellBack`，用户点停止时主进程发的是
+      // `done({ ok: true })`（abort 当正常收尾），于是按钮永远不回来，
+      // 用户想重来只能手动再打一遍"按上面的计划执行"。
+      // 半途而废的计划与"执行失败"是同一件事：都还没做完，都该能再点一次。
+      const planMessageId = uiPlanMessageIds.get(activeId);
+      if (planMessageId) {
+        uiPlanMessageIds.delete(activeId);
+        restorePlanMark(activeId, planMessageId);
+      }
     }
   }
 

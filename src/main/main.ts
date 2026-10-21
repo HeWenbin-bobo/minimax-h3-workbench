@@ -207,6 +207,13 @@ app.whenReady().then(async () => {
   // 宿主是 script-src 'self'（无 unsafe-inline）→ 预览页里的内联 <script> 被浏览器拦掉，
   // 游戏/小工具脚本根本不运行（用户报"预览时不能直接玩"就是这个）。按 CSP 规范，
   // **URL 加载的文档用自己的策略**，故改走本协议；宿主 CSP 保持严格、预览仍是 sandbox 不透明源。
+  //
+  // **这个协议只能用 iframe 加载，不能用 `fetch` 打**（实测 2026-10-21）：
+  // 宿主 CSP 的 `connect-src` 是 `'self' ws://127.0.0.1:* http://127.0.0.1:*`，
+  // **不含 `h3preview:`**，所以渲染端 `fetch('h3preview://…')` 一律 `Failed to fetch`。
+  // 那是正确的（协议只该经 `frame-src` 用于 iframe，不该被脚本当 API 调），
+  // 但写探针时容易踩空——我为此写废过一版"越界防护探针"，全是 `Failed to fetch`。
+  // 越界防护本身由 `safePath.test.ts` 的 15 条单测覆盖（根内外 / `..` / 符号链接 / 根自身是链接）。
   const artifactRoot = () => path.join(app.getPath("userData"), "artifacts");
   protocol.handle("h3preview", async (request) => {
     const requestedPath = new URL(request.url).searchParams.get("path");

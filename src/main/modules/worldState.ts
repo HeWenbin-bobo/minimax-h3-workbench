@@ -291,20 +291,20 @@ export function buildSections(input: WorldStateInput): WorldSection[] {
 }
 
 export interface WorldStateDiff {
-  /** 本轮的**完整**环境事实块（每个 section 都在），直接拼进 system prompt。 */
+  /** 本轮的**完整**环境事实块（每个 section 都在）。交给 `injectWorldState` 作为 user 消息注入。 */
   text: string;
   /** 本轮结束后的快照，调用方负责存回。 */
   snapshot: WorldStateSnapshot;
 }
 
 /**
- * 渲染本轮要注入 system prompt 的完整环境事实块。
+ * 渲染本轮要注入的完整环境事实块。
  *
- * 与 Codex 的关键差异（务必记住）：Codex 把片段追加进**持久历史**，故"没变就不发"安全；
- * 我们的载体是**每轮重建的 system prompt**，不发就等于永久丢失。所以这里**每个 section 每轮都渲染**，
+ * 载体是**每轮注入的 user 消息**（见下方 `injectWorldState` 的实测依据），
+ * 因此"每个 section 每轮都要在场"——不发就等于这一轮模型丢掉了环境事实。
  * 差异只体现在"正文要不要刷新"上：
  * - 首次 / 变化且未被节流 → 用新正文
- * - 变化但被节流（时间同天、余量同档）→ 沿用上一轮正文，保持 system 前缀稳定（利于上游前缀缓存）
+ * - 变化但被节流（时间同天、余量同档）→ 沿用上一轮正文，保持这段前缀稳定（利于上游前缀缓存）
  *
  * @param previous 上一轮快照。undefined 表示进程内无基线（重启/首轮），此时一律用新正文。
  */

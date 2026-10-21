@@ -63,6 +63,33 @@ describe("inspectH3Readiness", () => {
     expect(inspectH3Readiness(info).missingModels).toEqual([]);
   });
 
+  /**
+   * 少数 ComfyUI 分支/自定义节点把选项列表放在 `values` 而不是 `options`。
+   *
+   * 这条的代价**极不对称**：认一个不存在的键只是多一次 `?.` 取值；
+   * 不认的话，真有这种版本的用户会被要求去下 60GB 模型——而他本机早就装好了。
+   * 注：`values` 这个键名没有在真机 ComfyUI 上验证过（本机无运行中的实例）。
+   */
+  it('COMBO 用 values 而不是 options 时同样认', () => {
+    const info = plainInfo();
+    (info.UNETLoader.input.required as Record<string, unknown>).unet_name = [["COMBO", { values: [NAMES[0], NAMES[1]] }], {}];
+    (info.CLIPLoader.input.required as Record<string, unknown>).clip_name = [["COMBO", { values: [NAMES[2]] }], {}];
+    (info.VAELoader.input.required as Record<string, unknown>).vae_name = [["COMBO", { values: [NAMES[3], NAMES[4]] }], {}];
+    expect(inspectH3Readiness(info).missingModels).toEqual([]);
+  });
+
+  it("{values:[...]} 包一层的写法也认", () => {
+    const info = plainInfo();
+    (info.UNETLoader.input.required as Record<string, unknown>).unet_name = [{ values: [NAMES[0], NAMES[1]] }, {}];
+    expect(inspectH3Readiness(info).missingModels).toEqual([]);
+  });
+
+  it("options 存在但不是数组时回落到 values（不能因为坏键就判全缺）", () => {
+    const info = plainInfo();
+    (info.UNETLoader.input.required as Record<string, unknown>).unet_name = [["COMBO", { options: "坏的", values: [NAMES[0], NAMES[1]] }], {}];
+    expect(inspectH3Readiness(info).missingModels).toEqual([]);
+  });
+
   it("确实缺模型时要如实报出缺哪几个（不能一律）", () => {
     const info = plainInfo();
     (info.UNETLoader.input.required as Record<string, unknown>).unet_name = [[NAMES[0]], {}];

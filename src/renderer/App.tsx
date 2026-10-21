@@ -2988,6 +2988,31 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
     dragCleanupRef.current?.();
     dragCleanupRef.current = undefined;
   }, []);
+  /**
+   * **Esc 关闭预览**（实测缺口 2026-10-21）。
+   *
+   * 应用里其它浮层都支持 Esc（重命名输入框、分类输入框、会话回收站遮罩），
+   * 唯独这个占掉半个屏幕的预览面板只能点右上角的小 ×。
+   * Esc 是用户对"浮层"的默认预期，缺了它就得多找一次鼠标。
+   *
+   * 挂在 `window` 上而不是面板自己（`tabIndex`）：焦点通常在 iframe 里
+   * （用户点过预览页面内部），keydown 事件根本到不了面板元素——
+   * 只有 window 级监听才能收到 iframe 之外的按键。
+   *
+   * **不拦输入框里的 Esc**：用户在聊天框里按 Esc 是想取消输入，
+   * 不该顺手把预览也关掉（这里只判目标不是 INPUT/TEXTAREA）。
+   */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
   function onDragStart(e: React.MouseEvent) {
     e.preventDefault();
     dragRef.current = { startX: e.clientX, startWidth: width };

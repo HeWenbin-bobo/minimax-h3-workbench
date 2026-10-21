@@ -467,7 +467,7 @@ function registerIpc(
    *
    * 为什么要单一判定（实测缺陷 probe-nocred-backend）：模型选了没配密钥的云端后端，
    * `submit()` 只校验参数就把任务建出来、回执写"已创建"，随后 runTask 才抛
-   * "请先保存 АРI keys"——用户被告知"已经提交了"，卡片却是失败的。
+   * "请先保存 API Key"——用户被告知"已经提交了"，卡片却是失败的。
    * 两处各写一份判定必然漂移：一处认"有地址就行"、另一处要"有密钥"。
    */
   const videoBackendAvailability = (settings: AppSettings) =>
@@ -1404,7 +1404,7 @@ function registerIpc(
           // **提交前必须确认这个后端此刻能不能用**（实测缺陷 probe-nocred-backend）：
           // `orchestrator.submit()` 只做参数校验、不查凭据，会先把任务建出来并返回成功，
           // 于是工具回执写"已创建 1 个视频生成任务"，随后 `runTask()` 异步抛
-          // "请先在连接设置中保存 MiniMax АРI keys" —— 气泡里模型据此告诉用户
+          // "请先在连接设置中保存 MiniMax API Key" —— 气泡里模型据此告诉用户
           // "已经帮你提交了，稍等就好"，卡片却是失败的。用户被两边打架的说法绕进去。
           //
           // 用与「告诉模型有哪些可选」**同一个判定**（`videoBackendAvailability`），

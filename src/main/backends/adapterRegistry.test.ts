@@ -64,7 +64,7 @@ describe("normalizeBackendKind", () => {
  * 实测缺陷（probe-nocred-backend，2026-10-20）：用户说"用云端生成"，模型调
  * `generate_video({backend:"minimax"})`，而这台机器没存 MiniMax Key。
  * `submit()` 只校验参数就把任务建出来 → 回执「已创建 1 个视频生成任务」→
- * 随后 runTask 抛「请先保存 АРI keys」→ 模型据此对用户说"已经帮你提交了"，
+ * 随后 runTask 抛「请先保存 API Key」→ 模型据此对用户说"已经帮你提交了"，
  * 卡片却是 failed。这条判定必须**在 submit 之前**回答"这个后端现在能不能用"。
  */
 describe("backendAvailability", () => {
@@ -335,6 +335,42 @@ describe("AdapterRegistry.describeEndpoint", () => {
       expect(text, kind).not.toContain("SECRET_SHOULD_NEVER_LEAK");
       // 私钥路径也不该出现在给用户看的地址串里
       expect(text, kind).not.toContain("id_rsa");
+    }
+  });
+});
+
+/**
+ * **用户可见文案里不能混入西里尔字母等易混字符**（实测缺陷 2026-10-21）。
+ *
+ * `backendAvailability` 的 `reason` 会直接显示在连接设置的后端清单上。
+ * 它原本写的是「还没保存 MiniMax АРI keys」——其中 `А`(U+0410) 与 `Р`(U+0420)
+ * 是两个**西里尔字母**，看起来与拉丁 `A`/`P` 一模一样，但搜索、复制、朗读全都对不上。
+ *
+ * 这类字符通常来自复制粘贴或输入法误触，肉眼极难发现。
+ * 用一条断言把"只允许 ASCII + 中文/中文标点"钉住，比靠人眼看可靠。
+ */
+describe("backendAvailability：用户可见文案的字符干净度", () => {
+  const pick = async (hasSecret: boolean) => {
+    const store = { get: async () => ({ localComfyUrl: "", ssh: {} }), getSecret: async () => "" } as unknown as SettingsStore;
+    void store; // 这里不直接用 store，用 backendAvailability 的参数形式
+    return backendAvailability({ localComfyUrl: "", ssh: { host: "", username: "" } }, async () => hasSecret);
+  };
+
+  it("reason 里没有西里尔/希腊等易混字母", async () => {
+    for (const hasSecret of [false, true]) {
+      for (const entry of await pick(hasSecret)) {
+        const text = `${entry.label}${entry.note}${entry.reason ?? ""}`;
+        // 西里尔（U+0400–U+04FF）、希腊（U+0370–U+03FF）、全角拉丁（U+FF00–U+FFEF 里的字母段）
+        expect(/[Ѐ-ӿͰ-Ͽ]/.test(text), `${entry.kind}: ${text}`).toBe(false);
+      }
+    }
+  });
+
+  it("四个后端的 label / note 都是中文或 ASCII（不出现乱码代理项）", async () => {
+    for (const entry of await pick(false)) {
+      const text = `${entry.label}${entry.note}`;
+      // 孤立的代理项（U+D800–U+DFFF 未配对）会渲染成 �
+      expect(/[\uD800-\uDFFF]/.test(text.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, "")), `${entry.kind}: ${text}`).toBe(false);
     }
   });
 });

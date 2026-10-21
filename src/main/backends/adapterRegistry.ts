@@ -123,7 +123,7 @@ export interface BackendAvailability {
  *
  * 为什么必须共用（实测缺陷 probe-nocred-backend）：`orchestrator.submit()` 只校验参数、
  * 不查凭据，会先把任务建出来并返回成功 → 工具回执写「已创建 1 个视频生成任务」→
- * 随后 `runTask()` 异步抛「请先保存 АРI keys」→ 模型据此对用户说"已经帮你提交了"，
+ * 随后 `runTask()` 异步抛「请先保存 API Key」→ 模型据此对用户说"已经帮你提交了"，
  * 卡片却是失败的。两处各写一份判定必然漂移（一处"有地址就行"、另一处要"有密钥"）。
  *
  * 判据只认"能不能发出去"，不做连通性探测（要几秒，且每轮都探会拖慢对话）：
@@ -159,7 +159,7 @@ export async function backendAvailability(
       kind: "minimax",
       label: backendKindLabel("minimax"),
       note: "云端按秒计费",
-      ...(hasMinimax ? {} : { reason: "还没保存 MiniMax АРI keys" })
+      ...(hasMinimax ? {} : { reason: "还没保存 MiniMax API Key" })
     },
     {
       kind: "rb",

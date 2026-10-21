@@ -161,7 +161,7 @@ describe("工具成败判定（isToolFailure）", () => {
       // 实测 probe-nocred-backend：模型选了没配密钥的后端，`submit()` 前的前置检查拒绝。
       // 这类回执不含「失败」二字，旧判定打勾 → 步骤条编出
       // `✓ 生成视频完成（已创建视频任务）`，而回执原文写着"任务没有创建"——界面替模型撒谎。
-      ["generate_video", "后端「MiniMax H3」现在用不了：还没保存 MiniMax АРI keys。\n目前可用的有：本机 ComfyUI（local）。\n**任务没有创建**，不要告诉用户已经提交。", "后端「MiniMax H3」现在用不了"]
+      ["generate_video", "后端「MiniMax H3」现在用不了：还没保存 MiniMax API Key。\n目前可用的有：本机 ComfyUI（local）。\n**任务没有创建**，不要告诉用户已经提交。", "后端「MiniMax H3」现在用不了"]
     ];
     for (const [tool, text, expected] of cases) {
       expect(isToolFailure(text), `${tool} 应判为未成功`).toBe(true);
@@ -229,7 +229,7 @@ describe("工具成败判定（isToolFailure）", () => {
   describe("后端闸门拒绝不算「完成」", () => {
     const blocked = [
       "**还没有确定用哪个后端，任务没有创建。** 现在有 2 个可用的生成方式：\n- 本机 ComfyUI（`local`）— 不额外计费\n请先用 `request_user_input` 问用户用哪一个。",
-      "后端「MiniMax H3」现在用不了：还没保存 MiniMax АРI keys。\n**任务没有创建**，不要告诉用户已经提交。"
+      "后端「MiniMax H3」现在用不了：还没保存 MiniMax API Key。\n**任务没有创建**，不要告诉用户已经提交。"
     ];
 
     it("闸门拒绝要判成未成功（不能打勾）", () => {

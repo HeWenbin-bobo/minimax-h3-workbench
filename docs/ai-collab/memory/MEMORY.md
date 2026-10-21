@@ -12,4 +12,5 @@
 - [RB 后端进行中](rb-backend-wip.md) — RB 适配器的未完成事项
 - [智能体自检自己写的网页](agent-self-check-design.md) — 必须报文件身份 / 采样像素堵白屏假通过 / 同一判定写两处会漏一处（鹈鹕案例真机）
 - [「清空」被静默改回默认值](silent-default-overwrite.md) — **`str()` 把空串当"没给"→ 清空静默无效**；同一缺陷在 `ssh.username` / `localComfyUrl` / `rbBaseUrl` / `minimaxBaseUrl` 出现四次；含"哪些字段该允许空"的判断表与变异验证写法
-- [探针的覆盖盲区](probe-blind-spots.md) — **自写探针全绿、官方 E2E 却抓到"普通对话漏发 done → 永久卡在生成中"**；含"两条路径都要覆盖"、"内容到了≠这一轮结束了"、用 worktree 基线判定"是不是我引入的"
+- [探针的覆盖盲区](probe-blind-spots.md) — **自写探针全绿、官方 E2E 却抓到"普通对话漏发 done → 永久卡在生成中"**；含"两条路径都要覆盖"、"内容到了≠这一轮结束了"、用 worktree 基线判定"是不是我引入的"、"变异验证是探针的体检"、切页探针的离开时长必须跨过整轮
+- [连点与重入](double-click-and-reentrancy.md) — **`useState` 挡不住同一 tick 的连点，守卫必须用同步 ref**；同一根因已打中 8 个入口（含不可逆的彻底删除）；含"渲染端包装 `window.h3` 不起作用"的假结果与回归护栏 `test-11`

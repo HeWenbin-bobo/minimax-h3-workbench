@@ -67,6 +67,25 @@ merge-patch 持久化 —— 不写 rollout，基线放内存即可。本地 tok
     `.pg-msg.assistant .pg-bubble`。**渐变背景的 `backgroundColor` 是透明的**，对比度探针
     要读 `background-image` 取色标。
 11. **React setState 要等下一帧**：点击后同 tick 读 `className` 必然还是旧值，探针要等一拍。
+12. **「建了模块 ≠ 接线了」在错误恢复上又中了一次（2026-10-22）**。
+    `errorRecovery.retryDelayMs` / `parseRetryAfter`（对齐 Codex `responses_retry.rs`）
+    早就写好并带单测，但**两条重试路径的判据都不放行**：普通对话与智能体原先都只判
+    `isNetworkError`，于是上游明确回 `429 + retry-after: 2` 时一次都不等就失败——
+    明明等两秒就能成功。判据不放行，退避函数再正确也永远不会被调用。
+    **教训：接入"重试/退避/降级"这类策略时，先确认"什么情况下会走到这里"的判据，而不只是实现动作本身。**
+13. **AI SDK 的重试用尽后抛的是 `AI_RetryError`，它自己不带状态码**（直连 SDK 复现）。
+    形状：`name=AI_RetryError, statusCode=undefined, lastError={ name:"AI_APICallError",
+    statusCode:429, responseHeaders:{ "retry-after":"2" } }`。
+    只在顶层找 `status`/`statusCode`/`responseHeaders` 会全部拿到 undefined，
+    于是"429 该重试"这个判断**永远不成立**、`parseRetryAfter` 也永远读不到冷却时长。
+    修法：`shared/errors.ts` 的 `httpStatusOf` / `retryAfterHeaderOf` 统一下钻
+    `lastError` → `errors[]` 末项（带自引用保护）。
+    **教训：判定"这个异常是什么"的代码，必须先在真实 SDK 上打印一次形状，不要凭 `instanceof` 或字段名猜。**
+14. **同一个"值得重试"判据，两条路径的口径可以不同**。普通对话放行 429 + 5xx，
+    智能体只放行 429：因为智能体的 SDK 已设 `maxRetries: 1`，5xx 在 SDK 层就重试过一次，
+    整轮再重试 3 次 × 3 秒退避会把"服务端 500"拖到十几秒才报错（E2E test-02 实测
+    从 6 秒等到 12 秒仍未收尾）。429 不同——它有冷却窗口，SDK 的瞬时重试注定撞在窗口里。
+    **教训：别把"看起来同类"的判据无差别共享；先看每条路径上游已经做过什么。**
 
 ## 验证方式
 

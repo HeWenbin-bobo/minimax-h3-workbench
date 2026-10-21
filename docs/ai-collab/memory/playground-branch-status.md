@@ -62,6 +62,45 @@ E2E test-01…test-10 逐个复跑全过（21/12/5/5/23/12/20/16/10/11）。
 - HEAD = `9639b6c`。
 - **本轮 54 笔未推送**（等用户确认；逐笔见 `git log main..HEAD`）。
 
+## 探索分支 `feature/agent-ask-before-generate` 上的累积修复
+
+**这条分支不是 `main` 的发布状态**，下面是这条分支上历次探索期的产出汇总（按主题，不按批次）。
+
+### 2026-10-21/22 探索期（12h）
+
+主线三条，各自都有"读代码看不出来、动手试才现形"的根因：
+
+**A. 重试判据把 429 挡在门外**（详见 [codex-harness-port.md](codex-harness-port.md) 坑 12–14）
+- `errorRecovery.retryDelayMs` 早就实现好，两条路径的判据却不放行 429；
+- 更隐蔽的是 SDK 抛 `AI_RetryError` 时不带 `statusCode`，状态码藏在 `lastError` 里——
+  只在顶层找等于永远找不到。直连 SDK 打印形状才发现。
+- 普通对话放行 429+5xx，智能体只放行 429（SDK 自己已 `maxRetries: 1` 覆盖 5xx，
+  整轮再等 3 次会把 500 拖到十几秒）。E2E test-02 从 14/16 恢复 16/16 就是这条。
+
+**B. 不可逆操作挡不住连点**（详见 [double-click-and-reentrancy.md](double-click-and-reentrancy.md)）
+- 同一根因共 8 个入口；最重的是回收站「彻底删除」——实测连点 3 次，
+  主进程真的收到 3 次 `tasks:purge`（不可逆、连视频文件一起删）。
+- 顺带把提示改成带实际条数（`已彻底删除 N 条`），既给用户真实反馈，也让"重复执行"有可观察痕迹。
+- 新增回归护栏 `.e2e/test-11-double-click-guards.mjs`。
+
+**C. 切页期间的补齐通道缺少验证**（详见 [probe-blind-spots.md](probe-blind-spots.md) 教训 ④⑤）
+- 新增 `.e2e/test-12-page-switch-mid-stream.mjs`：流式中途切走**超过整轮时长**再切回，
+  只有主进程的 `turnState` 能补齐；扩成连续三轮以覆盖"读一次就清"的复用能力。
+- 变异验证：去掉两处 `turnState.fullText = turnText` 后气泡停在「段0 段1」、缺段 `[2,3,4,5,6]`。
+
+**D. 计划模式：紧凑的两步计划被长度门槛误杀**
+- `looksLikePlan` 里 `body.length < 30` 排在有序列表判据之前，于是「1. 查资料\n2. 写报告」
+  被判成"不是计划"，「继续执行」按钮不出现。单测里那条断言当时**锁的就是错误行为**。
+- 端到端对照：同一段 13 字计划，旧逻辑界面上没有「▶ 继续执行」，修复后正常出现。
+
+**E. 文档纠偏**
+- `worldState.ts` 顶部注释写"直接拼进 system prompt"，与同文件 `injectWorldState` 的
+  "必须作为 user 消息"实测结论**互相矛盾**；已改。
+- `llmService.ts` 里 `prepareStep` 的说明整段重复两遍，已删重复。
+
+**验证基线（2026-10-22）**：`npm test` **971 项 / 47 文件**全绿；typecheck、build 通过；
+E2E **test-01…test-12 全套 173/173**。
+
 ## 本轮（探索模式）11 修 + 2 文档 + 1 测试（都在 `v0.2.1..HEAD`）
 
 分三类：

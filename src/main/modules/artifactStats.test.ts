@@ -209,3 +209,45 @@ describe("extractColumn：从 CSV 里切列", () => {
     expect(summary.mean).toBeCloseTo(24.4, 3);
   });
 });
+
+/**
+ * **无表头文件的表头检测**（实测缺陷 2026-10-21）。
+ *
+ * Excel 导出的 CSV 常常没有表头，第一行就是数据。旧实现无条件把首行当表头丢掉——
+ * 用户统计 3 行只得到 2 行，而且**界面上看不出少了什么**（数字看起来正常，只是错的）。
+ * 这种静默少算比报错更糟。
+ *
+ * 判据：只在**按列序号**访问、且首行每一格都能解析成数字时才判定"没有表头"。
+ * 按列名访问说明调用方知道表头长什么样，那时首行仍该当表头。
+ */
+describe("extractColumn：无表头文件", () => {
+  const dataOnly = "10,20,30\n40,50,60\n70,80,90";
+
+  it("按列序号访问时，首行数据不能被当成表头丢掉", () => {
+    expect(extractColumn(dataOnly, 0)).toEqual(["10", "40", "70"]);
+    expect(extractColumn(dataOnly, 2)).toEqual(["30", "60", "90"]);
+  });
+
+  it("无表头时统计行数正确（不是少一行）", () => {
+    const summary = summarizeColumn(extractColumn(dataOnly, 0) ?? []);
+    expect(summary.count).toBe(3); // 旧实现会是 2
+    expect(summary.sum).toBe(120);
+    expect(summary.min).toBe(10);
+    expect(summary.max).toBe(70);
+  });
+
+  it("有表头时行为不变（首行仍是表头，不参与统计）", () => {
+    const withHeader = "温度,湿度\n24.9,50\n18.2,60";
+    expect(extractColumn(withHeader, "温度")).toEqual(["24.9", "18.2"]);
+    expect(extractColumn(withHeader, 0)).toEqual(["24.9", "18.2"]);
+  });
+
+  it("表头本身也是数字时，按列名访问仍当表头（不能误判成无表头）", () => {
+    const numericHeader = "1,2\n10,20\n30,40";
+    expect(extractColumn(numericHeader, "1")).toEqual(["10", "30"]);
+  });
+
+  it("无表头时按列名访问返回 undefined（本来就无从匹配）", () => {
+    expect(extractColumn(dataOnly, "温度")).toBeUndefined();
+  });
+});

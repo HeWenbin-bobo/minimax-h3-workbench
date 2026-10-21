@@ -147,14 +147,32 @@ export function extractColumn(text: string, name: string | number): unknown[] | 
   const delimiter = detectDelimiter(lines[0]);
   // 每个单元格也剥一次 BOM：有些工具只在**首行首个单元格**带它
   const header = splitRow(lines[0], delimiter).map((cell) => cell.replace(/^﻿/, "").trim());
+
+  /**
+   * **无表头检测**（实测缺陷 2026-10-21）：
+   * 纯数据文件（Excel 导出常没有表头）的第一行会被当成表头**整个丢掉**——
+   * 用户统计 3 行数据时只得到 2 行，而且界面上看不出少了什么。
+   * 这种"静默少算"比报错更糟：结论看起来正常，只是数字是错的。
+   *
+   * 只在**按列序号**访问时才做这个判断：
+   * 按列名访问说明调用方知道表头长什么样，那时首行就该当表头。
+   * 判据是"首行每一格都能解析成数字"——表头里几乎不可能全是数字，
+   * 而数据行的典型形态就是全数字。
+   */
+  const firstRowAllNumeric = header.length > 0 && header.every((cell) => cell !== "" && parseNumber(cell) !== undefined);
+  const hasHeader = typeof name === "string" || !firstRowAllNumeric;
+
   let index = -1;
   if (typeof name === "number") {
-    index = Number.isInteger(name) && name >= 0 && name < header.length ? name : -1;
+    const width = hasHeader ? header.length : splitRow(lines[0], delimiter).length;
+    index = Number.isInteger(name) && name >= 0 && name < width ? name : -1;
   } else {
+    if (!hasHeader) return undefined; // 按列名找但文件没有表头：无从匹配
     const wanted = String(name).trim();
     index = header.indexOf(wanted);
     if (index < 0) index = header.findIndex((cell) => cell.includes(wanted));
   }
   if (index < 0) return undefined;
-  return lines.slice(1).map((line) => splitRow(line, delimiter)[index]);
+  // 无表头时**首行也是数据**，不能 slice(1)
+  return (hasHeader ? lines.slice(1) : lines).map((line) => splitRow(line, delimiter)[index]);
 }

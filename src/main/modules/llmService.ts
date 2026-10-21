@@ -1410,7 +1410,7 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
         }
       }),
       // edit_artifact_batch（对齐 Codex `apply_patch` 一次提交多个 hunk）：
-      //
+      // 与 edit_artifact 同一道闸门：计划模式下一并摘除（二者都写文件）。
       // 实测动因：模型一次要修 5 处 bug，单处 edit 消耗 5 步，叠加步数上限后任务被打断
       // （真机那一轮最后一句就是"本轮工具调用已达上限"）。合成一次调用后，
       // 同样的工作只占 1 步，剩下的预算能留给自检与验证。

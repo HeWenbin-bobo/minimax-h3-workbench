@@ -150,8 +150,19 @@ describe("looksLikePlan 判定", () => {
     expect(looksLikePlan(`${PLAN_BLOCK_OPEN}\n1. 甲\n${PLAN_BLOCK_CLOSE}`)).toBe(true);
   });
 
-  it("两条列表项但整体过短时不误判（避免把短回答当计划）", () => {
-    expect(looksLikePlan("1. 甲\n2. 乙")).toBe(false);
+  // 这一条此前断言的是 `false`，也就是把**缺陷当成了规格**：
+  // "1. 甲\n2. 乙"（10 字）是标准的两步计划，却因为长度门槛排在有序列表判据之前
+  // 被判成"不是计划"，用户拿不到「继续执行」按钮。
+  // 现在有序列表判据优先于长度门槛，故改为断言 true。
+  // 长度门槛仍然存在，只是只作用于"没有列表也没有标志词"的短回答（见下一条）。
+  it("紧凑的两步列表也算计划（有序列表判据优先于长度门槛）", () => {
+    expect(looksLikePlan("1. 甲\n2. 乙")).toBe(true);
+    expect(looksLikePlan("1. 先查资料\n2. 再写报告")).toBe(true);
+  });
+
+  it("只有一项有序列表且整体过短时不误判", () => {
+    // 单项列表 + 无标志词 + 过短 → 仍按"零碎回答"处理
+    expect(looksLikePlan("1. 甲")).toBe(false);
   });
 
   it("出现标志词也认为像计划（容忍格式差异）", () => {

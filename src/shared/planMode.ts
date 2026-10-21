@@ -182,10 +182,15 @@ export function looksLikePlan(text: string): boolean {
   const body = String(text || "");
   // 计划块是显式契约，优先判定——但它要求内容非空（空块不该亮按钮）。
   if (extractProposedPlan(body)) return true;
-  if (body.length < 30) return false;
   // 中文习惯用"1."但序号后可能是全角句点/顿号，也可能带空格；从宽匹配。
   const orderedItems = (body.match(/^\s*\d+\s*[.、)]\s*\S/gm) || []).length;
+  // **有序列表判据要先于长度门槛**（实测缺陷）：原来这一行在长度判断之后，
+  // 于是"1. 先查资料\n2. 再写报告"（15 字、标准两步计划）被判成"不是计划"，
+  // 用户拿不到「继续执行」按钮，只能自己再打一遍"开始吧"。
+  // 长度门槛本意是挡掉"太短、看不出是计划"的零碎回答，而有序列表本身就是
+  // 最明确的计划形态——它命中时不该再受长度限制。
   if (orderedItems >= 2) return true;
+  if (body.length < 30) return false;
   return /确认后|开始执行|执行计划|以下是计划|计划如下/.test(body);
 }
 

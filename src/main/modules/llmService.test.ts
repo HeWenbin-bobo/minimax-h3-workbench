@@ -324,6 +324,42 @@ describe("工具成败判定（isToolFailure）", () => {
 });
 
 describe("工具摘要（humanizeToolOutput）", () => {
+  /**
+   * **报错必须优先于"画面是空的"**（真机实测 probe-real-selfheal）。
+   *
+   * 模型写了个页面，脚本里调用了不存在的 API（必然抛 ReferenceError），
+   * 而页面主体是静态表格、背景纯白 —— 同时命中"整屏纯色"与"运行时报错"。
+   * 旧顺序先判前者，摘要只给出「自检发现画面是空的」：模型据此以为问题是布局/渲染，
+   * 改了一行样式就去改别处，**那个必错 API 一动没动**，最后交付了一个跑不起来的页面。
+   */
+  it("inspect_artifact：同时『整屏纯色』且有运行时报错时，摘要先报错", () => {
+    const output = [
+      "自检结果：页面已在本机 Chromium 中真实运行（标题「成绩单」，12 个元素，可见文本 30 字）。",
+      "画面采样：整屏约有 98% 是同一种颜色（平均亮度 250）。**这通常意味着页面上什么都没画出来**——请检查布局与首帧渲染。",
+      "运行时报错（共 1 条，已去重）：",
+      "- 错误：Uncaught ReferenceError: __h3ProbeMissing is not defined"
+    ].join("\n");
+    const summary = humanizeToolOutput("inspect_artifact", output);
+    expect(summary).toContain("报错");
+    expect(summary).toContain("1 条");
+    // 空白只作为附注出现，不能取代结论
+    expect(summary).toContain("画面也很空");
+    expect(summary).not.toBe("自检发现画面是空的");
+  });
+
+  it("inspect_artifact：只有纯色、没有报错时，仍如实说画面是空的", () => {
+    const output = "自检结果：页面已运行。\n画面采样：整屏约有 99% 是同一种颜色。**这通常意味着页面上什么都没画出来**。"
+      + "\n控制台没有任何 error/warning（不影响运行）。";
+    expect(humanizeToolOutput("inspect_artifact", output)).toBe("自检发现画面是空的");
+  });
+
+  it("inspect_artifact：有报错但画面正常时，不附「画面也很空」", () => {
+    const output = "自检结果：页面已运行，12 个元素。\n运行时报错（共 2 条，已去重）：\n- 错误：a\n- 错误：b";
+    const summary = humanizeToolOutput("inspect_artifact", output);
+    expect(summary).toBe("自检发现 2 条报错");
+    expect(summary).not.toContain("画面也很空");
+  });
+
   it("update_plan 只给进度，不泄漏写给模型的指令", () => {
     const text = humanizeToolOutput("update_plan", "步骤清单已更新（0/4 已完成），用户能在对话里看到。继续执行下一步，不要在回复里重复整个清单。");
     expect(text).toBe("步骤 0/4 已完成");

@@ -2291,6 +2291,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     } finally {
       setGeneratingIds((all) => all.filter((id) => id !== activeId));
       sendingRef.current.delete(activeId);
+      // **本轮的两个缓冲也要清**：`streamBuffers` 保存着本轮已收到的全部 delta，
+      // 若不清，用户在"停止 → 切页 → 切回"之后它仍挂着；下一次 `send()` 虽然会重置它，
+      // 但中间那段时间它是纯占位（长回复可达几十 KB），且极端情况下
+      // `onLlmDone` 晚到会把旧缓冲补进新气泡。清掉最省心。
+      streamBuffers.current.delete(activeId);
+      taskIdBuffers.current.delete(activeId);
       // **主动停止要留下说明**（实测）：一个字都还没吐出来就点停止时，
       // 气泡会落到「（空回复）」——看起来像软件坏了，其实是用户自己停的。
       // 已经有内容时不动它（不要让"停止"覆盖已到的回复）。

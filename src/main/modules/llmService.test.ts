@@ -471,6 +471,31 @@ describe("chatAgent 工具暴露", () => {
       finishReason: Promise.resolve("stop")
     }));
   }
+  /**
+   * **上游报错必须抛出来**（实测缺陷 probe-overflow-sideeffect, 2026-10-21）。
+   *
+   * AI SDK 在 `maxRetries` 用尽后不抛异常，而是把真实原因放进 `onError` 回调的
+   * `underlyingError` 里（直连 SDK 复现：`steps` 只有 1 个、最后一步 finishReason 是
+   * `"tool-calls"`、`stream.finishReason` 是 `"other"`——**都不是 "error"**）。
+   * 旧代码 `await stream.steps` 外面是裸 `catch {}`，把错误吞掉，
+   * 调用方拿到"成功但 0 工具调用"的结果，最终给用户一句与真实原因无关的文案。
+   */
+  it("上游报错（onError 带 underlyingError）时必须抛出去，不能被吞成空结果", async () => {
+    const boom = new Error("context length exceeded: maximum context length is 65536 tokens");
+    streamTextMock.mockImplementation((opts: { onError?: (arg: { error: unknown }) => void }) => ({
+      textStream: (async function* () { yield* []; })(),
+      // steps 在上游失败时也会 reject —— 旧代码的裸 catch 正是在这里吞掉错误
+      steps: Promise.reject(boom),
+      finishReason: Promise.resolve("other"),
+      // 真实 SDK 会先调 onError
+      __boom: (() => { opts.onError?.({ error: boom }); return true; })()
+    }));
+    const error = await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true)
+      .catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("context length exceeded");
+  });
+
   function lastTools(): Record<string, unknown> {
     return (streamTextMock.mock.calls.at(-1)?.[0] as { tools: Record<string, unknown> }).tools;
   }

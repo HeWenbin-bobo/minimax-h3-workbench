@@ -1,11 +1,11 @@
 ---
 name: playground-branch-status
-description: v0.3.1 已发布（main HEAD = tag v0.3.1）；pelican 探索分支 202 笔已 squash 合入，逐笔历史也已推到远端
+description: v0.3.1 已发布（main = tag v0.3.1）；feature/agent-ask-before-generate 已推远端（114 笔，未合并 main），2026-10-22 基线 971 项单测 / E2E 173/173
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-20T10:40:00.000Z
+  modified: 2026-10-22T03:20:00.000Z
 ---
 
 **当前状态（2026-10-20 18:40）：`v0.3.1` 已发布。`main` HEAD = tag `v0.3.1`（收尾只有一条
@@ -100,6 +100,34 @@ E2E test-01…test-10 逐个复跑全过（21/12/5/5/23/12/20/16/10/11）。
 
 **验证基线（2026-10-22）**：`npm test` **971 项 / 47 文件**全绿；typecheck、build 通过；
 E2E **test-01…test-12 全套 173/173**。
+
+**真机验证（真实中转 + 真实模型，经 `tools/harness.mjs` 克隆 userData，密钥不打印）**：
+- **`compute` 工具**：40 个已知温度值（-10~29，步长 1），模型调用了 1 次工具、
+  回执为「✓ 统计数据完成（40 个样本，范围 -10~29，均值 9.5）」；
+  最终数字与独立核对**全部一致**（min -10.0 / max 29.0 / mean 9.5 / median 9.5 / sum 380 / stdDev 11.5434）。
+- **对话主流程冒烟 8/8**：真实上游连通、正文正确、无错误气泡、收尾后停止键消失、
+  会话不再标记生成中、可继续发第二条。
+- **成功路径零额外开销**：mock 下游正常 200 请求只发生 1 次、端到端 9ms，
+  说明 429 的重试改动只影响失败路径，没有给每次对话白加退避等待。
+
+**推送状态（2026-10-22 保存进度时点）**：
+- 分支 `feature/agent-ask-before-generate` **已推送到 origin**（新建远端分支），
+  远端 HEAD 与本地 HEAD 同为 `6621ebc`；相对 `origin/main` 共 **114 笔**提交。
+- `origin/main` **未被改动**（仍是 `8ce8e9f chore: bump version to 0.3.1`）：
+  未合并、未 squash、未打 tag。
+- 工作区仅剩 `.e2e/test-02-llm.mjs` 一处**零行差异**（仅行尾归属 LF/CRLF 不同），
+  未纳入任何提交，可忽略。
+- 推送前做过安全检查：全仓 `git grep` 未发现 `sk-` 形式的真实 Key；
+  `secrets.json` / `Local State` / `_scratch/` / `.omc/` 均未被跟踪；待推提交无 >10MB 文件。
+
+**下一阶段的入口**（供接手时快速定位）：
+1. 要合并回 `main` 时，按 CLAUDE.md「分支合并约定」先把这 114 笔按主题 squash 成少数几条，
+   不要原样塞进 `main`；合并前先 `git fetch --all --prune` 并确认基线差异。
+2. 发版仍需手动 dispatch CI（这个 fork 推 tag 不会自动跑），且 test 在 Linux 上跑——
+   本轮未改文件系统/符号链接相关测试，但仍建议发版前在 WSL 复核一次。
+3. 未覆盖的边界：真实上游的 429（本机中转未触发过限流，全部用 mock 复现）；
+   `test-12` 只验了正文补齐，切页期间的任务卡片与工具步骤补齐未单独造例。
+
 
 ## 本轮（探索模式）11 修 + 2 文档 + 1 测试（都在 `v0.2.1..HEAD`）
 

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { backendAvailability, backendMentionedInText, backendPickedFromQuestions, normalizeBackendKind } from "./adapterRegistry";
+import type { AppSettings } from "../../shared/types";
+import type { SettingsStore } from "../modules/settingsStore";
+import { AdapterRegistry, backendAvailability, backendMentionedInText, backendPickedFromQuestions, normalizeBackendKind } from "./adapterRegistry";
 
 /**
  * 背景（实测真机，2026-10-20）：用户输入一段视频描述后，智能体**直接**用「连接设置」
@@ -220,5 +222,57 @@ describe("backendPickedFromQuestions", () => {
     }
     expect(backendPickedFromQuestions([], answerWith("x"))).toBeUndefined();
     expect(backendPickedFromQuestions([{ id: "backend", options: null }], answerWith("x"))).toBeUndefined();
+  });
+});
+
+/**
+ * `assertUsable` 是 `submit()` / `retry()` 建任务**之前**的唯一凭据闸门
+ * （实测缺陷 probe-retry-nocred：卡密被删后点重试会先建出一条注定失败的任务）。
+ *
+ * 四条分支此前都没有单测——而这类"只在缺凭据时才生效"的判定最容易在重构中
+ * 被悄悄改成恒真（恒真不会红任何现有用例，只会让用户重新看到"注定失败的卡片"）。
+ * 这里锁住的是**两个方向**：缺了必须拒、有就必须放行（后者防"拒得太宽"，
+ * 那样所有提交都会被挡，比原缺陷更严重）。
+ */
+describe("AdapterRegistry.assertUsable", () => {
+  /** 造一个只实现本方法用到的两个读接口的假 store（不碰真实 safeStorage）。 */
+  const makeRegistry = (settings: Partial<AppSettings>, secrets: Record<string, string> = {}) => {
+    const store = {
+      get: async () => settings,
+      getSecret: async (name: string) => secrets[name] ?? ""
+    } as unknown as SettingsStore;
+    return new AdapterRegistry(store);
+  };
+  const base = { localComfyUrl: "http://127.0.0.1:8188", ssh: { host: "", username: "" } };
+
+  it("minimax 没存 Key 时拒绝，并说清去哪儿配", async () => {
+    await expect(makeRegistry(base).assertUsable("minimax")).rejects.toThrow(/MiniMax API Key/);
+  });
+
+  it("minimax 存了 Key 就放行", async () => {
+    await expect(makeRegistry(base, { minimaxApiKey: "test-key" }).assertUsable("minimax")).resolves.toBeUndefined();
+  });
+
+  it("rb 没存卡密时拒绝，存了就放行（卡密按次扣，不能带着空值去提交）", async () => {
+    await expect(makeRegistry(base).assertUsable("rb")).rejects.toThrow(/瞬映卡密/);
+    await expect(makeRegistry(base, { rbCardCode: "test-card" }).assertUsable("rb")).resolves.toBeUndefined();
+  });
+
+  it("local 没填 ComfyUI 地址时拒绝，填了就放行", async () => {
+    await expect(makeRegistry({ localComfyUrl: "" }).assertUsable("local")).rejects.toThrow(/ComfyUI 地址/);
+    await expect(makeRegistry(base).assertUsable("local")).resolves.toBeUndefined();
+  });
+
+  it("ssh 缺主机或缺用户名都拒绝（只填一半等于连不上），两个都有才放行", async () => {
+    await expect(makeRegistry({ ssh: { host: "1.2.3.4", username: "" } }).assertUsable("ssh")).rejects.toThrow(/SSH/);
+    await expect(makeRegistry({ ssh: { host: "", username: "root" } }).assertUsable("ssh")).rejects.toThrow(/SSH/);
+    await expect(makeRegistry({ ssh: { host: "1.2.3.4", username: "root" } }).assertUsable("ssh")).resolves.toBeUndefined();
+  });
+
+  it("错误文案里绝不出现密钥内容（CLAUDE.md 红线）", async () => {
+    // 反例方向：把"有 Key"误判成"没有"时，报错里也只会说该去配置，不会回显任何值。
+    const registry = makeRegistry({ localComfyUrl: "" }, { minimaxApiKey: "sk-should-never-leak" });
+    const error = await registry.assertUsable("local").catch((e: Error) => e);
+    expect(String((error as Error).message)).not.toContain("sk-should-never-leak");
   });
 });

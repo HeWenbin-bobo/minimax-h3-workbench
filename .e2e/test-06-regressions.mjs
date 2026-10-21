@@ -126,7 +126,11 @@ const showUnrelated = JSON.parse(await cdp.eval(`window.h3.showItem(${JSON.strin
 check("showItem-无记录的目录外文件仍被拒", showUnrelated.ok === false, JSON.stringify(showUnrelated));
 
 // ---------- 3. 分类用内联输入框（不依赖 window.prompt）----------
-const made = JSON.parse(await cdp.eval(`window.h3.submitGeneration({ mode:"text", backend:"minimax", prompt:"分类回归用例", duration:4, ratio:"16:9", resolution:"768P", width:1280, height:720, count:1, baseSeed:1 }).then(r => JSON.stringify({ ok: r.ok, id: r.data?.[0]?.id }))`));
+// **后端必须用夹具里真的配好的那个**：`submit` 自 probe-retry-nocred 那批修复起会先调
+// `adapters.assertUsable(backend)`——凭据没配时不建任务、直接拒绝。
+// 这里原来写 `minimax`，而夹具只配了 `localComfyUrl`（没有 minimax 密钥），
+// 于是前置任务一条都没建出来，后面两条断言全挂在"旧夹具 × 新校验"上（不是产品回归）。
+const made = JSON.parse(await cdp.eval(`window.h3.submitGeneration({ mode:"text", backend:"local", prompt:"分类回归用例", duration:4, ratio:"16:9", resolution:"768P", width:1280, height:720, count:1, baseSeed:1 }).then(r => JSON.stringify({ ok: r.ok, id: r.data?.[0]?.id, message: r.message }))`));
 check("分类-前置任务已创建", made.ok, JSON.stringify(made));
 await delay(1000);
 await cdp.eval(`document.querySelector('[data-page="studio"]').click()`);

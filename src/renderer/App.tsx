@@ -769,6 +769,10 @@ function GuidePage() { const guides = [
 
 function ConnectionsPage({ settings, setSettings, onError, onNotice }: { settings: AppSettings; setSettings: (s: AppSettings) => void; onError: (e: unknown) => void; onNotice: (s: string) => void }) {
   const [draft, setDraft] = useState(settings); const [apiKey, setApiKey] = useState(""); const [sshPassword, setSshPassword] = useState(""); const [rbCardCode, setRbCardCode] = useState(""); const [llmKey, setLlmKey] = useState(""); const [searchKey, setSearchKey] = useState(""); const [testing, setTesting] = useState<BackendKind>(); const [results, setResults] = useState<Partial<Record<BackendKind, BackendTestResult>>>({}); const [llmResult, setLlmResult] = useState<BackendTestResult>(); const [llmTesting, setLlmTesting] = useState(false); const [llmModels, setLlmModels] = useState<string[]>(); const [fetchingModels, setFetchingModels] = useState(false);
+  // **连点的同步守卫**（见 `test()` 的说明）：`testing` / `llmTesting` 是 state，
+  // 同一 tick 内连点挡不住，会真的发出两次探测请求。这两个 ref 只用于去重。
+  const testingRef = useRef<BackendKind | undefined>(undefined);
+  const llmTestingRef = useRef(false);
   // 各密钥是否**真的**已保存（`hasSecret` 会实际尝试解密：换机器/Local State 丢失后
   // 密文仍在但解不开，此时报 false——这正是我们要的语义）。
   //
@@ -829,6 +833,12 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
     }
   }
   async function test(kind: BackendKind) {
+    // **同步守卫挡住连点**（实测缺口 2026-10-21）：`testing` 是 React state，
+    // 同一 tick 内连点两次会双双读到旧值，于是**发两次真实的后端探测请求**
+    // （每次几秒到几十秒，云端还会各扣一次）。与 `retry` / `submitVideo` /
+    // `manualCompact` / `answerQuestions` 同一类问题、同一套修法：用 ref。
+    if (testingRef.current) return;
+    testingRef.current = kind;
     setTesting(kind);
     // 同 detect()/update()：IPC reject 时 setTesting(undefined) 不执行 → 按钮永久卡在「测试中…」。
     try {
@@ -858,11 +868,15 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
     } catch (error) {
       onError(error);
     } finally {
+      testingRef.current = undefined;
       setTesting(undefined);
     }
   }
   // LLM 测试：先保存当前草稿（含可能刚输入的 Key），再发最小对话验证全链路。
   async function testLlm() {
+    // 同 `test()`：连点会重复保存草稿 + 重复发一次真实对话验证。用 ref 挡住。
+    if (llmTestingRef.current) return;
+    llmTestingRef.current = true;
     setLlmTesting(true); setLlmResult(undefined);
     try {
       // 这两处同样是"先把草稿落盘"，必须把回读值同步给父组件与草稿：
@@ -874,7 +888,7 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
       if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey));
       const result = await window.h3.testLlm();
       if (result.data) setLlmResult(result.data); else onError(result.message);
-    } catch (e) { onError(e); } finally { setLlmTesting(false); }
+    } catch (e) { onError(e); } finally { llmTestingRef.current = false; setLlmTesting(false); }
   }
   // 从上游拉取模型列表：同样先保存草稿与 Key（列表接口需要鉴权）。
   async function fetchModels() {

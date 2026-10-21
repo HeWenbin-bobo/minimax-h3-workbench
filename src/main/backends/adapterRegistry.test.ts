@@ -276,3 +276,65 @@ describe("AdapterRegistry.assertUsable", () => {
     expect(String((error as Error).message)).not.toContain("sk-should-never-leak");
   });
 });
+
+/**
+ * `describeEndpoint`：失败文案里"实际连的地址"的来源（实测 probe-backend-down）。
+ *
+ * 最重要的一条是**不能泄露凭据**：这条字符串会直接显示在任务卡片上。
+ */
+describe("AdapterRegistry.describeEndpoint", () => {
+  const makeRegistry = (settings: Record<string, unknown>) => {
+    const store = {
+      get: async () => settings,
+      // 万一有人在这里读了密钥，让它返回一个显眼的标记，便于断言"没有泄露"
+      getSecret: async () => "SECRET_SHOULD_NEVER_LEAK"
+    } as unknown as SettingsStore;
+    return new AdapterRegistry(store);
+  };
+
+  it("local / minimax / rb 返回各自的 baseUrl", async () => {
+    const registry = makeRegistry({
+      localComfyUrl: "http://127.0.0.1:8188",
+      minimaxBaseUrl: "https://api.minimax.io",
+      rbBaseUrl: "https://rb.example.com"
+    });
+    expect(await registry.describeEndpoint("local")).toBe("http://127.0.0.1:8188");
+    expect(await registry.describeEndpoint("minimax")).toBe("https://api.minimax.io");
+    expect(await registry.describeEndpoint("rb")).toBe("https://rb.example.com");
+  });
+
+  it("地址没配时给出明确占位（不是空串，也不是 undefined）", async () => {
+    const registry = makeRegistry({ localComfyUrl: "", minimaxBaseUrl: "", rbBaseUrl: "" });
+    for (const kind of ["local", "minimax", "rb"] as const) {
+      expect(await registry.describeEndpoint(kind)).toContain("未配置");
+    }
+  });
+
+  it("ssh 返回 用户名@主机 → 远端地址:端口", async () => {
+    const registry = makeRegistry({
+      ssh: { host: "10.0.0.5", username: "root", remoteComfyHost: "127.0.0.1", remoteComfyPort: 8188 }
+    });
+    const text = await registry.describeEndpoint("ssh");
+    expect(text).toContain("root@10.0.0.5");
+    expect(text).toContain("8188");
+  });
+
+  it("ssh 没填主机时给出占位", async () => {
+    expect(await makeRegistry({ ssh: { host: "" } }).describeEndpoint("ssh")).toContain("未配置");
+  });
+
+  it("**任何分支都不能泄露凭据**（这条字符串会显示给用户）", async () => {
+    const registry = makeRegistry({
+      localComfyUrl: "http://127.0.0.1:8188",
+      minimaxBaseUrl: "https://api.minimax.io",
+      rbBaseUrl: "https://rb.example.com",
+      ssh: { host: "10.0.0.5", username: "root", remoteComfyHost: "127.0.0.1", remoteComfyPort: 8188, privateKeyPath: "/home/u/.ssh/id_rsa" }
+    });
+    for (const kind of ["local", "minimax", "rb", "ssh"] as const) {
+      const text = await registry.describeEndpoint(kind);
+      expect(text, kind).not.toContain("SECRET_SHOULD_NEVER_LEAK");
+      // 私钥路径也不该出现在给用户看的地址串里
+      expect(text, kind).not.toContain("id_rsa");
+    }
+  });
+});

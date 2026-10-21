@@ -1002,6 +1002,98 @@ describe("非流式响应体取内容（空串不能被当成有内容）", () =
   // 错误文案，实测（probe-http-error）界面上出现
   // `LLM 请求失败：502 <!DOCTYPE html><html><head><title>502 Bad Gateway</title>…`
   // ——整段标签糊在气泡里，用户既读不出信息也不知道该做什么。
+  /**
+   * **首字节前的网络抖动要自动重试一次**（对齐智能体路径的整轮重试）。
+   *
+   * 实测的不对称：智能体有 3 次整轮重试 + 退避，普通对话一次都不重试——
+   * 同一个中转 ECONNRESET，开着智能体能扛过去、关掉就直接报错。
+   * 用户看不出两条路径的区别，只会觉得"有时好有时坏"。
+   */
+  describe("普通对话的网络重试", () => {
+    const makeService = () => new LlmService({ baseUrl: "https://llm.test/v1", apiKey: "k", model: "m", systemPrompt: "" });
+
+    it("首字节前连接重置 → 自动重试并成功", async () => {
+      let calls = 0;
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) {
+          // undici 的连接重置形态：message 带 terminated / fetch failed
+          const error = new Error("fetch failed");
+          (error as { cause?: unknown }).cause = { code: "ECONNRESET" };
+          throw error;
+        }
+        return new Response("data: " + JSON.stringify({ choices: [{ delta: { content: "好" } }] }) + "\n\ndata: [DONE]\n\n", {
+          status: 200, headers: { "Content-Type": "text/event-stream" }
+        });
+      }));
+      const chunks: string[] = [];
+      await makeService().chat([{ role: "user", content: "hi" }], false, (e) => { if (e.delta) chunks.push(e.delta); });
+      vi.unstubAllGlobals();
+      expect(calls).toBe(2);
+      expect(chunks.join("")).toContain("好");
+    });
+
+    it("**已经吐出内容后**网络中断 → 不重试（否则同一气泡里出现两份开头）", async () => {
+      let calls = 0;
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        calls += 1;
+        // 用 pull 模拟**真实**网络形态：先收到一块、再断开。
+        // （不能在 start 里 enqueue 后立刻 controller.error——那样消费者只会拿到错误、
+        //   拿不到那块数据，测出来的行为与真实网络不同。实测验证过这个差异。）
+        let pulls = 0;
+        const stream = new ReadableStream({
+          pull(controller) {
+            pulls += 1;
+            if (pulls === 1) {
+              controller.enqueue(new TextEncoder().encode(
+                "data: " + JSON.stringify({ choices: [{ delta: { content: "第一块" } }] }) + "\n\n"
+              ));
+              return;
+            }
+            const error = new Error("terminated");
+            (error as { cause?: unknown }).cause = { code: "ECONNRESET" };
+            controller.error(error);
+          }
+        });
+        return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }));
+      const chunks: string[] = [];
+      const error = await makeService().chat([{ role: "user", content: "hi" }], false, (e) => { if (e.delta) chunks.push(e.delta); })
+        .catch((e: Error) => e);
+      vi.unstubAllGlobals();
+      expect(chunks.join("")).toContain("第一块");
+      expect(calls).toBe(1); // 已经出过内容 → 不重试
+      expect(error).toBeInstanceOf(Error);
+    });
+
+    it("**HTTP 4xx 不重试**（Key 错/模型名错，重试必然同样失败）", async () => {
+      let calls = 0;
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ error: { message: "invalid api key" } }), {
+          status: 401, headers: { "Content-Type": "application/json" }
+        });
+      }));
+      const error = await makeService().chat([{ role: "user", content: "hi" }], false, () => {}).catch((e: Error) => e);
+      vi.unstubAllGlobals();
+      expect(calls).toBe(1);
+      expect((error as Error).message).toContain("API Key");
+    });
+
+    it("用户取消不重试（停止要立刻生效，不能被重试拖住）", async () => {
+      let calls = 0;
+      const service = makeService();
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        calls += 1;
+        throw new DOMException("aborted", "AbortError");
+      }));
+      const error = await service.chat([{ role: "user", content: "hi" }], false, () => {}).catch((e: Error) => e);
+      vi.unstubAllGlobals();
+      expect(calls).toBe(1);
+      expect((error as Error).name).toBe("AbortError");
+    });
+  });
+
   describe("HTTP 失败文案", () => {
     async function failureFrom(status: number, body: string, contentType: string): Promise<string> {
       vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status, headers: { "Content-Type": contentType } })));

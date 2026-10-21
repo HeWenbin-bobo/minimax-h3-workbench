@@ -1,4 +1,4 @@
-import { describeError } from "../../shared/errors";
+import { describeError, isNetworkError } from "../../shared/errors";
 import type { ChatMessage, LlmStreamEvent } from "../../shared/types";
 import { sliceSafe } from "../../shared/text";
 import { searchWeb } from "./webSearch";
@@ -51,6 +51,41 @@ export class LlmService {
     if (!this.options.apiKey && !/127\.0\.0\.1|localhost/.test(this.baseUrl)) {
       throw new Error("请先在连接设置中保存游乐场 LLM 的 API Key。");
     }
+    /**
+     * **首字节前的网络抖动自动重试一次**（对齐智能体路径的整轮重试）。
+     *
+     * 为什么需要（实测的不对称）：智能体路径有 3 次整轮重试 + 退避
+     * （见 main.ts 的 `isNetworkError` 分支），而普通对话**一次都不重试**——
+     * 同一个中转 ECONNRESET，开着智能体能扛过去，关掉就直接报错。
+     * 用户看不出这两条路径的区别，只会觉得"有时好有时坏"。
+     *
+     * 三条边界（少一条都会出事）：
+     * ① **只在还没吐出任何内容时重试**：已经发了一半再重来，同一个气泡里会出现两份开头；
+     * ② **只重试网络类错误**：HTTP 4xx（Key 错、模型名错）重试必然同样失败，白等一轮；
+     * ③ **用户点了停止就立刻退出**：不能让重试把「停止」拖成"点了没反应"。
+     */
+    const produced = { any: false };
+    const trackedSend: ChunkSender = (event) => {
+      if (typeof event.delta === "string" && event.delta) produced.any = true;
+      send(event);
+    };
+    const MAX_ATTEMPTS = 2;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await this.chatOnce(messages, webSearch, trackedSend, browserOnly);
+        return;
+      } catch (error) {
+        const aborted = error instanceof DOMException && error.name === "AbortError";
+        const retryable = !aborted && !produced.any && attempt < MAX_ATTEMPTS && isNetworkError(error);
+        if (!retryable) throw error;
+        // 退避 800ms：给中转的抖动窗口一点时间，又不至于让用户觉得卡住。
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+    }
+  }
+
+  /** 单次尝试（原 `chat` 的主体）。重试逻辑在外层 `chat`，这里只负责发一次。 */
+  private async chatOnce(messages: ChatMessage[], webSearch: boolean, send: ChunkSender, browserOnly: boolean): Promise<void> {
     // 控制器必须**先建**再准备载荷：`buildPayload` 里含联网搜索（浏览器渲染可达数十秒），
     // 期间若 busy 仍是 false，同会话并发守卫失效（用户能再发一条，两股流抢同一个气泡）；
     // 用户点「停止」也没有 controller 可中止，只能干等搜索跑完。

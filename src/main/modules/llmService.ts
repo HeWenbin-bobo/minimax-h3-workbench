@@ -1821,16 +1821,57 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
         }
       }
     }
-  } catch {
-    // steps 不可用时按 0 计（部分 provider 组合不产 steps）。
+  } catch (error) {
+    /**
+     * **上游真报错时不能在这里吞掉**（实测缺陷 probe-overflow-sideeffect, 2026-10-21）。
+     *
+     * 旧代码是一个裸 `catch {}`，注释写的是"steps 不可用时按 0 计（部分 provider 不产 steps）"。
+     * 但 `await stream.steps` **在上游失败时也会 reject**——于是 400「context length exceeded」
+     * 被这个 catch 吞掉，函数继续往下走，调用方拿到一个"成功但 0 工具调用"的结果，
+     * 接着按"工具调用没产出正文"收尾，用户看到的是
+     * 「本轮工具调用已达 20 步上限」这类**与真实原因完全无关**的文案。
+     *
+     * 三种情况要分开（少一种就会误伤）：
+     * ① 有 `underlyingError` → 那是上游真错误，**必须抛**；
+     * ② 没有 `underlyingError` 且拿到的是 AbortError → 用户取消，**原样抛**给调用方处理；
+     * ③ 其它（provider 不产 steps 导致的形状问题）→ 按 0 计，保持原行为。
+     */
+    const aborted = error instanceof DOMException && error.name === "AbortError";
+    if (underlyingError || aborted) throw underlyingError ?? error;
+    // ③ 真正的"steps 不可用"：按 0 计
   }
   // 工具调用全程在 streamText 内部完成；这里只等最终收尾。
+  let finalFinishReason: string | undefined;
   try {
-    await stream.finishReason;
+    finalFinishReason = await stream.finishReason;
   } catch (error) {
     // 有底层错误就抛它（调用方才能按"网络失败"还是"模型不支持工具"分流并给出可行动的中文提示）；
     // 没有则原样抛 AI SDK 的占位错误。
     throw underlyingError ?? error;
+  }
+  /**
+   * **上游报错必须抛出去**（实测缺陷 probe-overflow-sideeffect, 2026-10-21）。
+   *
+   * 旧实现没有检查 `underlyingError`，于是上游 400「context length exceeded」被**静默吞掉**：
+   * 调用方拿到一个"成功但 0 工具调用"的结果，接着按"工具调用没产出正文"收尾，
+   * 用户看到的是「本轮工具调用已达 20 步上限」这类**与真实原因完全无关**的文案。
+   *
+   * 判据是 **`underlyingError` 非空**，不是 `finishReason === "error"`。
+   * 这条是实测出来的（`_scratch/sdk-probe.mjs` 用真实 AI SDK 复现）：
+   * 上游第二次返回 400 时，
+   *   - `steps` 只有 1 个（失败的步骤没进 steps），最后一步 finishReason 仍 `"tool-calls"`；
+   *   - `stream.finishReason` 是 **`"other"`**（不是 `"error"`）；
+   *   - **只有 `underlyingError` 里存着真实原因**。
+   * 我先前按 finishReason 判（先试 steps 的、再试 stream 的），两次都没生效——
+   * 就是因为我假设了 SDK 的取值，而没有先测。
+   *
+   * 为什么要抛而不是只记日志：调用方有两处依赖"错误能被看见"——
+   * ① `noteContextOverflow` 靠错误文本判断要不要压缩并重试；
+   * ② 内容被安全策略拒绝时要在历史末尾注入改写指引后重试。
+   * 吞掉错误等于把这两条补救路径全部废掉。
+   */
+  if (underlyingError) {
+    throw underlyingError;
   }
   // usage 用于上下文压缩的基线记账（inputTokens 是"本窗口的输入起点"）。
   // 上游不返回 usage 时字段为 undefined——调用方回落字符估算，不能当成 0。

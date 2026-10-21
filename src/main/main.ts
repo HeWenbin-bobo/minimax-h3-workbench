@@ -34,7 +34,7 @@ import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
-import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, SHEET_REQUEST_EXTS } from "./modules/artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, isListableArtifact, SHEET_REQUEST_EXTS } from "./modules/artifactDir";
 import { applyExactEdit, applyExactEdits, countLines, findMatchingLines, MAX_READ_CHARS, sliceWithLineNumbers } from "./modules/artifactEdit";
 import { extractColumn, summarizeColumn, type NumericSummary } from "./modules/artifactStats";
 import { PREVIEW_CSP } from "./modules/previewCsp";
@@ -1257,7 +1257,7 @@ function registerIpc(
           // **不在清单里**——模型看不到它，就好像这个会话从没产出过这份数据，
           // 于是它回一句"我这边看不到你的文件，麻烦上传或粘贴"（实测就是这样）。
           // 而 `saveArtifact` 与产物预览都支持这些类型，清单必须与之一致。
-          const wanted = entries.filter((name) => /\.(html?|md|xlsx|csv|tsv|txt|json)$/i.test(name));
+          const wanted = entries.filter((name) => isListableArtifact(name));
           const withTime = await Promise.all(wanted.map(async (name) => {
             const info = await stat(path.join(artifactRoot, name)).catch(() => undefined);
             return { name, mtime: info?.mtimeMs ?? 0 };

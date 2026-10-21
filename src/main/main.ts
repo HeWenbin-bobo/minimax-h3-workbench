@@ -695,7 +695,26 @@ function registerIpc(
     try {
       const models = await service.listModels();
       if (models.ok) {
-        return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: settings.llm.model }, message: `连接成功（${Date.now() - start}ms），上游返回 ${models.models.length} 个模型。` };
+        // **顺带核对当前模型名是否在上游列表里**（实测缺口 2026-10-21）：
+        // 旧实现只要 /models 通就报「连接成功」——于是用户把模型名打错（`deepsek-chat`）时
+        // 测试照样通过，直到真正发消息才 404。他看到的是"测试通过但用不了"，无从下手。
+        //
+        // **不判失败**：有些服务商的模型名是别名/路由名（列表里本来就没有），
+        // 判失败会把这类正常配置挡在门外。只在消息里点出来，并给出最接近的候选名。
+        const wanted = String(settings.llm.model || "").trim();
+        const inList = models.models.some((name) => name === wanted);
+        // 近似匹配：忽略大小写与连字符差异（`deepseek-v4.1-flash` vs `deepseek-v4.1flash`）
+        const normalizeName = (value: string) => value.toLowerCase().replace(/[-_.\s]/g, "");
+        const similar = !inList && wanted
+          ? models.models.filter((name) => normalizeName(name).includes(normalizeName(wanted).slice(0, 6))
+            || normalizeName(wanted).includes(normalizeName(name).slice(0, 6))).slice(0, 3)
+          : [];
+        const modelNote = inList || !wanted
+          ? ""
+          : similar.length > 0
+            ? `\n⚠ 但当前模型名「${wanted}」不在上游返回的列表里。相近的有：${similar.map((name) => `「${name}」`).join("、")}——请确认拼写。`
+            : `\n⚠ 但当前模型名「${wanted}」不在上游返回的列表里（共 ${models.models.length} 个）。如果这是你服务商的别名/路由名可以忽略这条；否则请对照列表填写。`;
+        return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: settings.llm.model }, message: `连接成功（${Date.now() - start}ms），上游返回 ${models.models.length} 个模型。${modelNote}` };
       }
       // /models 不支持：回退发一条最小对话验证全链路（Key+模型名+端点）。
       let streamed = "";

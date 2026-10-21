@@ -64,13 +64,16 @@ describe("inspectH3Readiness", () => {
   });
 
   /**
-   * 少数 ComfyUI 分支/自定义节点把选项列表放在 `values` 而不是 `options`。
+   * `values` 是**防御性兜底**，不是"某个版本的真实格式"。
    *
-   * 这条的代价**极不对称**：认一个不存在的键只是多一次 `?.` 取值；
-   * 不认的话，真有这种版本的用户会被要求去下 60GB 模型——而他本机早就装好了。
-   * 注：`values` 这个键名没有在真机 ComfyUI 上验证过（本机无运行中的实例）。
+   * 已按真实源码核对（ComfyUI 0.3.47 `comfy_api/latest/_io.py`）：`Combo.Input.as_dict()`
+   * 产出的键是 `options`，`add_to_dict_v1()` 把输入序列化成 `(类型, as_dict())`；
+   * 全仓搜索**没有** `values` 这个键。早先的注释写成"少数分支这么做"是没有依据的猜测。
+   *
+   * 仍然保留兼容：读一个不存在的键没有副作用，而漏判会让那类用户被要求去下 60GB 模型。
+   * 测试锁的是"兜底不会把坏键当成空列表"，不构成"官方支持这种格式"的声明。
    */
-  it('COMBO 用 values 而不是 options 时同样认', () => {
+  it('COMBO 的选项放在 values 里时也能读到（防御性兜底）', () => {
     const info = plainInfo();
     (info.UNETLoader.input.required as Record<string, unknown>).unet_name = [["COMBO", { values: [NAMES[0], NAMES[1]] }], {}];
     (info.CLIPLoader.input.required as Record<string, unknown>).clip_name = [["COMBO", { values: [NAMES[2]] }], {}];
@@ -78,7 +81,7 @@ describe("inspectH3Readiness", () => {
     expect(inspectH3Readiness(info).missingModels).toEqual([]);
   });
 
-  it("{values:[...]} 包一层的写法也认", () => {
+  it("被包一层的 values 同样能读到", () => {
     const info = plainInfo();
     (info.UNETLoader.input.required as Record<string, unknown>).unet_name = [{ values: [NAMES[0], NAMES[1]] }, {}];
     expect(inspectH3Readiness(info).missingModels).toEqual([]);

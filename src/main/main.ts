@@ -19,7 +19,7 @@ import {
 import { AdapterRegistry, backendAvailability, backendKindLabel, backendMentionedInText, backendPickedFromQuestions, normalizeBackendKind } from "./backends/adapterRegistry";
 import { mediaMime, parseByteRange } from "./modules/mediaRange";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
-import { describeError, isNetworkError, isRetriableLoadAbort } from "../shared/errors";
+import { describeError, httpStatusOf, isNetworkError, isRetriableLoadAbort } from "../shared/errors";
 import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmArtifactEvent, LlmDoneEvent, LlmPlanEvent, LlmQuestionEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, SecretName } from "../shared/types";
 import { downloadAndInstall, onDownloadProgress } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
@@ -2147,7 +2147,19 @@ ${tableNote}` : ""}`;
             effective = [...effective, { role: "user", content: CONTENT_FILTER_GUIDANCE }];
             continue;
           }
-          const retryable = attempts < 3 && agentSent === 0 && !producedSideEffects && isNetworkError(error);
+          // 重试判据：网络抖动 **或** 限流（429）。
+          //
+          // 429 是实测缺口（2026-10-22）：这里已经用了 `retryDelayMs` 去尊重 retry-after，
+          // 判据却只放行网络错误，于是上游回 `429 + retry-after: 2` 时根本不进重试分支——
+          // 明明等两秒就成。401/403/404/400 不重试（必然同样失败，白等一轮）。
+          //
+          // **5xx 刻意不放行**（与普通对话那边不同）：智能体路径的 SDK 已经设了
+          // `maxRetries: 1`，5xx 在 SDK 层就重试过一次。整轮再重试 3 次 + 每次 3 秒退避
+          // 会让"服务端 500"这类必然失败的错误拖到十几秒才报出来（实测 E2E test-02 从
+          // 6 秒等到 12 秒还没收尾）。速率限制则不同——它是**有冷却窗口**的，
+          // SDK 的瞬时重试撞在窗口里注定失败，必须由整轮重试按 retry-after 等待。
+          const retryable = attempts < 3 && agentSent === 0 && !producedSideEffects
+            && (isNetworkError(error) || httpStatusOf(error) === 429);
           if (!retryable) break;
         }
       }

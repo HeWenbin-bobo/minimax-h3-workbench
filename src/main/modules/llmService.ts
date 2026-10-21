@@ -1,4 +1,4 @@
-import { describeError, isNetworkError } from "../../shared/errors";
+import { describeError, isNetworkError, isRetriableHttpStatus } from "../../shared/errors";
 import type { ChatMessage, LlmStreamEvent } from "../../shared/types";
 import { sliceSafe } from "../../shared/text";
 import { retryDelayMs } from "./errorRecovery";
@@ -81,8 +81,7 @@ export class LlmService {
         // 于是上游明确回 429「retry after 2 seconds」时，我们**一次都不等就直接失败** ——
         // 明明等两秒就能成功。Codex 的 `responses_retry.rs` 正是为此尊重 retry-after。
         // 只放 429 与 5xx：401/403/404/400 这类重试必然同样失败，白等一轮。
-        const status = (error as { status?: number }).status;
-        const retriableStatus = status === 429 || (typeof status === "number" && status >= 500);
+        const retriableStatus = isRetriableHttpStatus(error);
         const retryable = !aborted && !produced.any && attempt < MAX_ATTEMPTS
           && (isNetworkError(error) || retriableStatus);
         if (!retryable) throw error;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeError, isNetworkError, isRetriableLoadAbort } from "./errors";
+import { describeError, isNetworkError, isRetriableHttpStatus, isRetriableLoadAbort, retryAfterHeaderOf } from "./errors";
 
 // 背景：undici 的裸 "fetch failed" 会一路透传到卡片/toast/聊天气泡，用户看不懂也定位不了。
 // 这里固化"网络层英文异常必须翻成中文、业务异常必须原样保留"两条契约。
@@ -151,6 +151,109 @@ describe("isNetworkError", () => {
     expect(isNetworkError(new Error("Failed after 2 attempts. Last error: AI_APICallError: Internal Server Error"))).toBe(false);
     expect(isNetworkError(new Error("尚未保存瞬映卡密。"))).toBe(false);
     expect(isNetworkError(undefined)).toBe(false);
+  });
+});
+
+/**
+ * 「值得重试的 HTTP 状态」与「网络错误」是**两件事**，故单独一个函数。
+ *
+ * 实测缺口（2026-10-22）：普通对话与智能体两条重试路径原先都只判 `isNetworkError`，
+ * 于是上游明确回 `429 + retry-after: 2` 时一次都不等就失败。
+ * 而 401/403/404/400 重试必然同样失败，必须排除——否则只是让用户白等一轮。
+ */
+describe("isRetriableHttpStatus", () => {
+  const withStatus = (status: number) => Object.assign(new Error("boom"), { status });
+
+  it("429 与 5xx 值得重试", () => {
+    expect(isRetriableHttpStatus(withStatus(429))).toBe(true);
+    expect(isRetriableHttpStatus(withStatus(500))).toBe(true);
+    expect(isRetriableHttpStatus(withStatus(502))).toBe(true);
+    expect(isRetriableHttpStatus(withStatus(503))).toBe(true);
+  });
+
+  it("4xx（除 429）不值得重试", () => {
+    expect(isRetriableHttpStatus(withStatus(400))).toBe(false);
+    expect(isRetriableHttpStatus(withStatus(401))).toBe(false);
+    expect(isRetriableHttpStatus(withStatus(403))).toBe(false);
+    expect(isRetriableHttpStatus(withStatus(404))).toBe(false);
+    expect(isRetriableHttpStatus(withStatus(422))).toBe(false);
+  });
+
+  it("也认 AI SDK 的 statusCode 字段", () => {
+    expect(isRetriableHttpStatus(Object.assign(new Error("x"), { statusCode: 503 }))).toBe(true);
+    expect(isRetriableHttpStatus(Object.assign(new Error("x"), { statusCode: 400 }))).toBe(false);
+  });
+
+  it("没有状态码的一律不算（网络错误交给 isNetworkError）", () => {
+    expect(isRetriableHttpStatus(new Error("ECONNRESET"))).toBe(false);
+    expect(isRetriableHttpStatus(undefined)).toBe(false);
+    expect(isRetriableHttpStatus(null)).toBe(false);
+    expect(isRetriableHttpStatus("429")).toBe(false);
+  });
+
+  // **必须下钻包裹果**（实测形状，直连 SDK 复现）：
+  // AI SDK 的 maxRetries 用尽后抛的是 `AI_RetryError`，它自己没有 statusCode，
+  // 真实信息在 lastError（APICallError）上。只在顶层找会得到 undefined，
+  // 于是"429 该重试"这个判断永远不成立——这正是智能体路径上的真实缺口。
+  it("认得 AI_RetryError 包裹（状态码在 lastError 上）", () => {
+    const wrapped = Object.assign(new Error("Failed after 2 attempts"), {
+      name: "AI_RetryError",
+      lastError: Object.assign(new Error("rate limited"), { name: "AI_APICallError", statusCode: 429 })
+    });
+    expect(isRetriableHttpStatus(wrapped)).toBe(true);
+  });
+
+  it("也认 errors[] 末项（没有 lastError 时）", () => {
+    const wrapped = Object.assign(new Error("Failed after 2 attempts"), {
+      name: "AI_RetryError",
+      errors: [
+        Object.assign(new Error("first"), { statusCode: 400 }),
+        Object.assign(new Error("last"), { statusCode: 503 })
+      ]
+    });
+    expect(isRetriableHttpStatus(wrapped)).toBe(true);
+  });
+
+  it("包裹果里是 400 时仍不重试", () => {
+    const wrapped = Object.assign(new Error("Failed"), {
+      name: "AI_RetryError",
+      lastError: Object.assign(new Error("bad"), { statusCode: 400 })
+    });
+    expect(isRetriableHttpStatus(wrapped)).toBe(false);
+  });
+
+  it("环形/自引用不会无限递归", () => {
+    const loop: Record<string, unknown> = { name: "AI_RetryError" };
+    loop.lastError = loop;
+    expect(isRetriableHttpStatus(loop)).toBe(false);
+  });
+});
+
+/**
+ * `retry-after` 头的取值也必须认包裹果。
+ *
+ * 智能体路径拿到的是 `AI_RetryError`，顶层 `responseHeaders` 是 undefined，
+ * 真实头挂 `lastError` 上。只读顶层 → `parseRetryAfter` 永远返回 undefined，
+ * "尊重服务端冷却窗口"就成了一句没生效的话。
+ */
+describe("retryAfterHeaderOf", () => {
+  it("读顶层 responseHeaders（大小写都认）", () => {
+    expect(retryAfterHeaderOf({ responseHeaders: { "retry-after": "2" } })).toBe("2");
+    expect(retryAfterHeaderOf({ responseHeaders: { "Retry-After": "5" } })).toBe("5");
+  });
+
+  it("读 lastError 上的 responseHeaders（真实 SDK 形状）", () => {
+    const wrapped = {
+      name: "AI_RetryError",
+      lastError: { name: "AI_APICallError", statusCode: 429, responseHeaders: { "retry-after": "2" } }
+    };
+    expect(retryAfterHeaderOf(wrapped)).toBe("2");
+  });
+
+  it("找不到时返回 undefined 而不是空串", () => {
+    expect(retryAfterHeaderOf(new Error("x"))).toBeUndefined();
+    expect(retryAfterHeaderOf(undefined)).toBeUndefined();
+    expect(retryAfterHeaderOf({ responseHeaders: {} })).toBeUndefined();
   });
 });
 

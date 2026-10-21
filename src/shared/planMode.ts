@@ -108,7 +108,8 @@ export const PLAN_EXECUTION_PROMPT = `# 计划已确认，开始执行
 export const PLAN_MODE_BLOCKED_TOOLS = ["generate_video", "create_file", "edit_artifact", "edit_artifact_batch", "inspect_artifact", "update_plan"] as const;
 
 /** 计划模式下**仍然可用**的只读工具（写进提示词，避免模型以为一律不能调）。 */
-export const PLAN_MODE_READONLY_TOOLS = ["web_search", "open_page", "read_artifact", "request_user_input"] as const;
+// `compute` 是只读的（只统计产物、不改文件），计划模式保留——写方案前先算清数据是正当需求。
+export const PLAN_MODE_READONLY_TOOLS = ["web_search", "open_page", "read_artifact", "request_user_input", "compute"] as const;
 
 /**
  * 计划模式下的工具说明：写清"哪些还在、哪些没了"，不让模型对着提示词猜边界。
@@ -130,6 +131,10 @@ export function planModeToolNote(available: { webSearch: boolean }): string {
   if (available.webSearch) readonly.push("- web_search(query)：联网查资料");
   readonly.push("- open_page(url)：打开具体网页看正文");
   readonly.push("- read_artifact(name, …)：读回本会话已有的产物");
+  // compute 是**只读**工具（只统计、不改文件），计划模式该保留——
+  // 写方案前先算清楚数据，往往正是"这份计划该怎么写"的依据。
+  // 漏登记会让模型在计划里凭空编数字，而它明明有工具能算出真值。
+  readonly.push("- compute(name, column)：对本会话产物的某一列做精确统计（只读，可以放心用）");
   readonly.push("- request_user_input(questions)：问清 1–3 个关键取舍（用户不答就按最佳判断写进「假设」）");
   const webNote = available.webSearch
     ? ""

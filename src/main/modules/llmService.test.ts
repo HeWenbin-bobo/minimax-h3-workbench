@@ -422,7 +422,9 @@ describe("工具摘要（humanizeToolOutput）", () => {
 
 describe("chatAgent 工具暴露", () => {
   const options: LlmServiceOptions = { baseUrl: "https://example.com/v1", apiKey: "k", model: "m", systemPrompt: "" };
-  const callbacks = { webSearch: async () => "结果", generateVideo: async () => "已创建" };
+  // compute 是 `AgentToolCallbacks` 的必需字段（工具表无条件注册它，见 planMode 只读清单）；
+  // fixture 里必须给上，否则类型上就是缺字段的（此前靠结构化宽松侥幸通过）。
+  const callbacks = { webSearch: async () => "结果", generateVideo: async () => "已创建", compute: async () => "统计完成" };
   const messages = [{ role: "user" as const, content: "hi" }];
 
   // 让假 streamText 返回可控的异步流
@@ -566,6 +568,8 @@ describe("chatAgent 工具暴露", () => {
     // inspect_artifact 本身只读，但它服务于"刚生成的产物"——计划模式不产文件，
     // 留着只会让模型以为有东西可查。与 create_file 同块摘除。
     expect(tools).not.toContain("inspect_artifact");
+    // compute 只读（只统计、不改文件）→ 计划模式保留，与提示词里的"可用工具"清单保持一致。
+    expect(tools).toContain("compute");
   });
 
   it("非计划模式下这些产物工具都在", async () => {
@@ -616,7 +620,9 @@ describe("chatAgent 工具暴露", () => {
 // "会被自动纠正/夹紧/补齐"所承诺的输入**。新加工具时它会第一时间变红。
 describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", () => {
   const options: LlmServiceOptions = { baseUrl: "https://example.com/v1", apiKey: "k", model: "m", systemPrompt: "" };
-  const callbacks = { webSearch: async () => "结果", generateVideo: async () => "已创建" };
+  // compute 是 `AgentToolCallbacks` 的必需字段（工具表无条件注册它，见 planMode 只读清单）；
+  // fixture 里必须给上，否则类型上就是缺字段的（此前靠结构化宽松侥幸通过）。
+  const callbacks = { webSearch: async () => "结果", generateVideo: async () => "已创建", compute: async () => "统计完成" };
   const messages = [{ role: "user" as const, content: "hi" }];
 
   async function schemas(): Promise<Record<string, { safeParse: (v: unknown) => { success: boolean; error?: { issues: Array<{ message: string }> } } }>> {

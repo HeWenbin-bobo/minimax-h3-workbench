@@ -102,7 +102,21 @@ await withApp({}, async (cdp) => {
   check("另一会话未被连坐中止（仍生成中）", s.sessions.filter((x) => x.running).length === 1, JSON.stringify(s.sessions.map((x) => x.running)));
   check("当前会话停止后无错误气泡", !s.msgs.some((m) => m.err), JSON.stringify(s.msgs.map((m) => m.err)));
 
-  check("未停止的会话能正常收尾", await waitAllIdle(cdp), "仍卡在生成中");
+  const idleOk = await waitAllIdle(cdp);
+  if (!idleOk) {
+    const diag = await cdp.eval(`(() => JSON.stringify(Array.from(document.querySelectorAll('.pg-session')).map((s) => ({
+      title: (s.querySelector('strong')?.textContent || '').slice(-6),
+      running: s.className.includes('running'),
+      sub: (s.querySelector('small')?.textContent || '').trim()
+    }))))()`);
+    const bubbles = await cdp.eval(`(() => JSON.stringify(Array.from(document.querySelectorAll('.pg-msg.assistant')).map((m) => ({
+      err: m.className.includes('error'),
+      text: (m.querySelector('.pg-bubble')?.textContent || '').slice(0, 80)
+    }))))()`);
+    console.log(`  [诊断] 会话状态: ${diag}`);
+    console.log(`  [诊断] 助手气泡: ${bubbles}`);
+  }
+  check("未停止的会话能正常收尾", idleOk, "仍卡在生成中");
   s = await snap(cdp);
   check("全部收尾后列表无 running 标识", s.sessions.every((x) => !x.running) && !s.stopVisible, JSON.stringify(s.sessions.map((x) => x.running)));
 

@@ -1105,6 +1105,11 @@ function registerIpc(
       // 再试只会重复烧 token（对齐 Codex 的 `guardian_budget_compacted`）。
       const runPlainChat = () => service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
       void runPlainChat()
+        // **成功时必须发 done**（实测回归 test-08）：重构时我漏掉了这一行，
+        // 于是普通对话成功时什么都不发——渲染端收不到 `llm:done`，
+        // 会话**永久卡在「生成中」**（停止键一直在、再也发不出新消息）。
+        // 崩溃路径有 catch、兜底路径有 finally，唯独"一切正常"这条最常走的路上没有收尾。
+        .then(() => done({ ok: true }))
         .catch(async (error: unknown) => {
           const aborted = error instanceof DOMException && error.name === "AbortError";
           if (aborted) {

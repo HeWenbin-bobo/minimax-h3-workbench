@@ -2170,6 +2170,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       // 不能在 send() 里立即复位——React 是异步提交，同 tick 内 active 仍是 undefined。
       return;
     }
+    // **这条守卫目前是"防御性死代码"**（实测 2026-10-21）：`normalizeSettings` 里
+    // `llm.baseUrl` 用的是 `str()`——用户清空也会被回落成默认值，所以 `baseUrl` 永远非空。
+    // 保留它不是为了当下，是因为"服务地址是否允许为空"这条约定**已经改过三次**
+    // （`localComfyUrl` / `rbBaseUrl` / `minimaxBaseUrl` 都从"回落默认"改成了"允许空"）。
+    // 哪天 `llm.baseUrl` 也改成允许空串，没有这条守卫就会拿空地址去发请求。
+    // 注释写清楚，是为了避免下一个人误以为它在生产里真的会触发、白查一遍。
     if (!settings.llm.baseUrl) { onError(new Error("请先在连接设置中配置游乐场 LLM。")); return; }
     // 无会话时先本地创建会话对象再继续（不 return），避免首条消息被丢弃。
     let session = active;

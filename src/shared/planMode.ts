@@ -183,3 +183,45 @@ export function looksLikePlan(text: string): boolean {
   if (orderedItems >= 2) return true;
   return /确认后|开始执行|执行计划|以下是计划|计划如下/.test(body);
 }
+
+export interface PlanStepLike {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/**
+ * 收尾时把"没走完的步骤"收拾干净。
+ *
+ * 真机实测（2026-10-21，deepseek-v4.1-flash，国产 CPU 对比表任务）：
+ * 模型用 `update_plan` 列了 4 步，然后连做 **46 次工具调用**、真把 xlsx 交付了，
+ * 但**再没调过一次 `update_plan`**——清单从头到尾停在 `0/4`，四步全是「○ 未开始」。
+ * 用户看到的是"AI 说做完了、进度条说一步没开始"，比不显示清单更糟：
+ * 他会以为任务半途而废，或者以为清单坏了。
+ *
+ * 这与 CLAUDE.md 那条规律一致：**文字约定约束不住模型**（工具描述里写了
+ * "每完成一步就更新一次状态"，真机照样不照做）。所以要在机制上兜底。
+ *
+ * 判据刻意保守——只在**确实干成了事**时才收尾：
+ * - 本轮产出了任务或文件（`produced`）→ 把 `pending` / `in_progress` 一律标完成；
+ * - 什么都没产出 → **只**把 `in_progress` 退回 `pending`（"正在做"但不能假装做完）。
+ *   收尾仍停在 `in_progress` 是错的：那一轮已经结束了，界面上却还挂着"进行中"。
+ *
+ * 纯函数：不读时钟、不碰 IO，便于单测。
+ *
+ * @param plan 本轮的步骤清单（没有清单时传空数组，返回空数组）
+ * @param produced 本轮是否真的产出了东西（建了任务 / 落了文件 / 改了文件）
+ * @returns 新数组（不改入参）；不需要变化时**原样返回同一引用**，让调用方能靠 `!==` 跳过推送
+ */
+export function settleStalePlan<T extends PlanStepLike>(plan: readonly T[], produced: boolean): readonly T[] {
+  if (plan.length === 0) return plan;
+  // 已经全部完成：不必推送（避免多一次无意义的 UI 刷新）
+  if (plan.every((entry) => entry.status === "completed")) return plan;
+  const next = plan.map((entry) => {
+    if (produced) return entry.status === "completed" ? entry : { ...entry, status: "completed" as const };
+    // 没产出：只把"进行中"退回"未开始"，绝不假报完成
+    return entry.status === "in_progress" ? { ...entry, status: "pending" as const } : entry;
+  });
+  // 一个字段都没变时返回原引用
+  const changed = next.some((entry, index) => entry.status !== plan[index].status);
+  return changed ? next : plan;
+}

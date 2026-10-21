@@ -56,7 +56,7 @@ import {
   type ContextWindowState
 } from "./modules/contextBudget";
 import { buildCompactedHistory, summarizeHistory } from "./modules/compaction";
-import { withPlanMode } from "../shared/planMode";
+import { settleStalePlan, withPlanMode } from "../shared/planMode";
 import { contextWindowFor } from "../shared/modelWindows";
 import { sliceSafe } from "../shared/text";
 import { decodeTextBytes, decodeTextPreview } from "./modules/textFile";
@@ -2048,6 +2048,20 @@ ${tableNote}` : ""}`;
       // world state 快照写回：本轮已把这批环境事实发给了模型，下一轮只发差异。
       // 放在采样成功之后——中途失败没真正注入，不该记成"已注入"（否则下一轮会漏发）。
       sessionWorldState.set(session, worldDiff.snapshot);
+      // **收尾兜底步骤清单**（实测缺陷 probe-plan-stale）：模型常常只列一次清单就埋头干活，
+      // 交付完了也不回头更新 status，界面于是永久停在「○ 未开始」——比没有清单更误导。
+      // 判据放在纯函数 `settleStalePlan` 里（可单测），这里只负责"变了就推一次"。
+      // 必须放在 `done` 之前：渲染端按事件顺序消费，收尾之后再推会落在已结束的气泡上。
+      const settledPlan = settleStalePlan(turnState.planSteps ?? [],
+        agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0);
+      if (settledPlan !== turnState.planSteps) {
+        turnState.planSteps = [...settledPlan];
+        sendLlmPlan({
+          plan: turnState.planSteps,
+          explanation: "本轮已结束，未单独更新的步骤按实际进展收尾",
+          sessionId: session
+        });
+      }
       done({ ok: true });
     })().catch((error: unknown) => {
       const aborted = controller.signal.aborted;

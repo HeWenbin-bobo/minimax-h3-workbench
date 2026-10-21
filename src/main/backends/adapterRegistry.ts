@@ -185,19 +185,34 @@ export class AdapterRegistry {
     // 不经过它，故在根源处再挡一次。
     if (!["local", "ssh", "minimax", "rb"].includes(kind)) throw new Error("生成后端无效。");
     const settings = await this.settingsStore.get();
+    /**
+     * **地址为空时明确报错，不要拿空串去发请求**（与 `normalizeSettings` 允许空串配套）。
+     *
+     * 为什么：`localComfyUrl` / `minimaxBaseUrl` / `rbBaseUrl` 现在都允许为空
+     * （空串 = 用户主动清空的"未配置"，不再是静默回落默认值）。
+     * 若这里不挡，adapter 会拼出 `"/prompt"` 这种相对地址去 fetch，
+     * 报出的错误是 `Failed to parse URL` 之类的英文技术串，与真实原因（没配地址）无关。
+     * 正常路径上 `assertUsable` 已经拦过一次；这里是**根源处的兜底**——
+     * `backend:test` 等路径不经过 assertUsable。
+     */
+    const requireUrl = (value: string, label: string): string => {
+      const trimmed = String(value || "").trim();
+      if (!trimmed) throw new Error(`请先在连接设置中填写「${label}」的服务地址。`);
+      return trimmed;
+    };
     if (kind === "local") {
-      return new ComfyAdapter({ baseUrl: settings.localComfyUrl, outputDirectory: settings.outputDirectory });
+      return new ComfyAdapter({ baseUrl: requireUrl(settings.localComfyUrl, "本机 ComfyUI"), outputDirectory: settings.outputDirectory });
     }
     if (kind === "minimax") {
       return new MiniMaxAdapter({
-        baseUrl: settings.minimaxBaseUrl,
+        baseUrl: requireUrl(settings.minimaxBaseUrl, "MiniMax"),
         apiKey: await this.settingsStore.getSecret("minimaxApiKey"),
         outputDirectory: settings.outputDirectory
       });
     }
     if (kind === "rb") {
       return new RbAdapter({
-        baseUrl: settings.rbBaseUrl,
+        baseUrl: requireUrl(settings.rbBaseUrl, "瞬映 RB"),
         cardCode: await this.settingsStore.getSecret("rbCardCode"),
         outputDirectory: settings.outputDirectory
       });

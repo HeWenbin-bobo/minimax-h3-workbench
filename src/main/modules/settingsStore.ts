@@ -94,9 +94,15 @@ export function normalizeSettings(raw: Partial<AppSettings>, defaults: AppSettin
     outputDirectory: currentOutput,
     outputDirectoryHistory: history,
     comfyuiRoot: maybeStr(raw.comfyuiRoot, defaults.comfyuiRoot),
-    rbBaseUrl: str(raw.rbBaseUrl, defaults.rbBaseUrl),
+    // **服务地址同理允许空串**（与 localComfyUrl 同一处缺陷的姊妹项）：
+    // `str()` 会把空串换成默认值，于是"清空地址"这个动作**静默无效**——
+    // 用户以为改成未配置了，实际仍在连默认服务。
+    // 这两个不会像 localComfyUrl 那样误放行闸门（`assertUsable` 只看密钥），
+    // 但"改了没生效"同样是缺陷，且下游 `describeEndpoint` 会显示回默认地址、更让人困惑。
+    // 地址为空时由 adapter 侧给出明确错误（见 `adapterRegistry.get` 的注释）。
+    rbBaseUrl: maybeStr(raw.rbBaseUrl, defaults.rbBaseUrl),
     defaultBackend,
-    minimaxBaseUrl: str(raw.minimaxBaseUrl, defaults.minimaxBaseUrl),
+    minimaxBaseUrl: maybeStr(raw.minimaxBaseUrl, defaults.minimaxBaseUrl),
     llm: {
       provider: str(llm.provider, defaults.llm.provider),
       baseUrl: str(llm.baseUrl, defaults.llm.baseUrl),

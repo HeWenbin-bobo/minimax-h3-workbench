@@ -34,9 +34,23 @@ describe("normalizeSettings", () => {
 
   // 顶层字段此前已做类型校验（实测 localComfyUrl=123 会抛英文 replace 错误）。
   it("顶层字符串字段类型错误时回落默认值", () => {
-    const result = normalizeSettings({ localComfyUrl: 123 as never, rbBaseUrl: "   " }, defaults);
+    const result = normalizeSettings({ localComfyUrl: 123 as never, rbBaseUrl: { a: 1 } as never }, defaults);
     expect(result.localComfyUrl).toBe(defaults.localComfyUrl);
     expect(result.rbBaseUrl).toBe(defaults.rbBaseUrl);
+  });
+
+  /**
+   * **纯空格不是"没给"，是"给了但等于没填"** —— 与服务地址的空串语义一致。
+   *
+   * 这条原本把 `rbBaseUrl: "   "` 与"类型错误"写在同一个用例里，断言它回落默认值。
+   * 但 `rbBaseUrl` 现在是允许空的字段（清空地址必须真的生效），
+   * 纯空格与空串同属"未配置"，不该被悄悄换成默认服务地址。
+   * 两个意图不同，拆开表达才看得清。
+   */
+  it("服务地址是纯空格时保留（视为未配置），不回落默认值", () => {
+    const result = normalizeSettings({ rbBaseUrl: "   ", minimaxBaseUrl: "  " }, defaults);
+    expect(result.rbBaseUrl.trim()).toBe("");
+    expect(result.minimaxBaseUrl.trim()).toBe("");
   });
 
   it("允许为空的顶层字段保留空串", () => {

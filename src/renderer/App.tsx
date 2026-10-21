@@ -412,10 +412,15 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       onError(error);
     }
   }
+  // 同 `submit` / `purge`：`activeProject` 在 await 前后不变，连点会重复发 `tasks:delete`。
+  // 软删除本身幂等，但每次都会派发 `h3-tasks-changed` 并弹一次「已移入回收站」，
+  // 且第二次之后 `activeProjectId` 已被清空、后续逻辑读到的是上一帧的旧项目。
+  const deletingRef = useRef(false);
   async function deleteProject() {
-    if (!activeProject) return;
-    // 传任一真实任务 id，orchestrator 按 parentId 整组软删除。
+    if (!activeProject || deletingRef.current) return;
+    deletingRef.current = true;
     try {
+      // 传任一真实任务 id，orchestrator 按 parentId 整组软删除。
       const response = await window.h3.deleteTasks([activeProject[0].id]);
       if (!response.ok) { onError(response.message); return; }
       setActiveProjectId(undefined);
@@ -423,6 +428,8 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       window.dispatchEvent(new Event("h3-tasks-changed"));
     } catch (error) {
       onError(error);
+    } finally {
+      deletingRef.current = false;
     }
   }
   return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="page-title-actions"><button className="text-button" onClick={() => setShowTrash((v) => !v)}>🗑 回收站</button><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div></div>
@@ -533,27 +540,50 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
     return Math.max(0, Math.ceil((retentionMs - (Date.now() - time)) / 86_400_000));
   };
   const notifyChanged = () => window.dispatchEvent(new Event("h3-tasks-changed"));
+  // 同 `purge` 的同步守卫：连点「恢复」会重复发请求，第二、三次作用在已恢复的记录上，
+  // 界面会闪出一次「已恢复」之后又报错（或反之），用户不知道到底恢复没恢复。
+  const restoringRef = useRef(false);
   // 回收站两个操作同样要兜住 IPC reject：否则点了没反应，也没有任何提示。
   async function restore(ids: string[]) {
+    if (restoringRef.current) return;
+    restoringRef.current = true;
     try {
       const r = await window.h3.restoreTasks(ids);
       if (!r.ok) { onError(r.message); return; }
-      onNotice("已恢复");
+      const back = r.data?.length ?? 0;
+      onNotice(back > 0 ? `已恢复 ${back} 条` : "这些项目已不在回收站，刷新后即可看到最新状态");
       notifyChanged();
       void refresh();
     } catch (error) {
       onError(error);
+    } finally {
+      restoringRef.current = false;
     }
   }
+  // **彻底删除不可逆**，重复执行最不该发生：实测连点「确认删除」3 次，
+  // 主进程真的收到 3 次 `tasks:purge`（用临时日志计数复现）。
+  // 目前第 2、3 次恰好是"空删"（targets 已空、unlinkIfInside 对不存在文件静默返回），
+  // 不造成数据损坏；但这是靠下游几个实现细节叠出来的巧合，不是这里守住了。
+  // 且第 2、3 次会各自走一遍 store.save，提示文案也与实际执行次数脱节。
+  const purgingRef = useRef(false);
   async function purge(ids: string[]) {
+    if (purgingRef.current) return;
+    purgingRef.current = true;
     try {
       const r = await window.h3.purgeTasks(ids);
       if (!r.ok) { onError(r.message); return; }
-      onNotice("已彻底删除（含视频文件）");
+      // 提示必须用**主进程实际清掉的条数**，而不是固定文案。
+      // 一是让"点了但什么都没删到"这种情况能看见（空数组 = 记录已被别处清掉），
+      // 二是守卫若将来失效，重复执行会立刻在文案上暴露（"已彻底删除 0 条"），
+      // 不会再像旧文案那样连点三次都说"已彻底删除"、无从分辨。
+      const removed = r.data?.length ?? 0;
+      onNotice(removed > 0 ? `已彻底删除 ${removed} 条（含视频文件）` : "这些项目已不在回收站，刷新后即可看到最新状态");
       notifyChanged();
       void refresh();
     } catch (error) {
       onError(error);
+    } finally {
+      purgingRef.current = false;
     }
   }
   return <section className="trash-panel">

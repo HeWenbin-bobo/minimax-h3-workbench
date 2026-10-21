@@ -1012,10 +1012,12 @@ function registerIpc(
       // 本地模型表把窗口估小了——记下来，并在气泡里说清"下一轮会自动压缩"，
       // 而不是把上游的英文报错原样糊给用户。
       sessionBudgets.set(session, { ...budgetFor(session), window: markWindowExceeded(budgetFor(session).window) });
-      // 文案要与实际行为一致：普通对话会在当轮自动压缩并重试（见下面的 catch），
-      // 所以这里**不能**再说"下一条消息会自动压缩"——那会让人以为要手动重发
-      // （旧文案就是这样，实测用户真的去重发了一遍）。
-      chunk({ seq: 1, delta: "（本轮上下文超出模型可接受的长度，正在自动压缩历史后重试…）\n\n" });
+      // **文案不能承诺"一定会重试"**（实测缺陷 2026-10-21）：
+      // 智能体分支里若这一轮已经产出过副作用（建了任务 / 落了文件 / 改过文件 / 问过用户），
+      // 我们**不会**重试（重跑会重复扣费或重复写文件），而是直接收尾。
+      // 旧文案写死"正在自动压缩历史后重试…"，那种情况下用户会一直等着一个不会发生的重试。
+      // 现在只说"已超出长度、正在处理"，由调用方在确实重试时再补一句。
+      chunk({ seq: 1, delta: "（本轮上下文超出模型可接受的长度，正在压缩历史…）\n\n" });
       return true;
     };
     // 上下文压缩前置：超阈值才动手，未超时原样透传（零回归）。
@@ -1114,6 +1116,9 @@ function registerIpc(
             return;
           }
           // 走到这里说明确实是超窗：上面已置 forceCompact，重新压缩后再试一次。
+          // **这里确实会重试**，所以补一句（`noteContextOverflow` 本身不再承诺重试——
+          // 智能体分支在"已产出副作用"时是不重试的）。
+          chunk({ seq: 1, delta: "已压缩，正在重试这一次…\n\n" });
           try {
             const retried = await maybeCompact(session, safeHistory, "auto", controller.signal);
             effective = retried.messages;
@@ -2044,7 +2049,19 @@ ${tableNote}` : ""}`;
           // 重跑会让它再落一份或再扣一次费（这与下面 `producedSideEffects` 是同一条判据）。
           if (noteContextOverflow(error)) {
             const alreadyProduced = agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0 || agentQuestionCount > 0;
-            if (alreadyProduced) { done({ ok: true }); return; }
+            if (alreadyProduced) {
+              // **这一轮到此为止，而且没做完**——必须说清楚。
+              // 不重试是因为已经产出过东西（重跑会重复落文件/重复扣费），
+              // 但用户需要知道"现在停在这里、不是正常收尾"，
+              // 否则他会以为任务已完整结束（实测：旧文案停在"正在重试…"，之后什么都没发生）。
+              chunk({
+                seq: 1,
+                delta: `（本轮因上下文超长而中断，**没有做完**。这一轮已经产出了东西，重新跑会重复创建/重复写入，所以没有自动重试。可以点输入框右侧的「上下文」立刻压缩，然后回复「继续」让我接着做。）\n\n`
+              });
+              done({ ok: true });
+              return;
+            }
+            chunk({ seq: 1, delta: "已压缩，正在重试这一次…\n\n" });
             try {
               const retried = await maybeCompact(session, safeHistory, "auto", controller.signal);
               effective = retried.messages;

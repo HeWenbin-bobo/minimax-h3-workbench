@@ -35,6 +35,55 @@ const MAX_RESULTS = 6;
 // 带浏览器 UA：部分搜索源对无 UA/爬虫 UA 直接返回反爬页。
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+/**
+ * 抓取搜索结果页时**读取的上限**（字节）。
+ *
+ * 为什么必须设（实测 2026-10-21）：`scrapeBing` / `scrapeSogou` 原本用裸 `response.text()`，
+ * 把整个响应体读进内存且**没有任何上限**。实测正常搜索页：Bing 98KB、**搜狗 1069KB**——
+ * 已经接近 1MB。若搜索源被重定向到大文件（或被中间层替换成大页面），
+ * 主进程会一口气吃掉几十 MB，而这段代码跑在"等结果"的关键路径上。
+ *
+ * 4MB 的取值：足够容纳实测最大页面（1MB）的 4 倍余量，又远小于可能的内存风险线。
+ * 超限部分直接丢弃——搜索结果只需要前若干条，截断位置几乎必然落在有效结果之后。
+ */
+const MAX_HTML_BYTES = 4 * 1024 * 1024;
+
+/**
+ * 读取响应体文本，**带上限**。
+ *
+ * 不用 `response.text()`：它没有"读到多少就停"的能力。
+ * 这里流式读，累计到上限就 cancel 流（与 `consumeSse` 读完主动 cancel 同一理由：
+ * 只 releaseLock 不会断开底层连接）。
+ */
+async function readTextCapped(response: Response, maxBytes = MAX_HTML_BYTES): Promise<string> {
+  const body = response.body;
+  if (!body) return await response.text().catch(() => "");
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      text += decoder.decode(value, { stream: true });
+      if (bytes >= maxBytes) {
+        // 超限：主动断开，别让连接挂在那儿
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+    text += decoder.decode();
+    return text;
+  } catch {
+    // 读失败（连接中断等）：返回已读到的部分——搜索有结果总比整段丢掉好
+    return text;
+  } finally {
+    try { reader.releaseLock(); } catch { /* 已 cancel，忽略 */ }
+  }
+}
+
 /** 搜索并返回给模型阅读的参考段落（格式与既有实现一致：[n] 标题\n链接\n摘要）。 */
 export async function searchWeb(query: string, options: WebSearchOptions, signal?: AbortSignal): Promise<string> {
   const failures: string[] = [];
@@ -155,7 +204,7 @@ async function scrapeBing(query: string, signal?: AbortSignal): Promise<SearchRe
     signal: requestSignal(signal, 20_000)
   });
   if (!response.ok) throw new Error(`Bing 返回 ${response.status}`);
-  return parseBing(await response.text()).slice(0, MAX_RESULTS);
+  return parseBing(await readTextCapped(response)).slice(0, MAX_RESULTS);
 }
 
 async function scrapeSogou(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
@@ -164,7 +213,7 @@ async function scrapeSogou(query: string, signal?: AbortSignal): Promise<SearchR
     signal: requestSignal(signal, 20_000)
   });
   if (!response.ok) throw new Error(`搜狗返回 ${response.status}`);
-  return parseSogou(await response.text()).slice(0, MAX_RESULTS);
+  return parseSogou(await readTextCapped(response)).slice(0, MAX_RESULTS);
 }
 
 /**

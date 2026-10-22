@@ -472,6 +472,17 @@ button { cursor: pointer; }
 .pg-msg.assistant .pg-bubble { background: var(--surface); border: 0; border-radius: 0; padding: 0; }
 .pg-msg.assistant { max-width: 100%; }
 .pg-msg.user .pg-bubble { background: var(--brand-gradient); color: #fff; border: 0; }
+/* 长用户消息（附件全文会拼进来）：默认只显示开头，避免一整面墙把 AI 回复顶到很远。
+   实测 3000 行附件曾把气泡撑到 54091px 高（probe-long-attachment）。
+   这里再加一层高度上限兜底：即使预览段本身很长，也不会无界撑开。
+
+   **渐变必须与气泡底色同色系**：用户气泡是 `--brand-gradient`（#e0195c 系），
+   第一版这里写成了紫色 rgba(122,39,255)，红底上横一条紫带，很扎眼。
+   取 --brand-gradient 中间那个色标（#d41450）作为淡出终点。 */
+.pg-msg.user .pg-user-clip { max-height: 220px; overflow: hidden; position: relative; }
+.pg-msg.user .pg-user-clip::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 48px; background: linear-gradient(rgba(212, 20, 80, 0), rgba(212, 20, 80, 0.92)); pointer-events: none; }
+.pg-msg.user .pg-user-more { margin-top: 6px; background: rgba(255, 255, 255, 0.18); color: #fff; border: 0; border-radius: 8px; padding: 3px 10px; font-size: 11px; cursor: pointer; }
+.pg-msg.user .pg-user-more:hover { background: rgba(255, 255, 255, 0.3); }
 .pg-msg.user .pg-bubble code { background: rgba(255, 255, 255, 0.18); color: #fff; }
 .pg-msg.user .pg-bubble a { color: #fff; }
 .pg-msg.assistant .pg-bubble p { margin: 0 0 8px; }
@@ -658,6 +669,8 @@ button { cursor: pointer; }
    必须给「跳过」出口——否则用户不想答时只能干等 3 分钟超时。 */
 .pg-question-card { margin-top: 8px; border: 1px solid var(--brand-border); border-radius: 12px; background: var(--brand-wash-strong); padding: 12px 14px; display: grid; gap: 11px; }
 .pg-question-head { color: var(--pink); font-size: 10px; font-weight: 800; letter-spacing: 0.04em; }
+/* 时限说明：比正文淡一档、字号同标题，是"补充信息"而非强调。 */
+.pg-question-hint { color: var(--muted); font-size: 10px; line-height: 1.5; margin-top: -4px; }
 .pg-question { display: grid; gap: 7px; }
 .pg-question-title { color: var(--ink); font-size: 11.5px; line-height: 1.65; display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
 .pg-question-chip { flex: none; border-radius: 20px; background: var(--brand-wash); color: var(--pink); font-size: 9px; font-weight: 700; padding: 2px 8px; }
@@ -670,6 +683,12 @@ button { cursor: pointer; }
 .pg-question-actions { display: flex; align-items: center; gap: 10px; }
 .pg-question-skip { border: 0; background: transparent; color: var(--muted); font-size: 10px; text-decoration: underline; padding: 4px 2px; }
 .pg-question-skip:hover { color: var(--ink); }
+/* 逐题推进时的「第 2/3 题」（模型一次问 3 题时，用户得知道还剩几题）。 */
+.pg-question-step { margin-left: 8px; color: var(--muted); font-weight: 700; letter-spacing: 0; }
+/* 选项列表的最后一项永远是可自由输入的（预设选项覆盖不完真实需求）。 */
+.pg-question-custom { display: grid; gap: 4px; cursor: text; }
+.pg-question-custom input { width: 100%; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 7px; padding: 6px 9px; font: inherit; font-size: 11px; color: var(--ink); outline: 0; }
+.pg-question-custom input:focus { border-color: var(--pink); }
 .pg-video-form { margin: 10px 16px 0; padding: 13px; border: 1px dashed var(--brand-border); background: var(--brand-wash-strong); border-radius: 12px; display: grid; gap: 4px; }
 .pg-video-form label { color: var(--muted); font-size: 10px; display: block; }
 .pg-video-form input, .pg-video-form select, .pg-video-form textarea { width: 100%; margin-top: 4px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; font: inherit; outline: 0; }

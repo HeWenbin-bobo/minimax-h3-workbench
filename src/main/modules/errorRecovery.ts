@@ -1,3 +1,5 @@
+import { retryAfterHeaderOf } from "../../shared/errors";
+
 /**
  * 上游错误恢复（移植 OpenAI Codex `core/src/responses_retry.rs` 的三条做法）。
  *
@@ -14,10 +16,11 @@
 /** 从错误对象/响应里提取 Retry-After（秒）。找不到返回 undefined。 */
 export function parseRetryAfter(error: unknown): number | undefined {
   if (!error || typeof error !== "object") return undefined;
-  // AI SDK 的 APICallError 把响应头挂在 responseHeaders；不同版本大小写不一。
-  const headers = (error as { responseHeaders?: Record<string, string> }).responseHeaders;
-  const raw = headers?.["retry-after"] ?? headers?.["Retry-After"];
-  if (raw) {
+  // **必须认包裹果**（实测 2026-10-22）：智能体路径拿到的是 SDK 的 `AI_RetryError`，
+  // 它顶层的 `responseHeaders` 是 undefined，真实的 retry-after 在 `lastError` 上。
+  // 只读顶层 → 永远拿不到服务端明写的冷却时长，"尊重 retry-after" 形同虚设。
+  const raw = retryAfterHeaderOf(error);
+  if (raw !== undefined) {
     const seconds = Number(raw);
     if (Number.isFinite(seconds) && seconds >= 0) return seconds;
     // 也可能是 HTTP-date 格式。解析失败就算了，不值得为此引入日期库。

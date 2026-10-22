@@ -34,9 +34,23 @@ describe("normalizeSettings", () => {
 
   // 顶层字段此前已做类型校验（实测 localComfyUrl=123 会抛英文 replace 错误）。
   it("顶层字符串字段类型错误时回落默认值", () => {
-    const result = normalizeSettings({ localComfyUrl: 123 as never, rbBaseUrl: "   " }, defaults);
+    const result = normalizeSettings({ localComfyUrl: 123 as never, rbBaseUrl: { a: 1 } as never }, defaults);
     expect(result.localComfyUrl).toBe(defaults.localComfyUrl);
     expect(result.rbBaseUrl).toBe(defaults.rbBaseUrl);
+  });
+
+  /**
+   * **纯空格不是"没给"，是"给了但等于没填"** —— 与服务地址的空串语义一致。
+   *
+   * 这条原本把 `rbBaseUrl: "   "` 与"类型错误"写在同一个用例里，断言它回落默认值。
+   * 但 `rbBaseUrl` 现在是允许空的字段（清空地址必须真的生效），
+   * 纯空格与空串同属"未配置"，不该被悄悄换成默认服务地址。
+   * 两个意图不同，拆开表达才看得清。
+   */
+  it("服务地址是纯空格时保留（视为未配置），不回落默认值", () => {
+    const result = normalizeSettings({ rbBaseUrl: "   ", minimaxBaseUrl: "  " }, defaults);
+    expect(result.rbBaseUrl.trim()).toBe("");
+    expect(result.minimaxBaseUrl.trim()).toBe("");
   });
 
   it("允许为空的顶层字段保留空串", () => {
@@ -90,5 +104,71 @@ describe("normalizeSettings", () => {
 
   it("空对象整体走默认值", () => {
     expect(normalizeSettings({}, defaults)).toEqual(defaults);
+  });
+});
+
+/**
+ * 用户名**空串是有语义的**（未配置），不能回落到默认值 `"root"`。
+ *
+ * 实测缺陷（probe-assert-usable）：用户在连接设置里清空用户名并保存后，
+ * `str()` 把空串换成默认 `"root"` 写回磁盘——界面看起来清空了、读回来又是 root；
+ * 更糟的是 `assertUsable("ssh")` 的判据是"host 与 username 都非空"，
+ * 被这个假值骗过而放行，建出一条注定失败的任务（用户还得手动删）。
+ *
+ * 与 `host` / `comfyuiRoot` 同一口径：空串 = 未配置，原样保留。
+ */
+describe("normalizeSettings：ssh 用户名允许为空", () => {
+  it("显式传空串时保持空（不回落到 root）", () => {
+    expect(normalizeSettings({ ssh: { username: "" } as never }, defaults).ssh.username).toBe("");
+  });
+
+  it("只填空格也视为空（trim 后为空同样是未配置）", () => {
+    const result = normalizeSettings({ ssh: { username: "   " } as never }, defaults);
+    // 保留原值还是 trim 成空串都可以接受，唯独不能变成 "root"。
+    expect(result.ssh.username.trim()).toBe("");
+  });
+
+  it("非字符串（数字/null/对象）仍回落默认值", () => {
+    for (const bad of [123, null, {}, []]) {
+      expect(normalizeSettings({ ssh: { username: bad } as never }, defaults).ssh.username, JSON.stringify(bad))
+        .toBe(defaults.ssh.username);
+    }
+  });
+
+  it("不传 username 时仍是默认值（区分'没给'与'给了空串'）", () => {
+    expect(normalizeSettings({ ssh: { host: "1.2.3.4" } as never }, defaults).ssh.username).toBe(defaults.ssh.username);
+  });
+});
+
+/**
+ * **地址空串 = 未配置，不能回落成默认地址**（实测缺陷 probe-no-backend, 2026-10-21）。
+ *
+ * 旧实现 `str(raw.localComfyUrl, defaults.localComfyUrl)` 会把空串换成默认的
+ * `http://127.0.0.1:8188`。后果很具体：用户清空地址表达"不想用本机"后，
+ * `backendAvailability` 仍判"本机可用"，`generate_video` 的准入闸门放行，
+ * **在没有任何可用后端的情况下建出一条注定失败的任务**，
+ * 工具回执还写着「已创建 1 个视频生成任务：后端=本机 ComfyUI」。
+ *
+ * 与 host / username / comfyuiRoot 同一口径：空串是有语义的"未配置"。
+ */
+describe("normalizeSettings：本机 ComfyUI 地址允许为空", () => {
+  it("显式传空串时保持空（不回落到默认 :8188）", () => {
+    expect(normalizeSettings({ localComfyUrl: "" }, defaults).localComfyUrl).toBe("");
+  });
+
+  it("只填空格也视为空（trim 后为空同样是未配置）", () => {
+    const result = normalizeSettings({ localComfyUrl: "   " }, defaults);
+    expect(result.localComfyUrl.trim()).toBe("");
+  });
+
+  it("非字符串（数字/null/对象）仍回落默认值", () => {
+    for (const bad of [123, null, {}, []]) {
+      expect(normalizeSettings({ localComfyUrl: bad } as never, defaults).localComfyUrl, JSON.stringify(bad))
+        .toBe(defaults.localComfyUrl);
+    }
+  });
+
+  it("不传该字段时仍是默认值（区分「没给」与「给了空串」）", () => {
+    expect(normalizeSettings({}, defaults).localComfyUrl).toBe(defaults.localComfyUrl);
   });
 });

@@ -166,4 +166,23 @@ export class QuestionBridge {
     for (const entry of this.pending.values()) if (entry.sessionId === sessionId) return true;
     return false;
   }
+
+  /**
+   * 取出该会话当前挂起的问题（含 requestId），没有则 `undefined`。
+   *
+   * 为什么需要（实测缺陷 probe-question-while-away）：渲染端切页会卸载 `PlaygroundPage`，
+   * 那段时间 `llm:question` 事件**没有订阅者、被直接丢弃**，而这里仍在挂起等回答
+   * （最长 `DEFAULT_QUESTION_TIMEOUT_MS`）。用户切回来时看不到卡片，
+   * 只能干等到超时——AI 那边还以为在等人。
+   *
+   * 渲染端挂载时调一次本方法（经 IPC）即可把丢掉的那张卡片补回来。
+   * 同一会话同时只会有**一个**挂起项（`ask` 由工具循环串行驱动）。
+   */
+  pendingFor(sessionId: string): { requestId: string; questions: AgentQuestion[] } | undefined {
+    for (const [requestId, entry] of this.pending) {
+      if (entry.sessionId !== sessionId) continue;
+      return { requestId, questions: entry.questions };
+    }
+    return undefined;
+  }
 }

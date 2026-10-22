@@ -40,6 +40,48 @@ describe("section 正文", () => {
     expect(text).toContain("2026年3月14日");
     expect(text).toContain("周六");
   });
+
+  // 实测真机（2026-10-20）：智能体直接从默认后端开跑，没问过"用哪个方式生成"。
+  // 现在要求它先问——但它看不到「连接设置」，必须由世界状态告诉它**哪些真的配好了**。
+  // 不筛的话它会把没配密钥的云端选项摆给用户，选了必然失败。
+  describe("视频生成后端清单", () => {
+    it("不传时不出现该 section（不影响既有 section 顺序）", () => {
+      const ids = buildSections(baseInput).map((s) => s.id);
+      expect(ids).toEqual(["current_time", "network_access", "artifacts"]);
+    });
+
+    it("列出可用后端，并要求先问用户", () => {
+      const text = buildSections({
+        ...baseInput,
+        videoBackends: [
+          { kind: "local", label: "本机 ComfyUI", note: "不额外计费，用本机显卡" },
+          { kind: "minimax", label: "MiniMax H3", note: "云端按秒计费" }
+        ]
+      }).find((s) => s.id === "video_backends")!.render();
+      expect(text).toContain("`local`");
+      expect(text).toContain("`minimax`");
+      expect(text).toContain("先问用户选哪个");
+      // 花费差异必须写出来，否则模型不知道"为什么要问"。
+      expect(text).toMatch(/计费|扣卡密/);
+      expect(text).toContain("不要自己挑");
+    });
+
+    it("只有一个可用时，不必给用户列选项", () => {
+      const text = buildSections({
+        ...baseInput,
+        videoBackends: [{ kind: "local", label: "本机 ComfyUI" }]
+      }).find((s) => s.id === "video_backends")!.render();
+      expect(text).toContain("只有一个可用");
+      expect(text).toContain("这轮只能走本机 ComfyUI");
+    });
+
+    it("一个都没有时禁止调用 generate_video，并指向「连接设置」", () => {
+      const text = buildSections({ ...baseInput, videoBackends: [] }).find((s) => s.id === "video_backends")!.render();
+      expect(text).toContain("没有任何可用的视频生成后端");
+      expect(text).toContain("不要调用 generate_video");
+      expect(text).toContain("连接设置");
+    });
+  });
 });
 
 describe("diffWorldState 注入", () => {

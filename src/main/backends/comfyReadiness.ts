@@ -32,14 +32,60 @@ export function inspectH3Readiness(input: unknown): {
   return { hasH3Nodes, missingModels };
 }
 
+/**
+ * 从 `/object_info` 的一个输入定义里取出**可选值列表**。
+ *
+ * 定义形如 `[<第一项>, { ...输入元信息 }]`，而"第一项"在不同 ComfyUI 版本里有这几种写法：
+ *
+ * 1. **裸数组**（旧版/自定义节点直接返回列表）：`[["a.safetensors", "b.safetensors"], {}]`
+ * 2. **COMBO 类型 + options**（新版 `comfy_api`）：`[["COMBO", { options: ["a", "b"] }], {}]`
+ * 3. **非下拉**（例如 `["STRING", {...}]`）—— 不是选项列表，返回空
+ *
+ * **只认第 1 种会误报"模型缺失"**：新版返回第 2 种时，`choices` 是 `["COMBO", {...}]`，
+ * 过滤出字符串后只剩 `["COMBO"]`，于是每个模型都判成"不在列表里"——
+ * 用户本机模型装得好好的，界面却让他去下载 5 个模型（约 60GB）。
+ * 这类"看不见版本差异就误报"的错误比不检测更糟，所以两种都要认。
+ *
+ * **键名已按真实源码核对过**（ComfyUI 0.3.47，`comfy_api/latest/_io.py`）：
+ * `Combo.Input.as_dict()` 产出的键是 `options`；`add_to_dict_v1()` 把输入定义序列化成
+ * `(输入类型, as_dict())`，即上面的第 2 种。全仓搜索没有 `values` 这个键——
+ * 早先我按"社区自定义节点可能这么写"加过一条 `values` 兜底，那是**没有依据的猜测**，
+ * 注释已改正（代码仍保留它，见 `choiceList` 的说明）。
+ */
 function inputChoices(nodes: JsonObject, className: string, inputName: string): string[] {
   const node = objectValue(nodes[className]);
   const input = objectValue(node?.input);
   const required = objectValue(input?.required);
   const definition = required?.[inputName];
   if (!Array.isArray(definition)) return [];
-  const choices = definition[0];
-  return Array.isArray(choices) ? choices.filter((value): value is string => typeof value === "string") : [];
+  const first = definition[0];
+  // ① 裸数组：元素都是字符串
+  if (Array.isArray(first)) {
+    const strings = first.filter((value): value is string => typeof value === "string");
+    // ② 新版 `["COMBO", { options: [...] }]`：首元素是类型名、次元素带选项列表
+    if (strings.length === 1 && strings[0].toUpperCase() === "COMBO") {
+      return choiceList(objectValue(first[1]));
+    }
+    return strings;
+  }
+  // ③ `[{ options: [...] }, {...}]`（少数自定义节点把 choices 包成对象）
+  return choiceList(objectValue(first));
+}
+
+/**
+ * 从一个"包了一层的选项对象"里取字符串列表。
+ *
+ * 主键是 `options`（ComfyUI 0.3.47 源码里的唯一写法，见 `inputChoices` 的说明）。
+ * `values` 是**防御性兜底**：它在官方源码里不存在，只是自定义节点理论上可能这么写。
+ * 保留它的理由只有一条——读不存在的键没有副作用，而漏判会让用户被要求去下 60GB 模型。
+ * 它不构成"我们支持这种格式"的承诺，注释里不写"不同版本会这样"这类没有依据的话。
+ */
+function choiceList(meta: JsonObject | undefined): string[] {
+  for (const key of ["options", "values"] as const) {
+    const list = meta?.[key];
+    if (Array.isArray(list)) return list.filter((value): value is string => typeof value === "string");
+  }
+  return [];
 }
 
 function objectValue(value: unknown): JsonObject | undefined {

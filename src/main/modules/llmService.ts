@@ -1,6 +1,7 @@
-import { describeError } from "../../shared/errors";
+import { describeError, isNetworkError, isRetriableHttpStatus } from "../../shared/errors";
 import type { ChatMessage, LlmStreamEvent } from "../../shared/types";
 import { sliceSafe } from "../../shared/text";
+import { retryDelayMs } from "./errorRecovery";
 import { searchWeb } from "./webSearch";
 
 export interface LlmServiceOptions {
@@ -51,6 +52,49 @@ export class LlmService {
     if (!this.options.apiKey && !/127\.0\.0\.1|localhost/.test(this.baseUrl)) {
       throw new Error("请先在连接设置中保存游乐场 LLM 的 API Key。");
     }
+    /**
+     * **首字节前的网络抖动自动重试一次**（对齐智能体路径的整轮重试）。
+     *
+     * 为什么需要（实测的不对称）：智能体路径有 3 次整轮重试 + 退避
+     * （见 main.ts 的 `isNetworkError` 分支），而普通对话**一次都不重试**——
+     * 同一个中转 ECONNRESET，开着智能体能扛过去，关掉就直接报错。
+     * 用户看不出这两条路径的区别，只会觉得"有时好有时坏"。
+     *
+     * 三条边界（少一条都会出事）：
+     * ① **只在还没吐出任何内容时重试**：已经发了一半再重来，同一个气泡里会出现两份开头；
+     * ② **只重试网络类错误**：HTTP 4xx（Key 错、模型名错）重试必然同样失败，白等一轮；
+     * ③ **用户点了停止就立刻退出**：不能让重试把「停止」拖成"点了没反应"。
+     */
+    const produced = { any: false };
+    const trackedSend: ChunkSender = (event) => {
+      if (typeof event.delta === "string" && event.delta) produced.any = true;
+      send(event);
+    };
+    const MAX_ATTEMPTS = 2;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await this.chatOnce(messages, webSearch, trackedSend, browserOnly);
+        return;
+      } catch (error) {
+        const aborted = error instanceof DOMException && error.name === "AbortError";
+        // **限流与临时故障也值得重试一次**（实测缺口）：原先只重试"网络类错误"，
+        // 于是上游明确回 429「retry after 2 seconds」时，我们**一次都不等就直接失败** ——
+        // 明明等两秒就能成功。Codex 的 `responses_retry.rs` 正是为此尊重 retry-after。
+        // 只放 429 与 5xx：401/403/404/400 这类重试必然同样失败，白等一轮。
+        const retriableStatus = isRetriableHttpStatus(error);
+        const retryable = !aborted && !produced.any && attempt < MAX_ATTEMPTS
+          && (isNetworkError(error) || retriableStatus);
+        if (!retryable) throw error;
+        // 退避：默认 800ms（给中转的抖动窗口一点时间，又不至于让用户觉得卡住）；
+        // 服务端给了 retry-after 就听它的（上限 30 秒——超过就按自己的节奏试完再如实回落，
+        // 让用户早点看到结果，好过守着一个遥远的约定）。
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(error, 800)));
+      }
+    }
+  }
+
+  /** 单次尝试（原 `chat` 的主体）。重试逻辑在外层 `chat`，这里只负责发一次。 */
+  private async chatOnce(messages: ChatMessage[], webSearch: boolean, send: ChunkSender, browserOnly: boolean): Promise<void> {
     // 控制器必须**先建**再准备载荷：`buildPayload` 里含联网搜索（浏览器渲染可达数十秒），
     // 期间若 busy 仍是 false，同会话并发守卫失效（用户能再发一条，两股流抢同一个气泡）；
     // 用户点「停止」也没有 controller 可中止，只能干等搜索跑完。
@@ -103,7 +147,17 @@ export class LlmService {
       }
       if (!response.ok || !response.body) {
         const detail = await response.text().catch(() => "");
-        throw new Error(httpFailureMessage(response.status, detail));
+        const failure = new Error(httpFailureMessage(response.status, detail)) as Error & {
+          status?: number;
+          responseHeaders?: Record<string, string>;
+        };
+        // **把状态码与响应头带出来**（实测缺口）：上层重试逻辑要用 `retry-after` 决定等多久，
+        // 而原先只抛一个字符串，头信息在这里就丢了——于是 `parseRetryAfter` 永远读不到
+        // 服务端明写的 "retry after 2 seconds"，429 只能直接失败。
+        failure.status = response.status;
+        const retryAfter = response.headers.get("retry-after");
+        if (retryAfter !== null) failure.responseHeaders = { "retry-after": retryAfter };
+        throw failure;
       }
       // 流式响应走 SSE 解析；服务商忽略 stream:true 返回完整 JSON 时，从非流式结构取内容。
       const contentType = response.headers.get("content-type") || "";
@@ -313,12 +367,21 @@ function firstNonEmpty(...values: Array<string | undefined>): string | undefined
  * 时才截取其中的 message。HTML / 空体一律不回显。
  */
 function httpFailureMessage(status: number, body: string): string {
+  const detail = extractApiErrorMessage(body);
+  // **400 里有一类能直接给出结论的**（实测 probe-image-unsupported）：模型不收图片时，
+  // 上游回的是 `image_url is not supported by this model`，而通用文案会让用户去改
+  // API Key 与模型名——Key 是对的、模型名也是对的，改哪个都没用。
+  // 图片是我们自己拼进请求的（`normalizeHistory` 按模型名猜它能不能收图，猜错时把图留下了），
+  // 所以这里能确定"图上出了问题"，并给出真正可行的两步。
+  if ((status === 400 || status === 422) && /image|图像|图片|multi.?modal|vision/i.test(detail)
+    && /not support|unsupported|invalid|不支持/i.test(detail)) {
+    return `当前模型不接受图片输入（服务商说明：${detail}）。可以：① 到「连接设置」换一个视觉模型；② 去掉图片，改用文字描述后再发一次。`;
+  }
   const hint = status === 401 || status === 403 ? "请到「连接设置」检查 API Key 是否正确、是否已过期。"
     : status === 404 ? "请检查 API 地址与模型名（有些服务商的路径不是 /v1）。"
       : status === 429 ? "请求过于频繁或额度已用尽，请稍后重试。"
         : status >= 500 ? "服务商侧异常（可能是临时故障或网关错误），请稍后重试。"
           : "请检查连接设置中的地址、Key 与模型名。";
-  const detail = extractApiErrorMessage(body);
   return `LLM 请求失败（HTTP ${status}）。${hint}${detail ? `\n服务商说明：${detail}` : ""}`;
 }
 
@@ -388,7 +451,7 @@ export interface AgentToolCallbacks {
   /** 联网搜索工具：返回参考段落（未配置搜索 API 时抛错）。 */
   webSearch: (query: string) => Promise<string>;
   /** 视频生成工具：提交生成任务并返回给用户的说明文本。 */
-  generateVideo: (params: { prompt: string; duration: number; count: number }) => Promise<string>;
+  generateVideo: (params: { prompt: string; duration: number; count: number; backend?: string }) => Promise<string>;
   /** 打开网页工具（open_page）：用应用自带 Chromium 渲染指定 URL 并返回**可见正文**（innerText），让模型能真正"打开浏览器"。 */
   openPage: (url: string) => Promise<string>;
   /** 文件产物工具（create_file）：把内容保存为文件并返回给模型的确认文本。 */
@@ -430,6 +493,18 @@ export interface AgentToolCallbacks {
    * 与"拿到了答案"，从而按最佳判断继续而不是以为用户什么都没选。
    */
   requestUserInput: (params: { questions: AgentQuestion[] }) => Promise<string>;
+  /**
+   * 算数工具（compute）：对**本会话产物**里的某一列做确定性统计。
+   *
+   * 为什么需要（真机实测，2026-10-21）：让模型统计 5000 行 CSV 的温度均值，
+   * 它读了 400 行后拒绝给平均值——「我没有可执行的代码工具用来对 399 个数求和，
+   * 只靠逐行心算平均值得出的数字是编出来的」。那是**正确**的回答，
+   * 但也说明我们缺了 Codex 有而我们没有的一环：算数能力。
+   *
+   * **只做确定性统计，不做任意代码执行**（没有 shell / eval / vm）：
+   * 本应用的安全红线不允许，也不需要——min/max/sum/mean/median/stdDev 覆盖绝大多数场景。
+   */
+  compute: (params: { name: string; column?: string | number; values?: number[] }) => Promise<string>;
 }
 
 /** 交互提问的一道题。与 Codex `request_user_input` 的 schema 一致。 */
@@ -439,6 +514,126 @@ export interface AgentQuestion {
   question: string;
   multiSelect?: boolean;
   options: Array<{ id: string; label: string; description: string }>;
+}
+
+/** 把任意值读成去空白后的字符串（模型给数字/布尔/对象都不该让整轮失效）。 */
+function asText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+/** 「是否多选」：模型会写 `"yes"` / `"true"` / `1` / `"是"`，一律按真值理解。 */
+function asBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (["true", "yes", "y", "1", "是", "对", "多选"].includes(text)) return true;
+    if (["false", "no", "n", "0", "否", "不是", "单选"].includes(text)) return false;
+  }
+  return undefined;
+}
+
+/**
+ * 把选项归一成 `{ id, label, description }` 数组。
+ *
+ * 为什么要吃得这么杂（实测 probe-question-shapes）：模型表达"几个选项"的方式至少有五种——
+ * `[{id,label,description}]`、`[{id,label}]`、`["6 秒","15 秒"]`、`{ a: "6 秒" }`、
+ * 单个字符串 `"6 秒"`。**这些形状原先全部被 zod 在 `parseToolCall` 阶段拒掉**，
+ * 整个调用被静默跳过（9 种形状里 7 种中招），界面上什么都不会出现。
+ */
+function normalizeOptions(raw: unknown): AgentQuestion["options"] {
+  const entries: unknown[] = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object"
+      ? Object.entries(raw as Record<string, unknown>).map(([key, value]) => (
+        typeof value === "string" ? { id: key, label: value } : { id: key, ...(value as object) }
+      ))
+      : typeof raw === "string" && raw.trim()
+        ? [raw]
+        : [];
+
+  const usedIds = new Set<string>();
+  return entries.slice(0, 4).map((entry, index) => {
+    // 纯字符串选项：`"6 秒"` → id 用 `opt1`，label 用它本身。
+    if (typeof entry === "string" || typeof entry === "number") {
+      const label = asText(entry) || `选项 ${index + 1}`;
+      return { id: `opt${index + 1}`, label, description: "" };
+    }
+    const record = entry && typeof entry === "object" && !Array.isArray(entry)
+      ? entry as Record<string, unknown>
+      : undefined;
+    if (!record) return { id: `opt${index + 1}`, label: `选项 ${index + 1}`, description: "" };
+    const base = asText(record.id) || `opt${index + 1}`;
+    // 选项 id 也要去重：模型常给两个都叫 `a` 的选项。
+    let id = base;
+    let suffix = 2;
+    while (usedIds.has(id) && suffix < 100) id = `${base}_${suffix++}`;
+    usedIds.add(id);
+    return {
+      id,
+      label: asText(record.label) || asText(record.name) || asText(record.text) || base,
+      description: asText(record.description) || asText(record.desc) || ""
+    };
+  });
+}
+
+/**
+ * 把模型给的选择题参数归一成渲染端能画的结构。
+ *
+ * **返回"可纠正的说明"而不是抛错**：这个工具的入参完全由模型生成，形状五花八门，
+ * 而它又是后端闸门唯一的出口（不给用户选择题 = 闸门永远关不上 = 死循环）。
+ * 所以宁可回一句话让模型改，也绝不能让 SDK 静默跳过整个调用。
+ *
+ * 返回 `{ error }` 时调用方直接把它当工具回执返回（模型据此改正）。
+ */
+export function normalizeAgentQuestions(raw: unknown): { questions: AgentQuestion[] } | { error: string } {
+  // 容器归一：数组 / 单个字符串（={"问这一个"}）/ 对象映射（`{ q1: "几秒？" }`）。
+  const list: unknown[] = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+      ? (raw.trim() ? [raw] : [])
+      : raw && typeof raw === "object"
+        ? Object.values(raw as Record<string, unknown>)
+        : [];
+
+  if (list.length === 0) {
+    return { error: "没有要问的问题（questions 是空的）。如果确实需要用户拍板，请给出 1–3 个问题、每题 2–4 个选项；否则直接按最合理的方式继续。" };
+  }
+
+  const usedIds = new Set<string>();
+  const questions: AgentQuestion[] = [];
+  for (let index = 0; index < list.length && questions.length < 3; index += 1) {
+    const item = list[index];
+    const record = typeof item === "string"
+      ? { question: item }
+      : item && typeof item === "object" && !Array.isArray(item)
+        ? item as Record<string, unknown>
+        : undefined;
+    if (!record) continue; // 该条读不出来就跳过这一条，别让整批失效
+
+    const header = asText(record.header) || asText(record.title) || "";
+    const question = asText(record.question) || asText(record.text) || header;
+    if (!question) continue;
+    const options = normalizeOptions(record.options);
+    if (options.length === 0) {
+      return { error: `第 ${questions.length + 1} 个问题没有任何选项。请为它提供 2–4 个互斥选项（每个带 label 与 description），再调用一次；不需要问的话就直接继续。` };
+    }
+    const position = questions.length;
+    questions.push({
+      id: uniqueQuestionId(asText(record.id) || `q${position + 1}`, usedIds, position),
+      header: header || `问题 ${position + 1}`,
+      question,
+      multiSelect: asBoolean(record.multiSelect ?? record.multiple),
+      options: options.slice(0, 4)
+    });
+  }
+
+  if (questions.length === 0) {
+    return { error: "没有要问的问题（每个问题都缺少 question 字段）。请给出 1–3 个问题，每个带一句话的问题描述与 2–4 个选项；否则直接按最合理的方式继续。" };
+  }
+  return { questions };
 }
 
 /** 从打包产物读取智能体框架版本（agentVersion.ts 由构建脚本从 node_modules/ai 同步）。 */
@@ -501,14 +696,15 @@ export function isToolFailure(output: unknown): boolean {
   // `没有找到` 是 read_artifact(keyword) 的"没命中"，不是失败调用，但对用户是
   // 「这次没找到」——打勾会让人以为读到了内容（实测渲染成 `✓ 读取文件完成（共 2118 行）`）。
   //
+  // **`未获得用户回答` 不算失败**（实测 probe-skip-question）：用户点的是「跳过，你决定」，
+  // 那是他**主动做的选择**，工具也正常完成了"把选择告诉模型"这件事。
+  // 归进失败会让步骤条打 ✕ 并写「用户未回答」——用户明明刚点了按钮，
+  // 看到的是"软件把我点的当成故障了"。超时同理（没人答，不是工具坏了）。
+  // 两种情况都靠 {@link humanizeToolOutput} 的摘要说清，不需要靠 ✕ 表达。
+  //
   // **"可纠正的拒绝"也算未成功**（本会话放宽 schema 后新增的一类回执）：
-  // 参数空/缺时工具**什么都没做**，只回一句让模型改正的话，例如
-  // 「搜索关键词是空的。…」「步骤清单是空的：…」「没有要问的问题（questions 是空的）。…」
-  // 「没有可应用的修改：edits 是空的。…」。它们不含"失败"二字，旧判定一律打勾，
-  // 步骤条于是显示 `✓ 更新步骤清单完成（步骤清单已更新）`——而清单根本没变。
-  // 判据放在 `head`（第一小句）上：这些回执的第一句就点明了"是空的 / 没有…"。
   if (REJECTION_RE.test(head)) return true;
-  return /失败|未获得用户回答|没有找到/.test(sliceSafe(head, 160));
+  return /失败|没有找到/.test(sliceSafe(head, 160));
 }
 
 /**
@@ -526,8 +722,15 @@ export function isToolFailure(output: unknown): boolean {
  * - `request_user_input`：`没有要问的问题（questions 是空的）。` / `第 N 个问题没有任何选项。`
  * - `edit_artifact_batch`：`没有可应用的修改：edits 是空的。`
  * - `create_file`：`保存文件失败：content 是空的。`（已由"失败"覆盖，这里不重复）
+ * - `generate_video`：`后端「MiniMax H3」现在用不了：还没保存…。**任务没有创建**…`
+ *   （`main.ts` 里 `videoBackendAvailability` 的前置检查拒绝）。漏掉它会让步骤条
+ *   显示 `✓ 生成视频完成（已创建视频任务）`——**界面替模型撒谎**：任务一个都没建，
+ *   回执原文还写着"任务没有创建"（实测 probe-nocred-backend）。
+ * - `generate_video`（闸门）：`**还没有确定用哪个后端，任务没有创建。** …`
+ *   同样漏过——真机日志里渲染成 `✓ 生成视频完成（没有创建任务）`，
+ *   **打了勾却说没有创建任务**（实测 probe-real-ask-first 的步骤条）。
  */
-const REJECTION_RE = /^(?:搜索关键词是空的|步骤清单是空的|没有要问的问题|没有可应用的修改|第\s*\d+\s*个问题没有任何选项|请给出至少一步)/;
+const REJECTION_RE = /^(?:\*\*还没有确定用哪个后端|搜索关键词是空的|步骤清单是空的|没有要问的问题|没有可应用的修改|第\s*\d+\s*个问题没有任何选项|请给出至少一步|后端「.+」现在用不了)/;
 
 /**
  * 工具执行结果 → 给用户看的摘要（显示在气泡的步骤条里）。
@@ -558,7 +761,13 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
     // 用户不需要读到"写清要做什么 + 当前 status"这种内部约定。
     const first = String(output).split(/[。\n]/, 1)[0] ?? "";
     const short = first.split(/[：:]/, 1)[0] ?? first;
-    return sliceSafe(short.trim() || first, 80);
+    // **必须剥掉 markdown 标记**：步骤条是 `<div>{step}</div>`，按**纯文本**渲染，
+    // 不做 markdown 解析。而回执里常带粗体强调——闸门那条以
+    // `**还没有确定用哪个后端，任务没有创建。**` 开头，不剥就会原样显示星号
+    // （实测提取结果：`**还没有确定用哪个后端，任务没有创建`）。
+    // 反引号同理（`\`local\`` 会显示成带反引号的字面量）。
+    const plain = (short.trim() || first).replace(/\*\*|`/g, "");
+    return sliceSafe(plain, 80);
   }
   switch (toolName) {
     case "web_search": {
@@ -566,8 +775,13 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       return count > 0 ? `找到 ${count} 条结果` : "未找到结果";
     }
     case "generate_video": {
+      // **兜底不能硬编"已创建"**：提交前的前置检查拒绝时，回执原文写着"任务没有创建"，
+      // 而旧兜底照编"已创建视频任务"，步骤条成了 `✓ 生成视频完成（已创建视频任务）`
+      // （实测 probe-nocred-backend）。拒绝文案已由上面的 REJECTION_RE 优先接走，
+      // 这里只兜真正没创建成功的其它情况。
+      if (/任务没有创建/.test(output)) return "没有创建任务";
       const count = /已创建\s*(\d+)\s*个视频生成任务/.exec(output)?.[1];
-      return count ? `已创建 ${count} 个视频任务` : "已创建视频任务";
+      return count ? `已创建 ${count} 个视频任务` : "完成";
     }
     case "create_file": {
       // 右边界必须锚到**尺寸标记**，不能锚到括号：重名文件是 `名字 (2).html`，
@@ -601,6 +815,22 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
     }
     case "inspect_artifact": {
       if (/^自检失败/.test(output)) return "自检失败（页面没能加载）";
+      // **报错必须优先于"画面是空的"**（真机实测 probe-real-selfheal）：
+      // 模型写了个页面，脚本里调用了不存在的 API（必然抛 ReferenceError），
+      // 而页面主体是静态表格、背景纯白 —— 同时命中"整屏纯色"与"运行时报错"。
+      // 旧顺序先判前者，摘要只给出「自检发现画面是空的」：
+      // 模型据此以为问题是布局/渲染，改了一行样式就去改别处，
+      // **那个必错 API 一动没动**，最后交付了一个跑不起来的页面。
+      //
+      // 报错是可定位、可修的事实；空白只是症状。先给结论，再给症状。
+      const errorsFirst = /运行时(?:报错|警告|问题)（[^）]*?共\s*(\d+)\s*条/.exec(output)?.[1];
+      if (errorsFirst) {
+        const blankHint = /什么都没画出来|是同一种颜色/.test(output) ? "（画面也很空）" : "";
+        if (/可能有报错/.test(output)) return `自检发现 ${errorsFirst} 条控制台问题（前几条是警告，其余可能含报错）${blankHint}`;
+        return /运行时警告/.test(output)
+          ? `自检发现 ${errorsFirst} 条警告（无报错）${blankHint}`
+          : `自检发现 ${errorsFirst} 条报错${blankHint}`;
+      }
       // 空画面必须排在"无报错"**之前**判：这一分支的正文写的是
       // "控制台没有 error/warning，但…屏幕是空的"，用"没有任何 error/warning"匹配会漏掉，
       // 于是落进兜底的「自检完成」——把"什么都没画出来"说成平平无奇的完成（真机踩到）。
@@ -609,19 +839,6 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       // 3 个元素 / 0 字文本 / 无画布，报告原文是"页面既没有画布也没有可见文本"，
       // 摘要却落进"自检通过，无报错"）。
       if (/既没有画布也没有可见文本/.test(output)) return "自检发现页面没有内容（脚本可能没跑）";
-      // 正则匹配"运行时报错 / 运行时警告 / 运行时问题"三种措辞（实测：只有一条警告时
-      // 报告写的是"运行时警告（…共 N 条"）。注意**不能跨括号**匹配：
-      // `运行时警告（没有 error，只有 warning；共 1 条…` 里的说明本身带分号，
-      // 故这里只取"运行时X（…共 N 条"这一段，用 [^）]* 限制在同一层括号内。
-      const errors = /运行时(?:报错|警告|问题)（[^）]*?共\s*(\d+)\s*条/.exec(output)?.[1];
-      if (errors) {
-        // **截断且前几条全是警告时不能替其余部分下结论**（与报告正文同一处坑）：
-        // 报告正文已改写成"其中可能有报错"，摘要若仍写"40 条警告（无报错）"，
-        // 用户和模型看到的结论又回到"只是警告"——等于把刚修好的矛盾搬到摘要层。
-        if (/可能有报错/.test(output)) return `自检发现 ${errors} 条控制台问题（前几条是警告，其余可能含报错）`;
-        // 只有警告时不该说"发现 N 条报错"——模型会去改一条不阻断运行的警告。
-        return /运行时警告/.test(output) ? `自检发现 ${errors} 条警告（无报错）` : `自检发现 ${errors} 条报错`;
-      }
       // 拿不到截图采样时也不能说"通过"：那种情况我们无从判断画面。
       if (/未能取得画面采样/.test(output)) return "自检完成，但没拿到画面采样（无法判断是否空白）";
       // 采样是纯色、但元素太少（≤1）没能走"什么都没画出来"那一支：
@@ -632,6 +849,22 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
     case "update_plan": {
       const done = /（(\d+)\/(\d+)\s*已完成）/.exec(output);
       return done ? `步骤 ${done[1]}/${done[2]} 已完成` : "步骤清单已更新";
+    }
+    case "compute": {
+      // **不登记这个分支时步骤条会显示「工具调用完成（完成）」**——用户看不出 AI 干了什么
+      // （实测：compute 刚上线时就是这样）。这里把最有用的两点抽出来：多少样本、最小值/最大值。
+      // 平均值单独给一档：数据统计里用户最先想看的就是它。
+      const count = /样本\s*(\d+)\s*个/.exec(output)?.[1];
+      const min = /最小值：(-?[\d.]+)/.exec(output)?.[1];
+      const max = /最大值：(-?[\d.]+)/.exec(output)?.[1];
+      const mean = /平均值：(-?[\d.]+)/.exec(output)?.[1];
+      if (/没有可统计的数字/.test(output)) return "这一列没有可统计的数字";
+      if (/找不到列|找不到产物/.test(output)) return "没找到要统计的列或文件";
+      const parts: string[] = [];
+      if (count) parts.push(`${count} 个样本`);
+      if (min !== undefined && max !== undefined) parts.push(`范围 ${min}~${max}`);
+      if (mean !== undefined) parts.push(`均值 ${mean}`);
+      return parts.length > 0 ? parts.join("，") : "统计完成";
     }
     case "open_page": {
       // 正文长度比正文本身有用：用户只想知道"读到了没有、读了多少"。
@@ -647,8 +880,22 @@ export function humanizeToolOutput(toolName: string, output: unknown): string {
       const body = output.replace(/\n\n（页面过长已截断）$/, "");
       return `已读取 ${body.length} 字正文${/已截断/.test(output) ? "（已截断）" : ""}`;
     }
-    case "request_user_input":
-      return /未获得用户回答/.test(output) ? "用户未回答，按默认继续" : "已收到你的回答";
+    case "request_user_input": {
+      // **用户主动跳过 ≠ 工具失败**（实测 probe-skip-question）：回执里一直带着
+      // 区分依据——`questionBridge.skip()` reject 的是"用户跳过了这组问题。"，
+      // 而超时 reject 的是"用户未在时限内回答。"。旧摘要一律压成
+      // 「用户未回答，按默认继续」，配合判失败就打 ✕ 显示出来：
+      // 用户明明刚点了「跳过，你决定」，界面却说他"没回答"。
+      // 两句话都是他自己的动作，得分开说。
+      if (/用户跳过了这组问题/.test(output)) return "已跳过（按默认继续）";
+      if (/用户停止了本轮对话/.test(output)) return "已停止本轮";
+      // **取消会话走的是另一句文案**（`questionBridge.cancelSession` reject
+      // 「本轮对话已结束。」）。漏掉它就会落到兜底的「未获得回答，按默认继续」——
+      // 而这一轮其实**已经停了**，什么都没继续（实测 probe-stop-with-question）。
+      if (/本轮对话已结束/.test(output)) return "已停止本轮";
+      if (/用户未在时限内回答/.test(output)) return "等待超时，按默认继续";
+      return /未获得用户回答/.test(output) ? "未获得回答，按默认继续" : "已收到你的回答";
+    }
     default:
       return "完成";
   }
@@ -678,6 +925,14 @@ export function humanizeToolInput(toolName: string, input: unknown): string {
     // 实测真机：`→ 正在打开网页：{"url":"https://post.smzdm.com/p/awwnml6g/"}`，用户看到的是代码。
     if (toolName === "open_page" && typeof record.url === "string") {
       return sliceSafe(record.url.replace(/^https?:\/\//, ""), 120);
+    }
+    // compute：显示"文件 + 列名"，用户一眼能看出在算哪一列。
+    if (toolName === "compute") {
+      const file = typeof record.name === "string" ? record.name : "";
+      const column = record.column;
+      if (file && (typeof column === "string" || typeof column === "number")) return sliceSafe(`${file} · ${column}`, 120);
+      if (Array.isArray(record.values)) return `${record.values.length} 个数值`;
+      return sliceSafe(file || "统计数据", 120);
     }
     if (toolName === "generate_video") {
       const prompt = typeof record.prompt === "string" ? sliceSafe(record.prompt, 80) : "";
@@ -844,7 +1099,15 @@ export async function chatAgent(
       generate_video: tool({
         description: `生成 AI 短视频，并直接提交为后台任务（4–15 秒、1–4 路）。
 
-何时使用：**用户要的就是视频本身**——说"生成一段视频/做个短片/来几条视频"，或描述了想拍的画面并明确要视频。参数从用户的描述里提取即可，不需要事先反问确认。
+何时使用：**用户要的就是视频本身**——说"生成一段视频/做个短片/来几条视频"，或描述了想拍的画面并明确要视频。
+
+**开工前必须先问清三件事**（用 request_user_input，一次调用问完；用户点「跳过，你决定」才自行取默认）：
+1. **用哪个后端生成**——本机 ComfyUI / SSH 远程显卡 / 瞬映 RB / MiniMax 云 API。花费与耗时差别很大
+   （本机不额外计费但要本地显卡、云 API 真实扣费、RB 扣卡密次数），**不能让用户默认撞上**。
+   只有「连接设置」里已配好凭据的后端才是可选项；只有一个可用时也要用一句话说明"这轮只能走它"。
+2. **时长**（秒）——按后端合法档位给选项。
+3. **数量**（几路）——1–4 路，云端按路计费。
+用户已在原话里给过的（例如"来 3 条 8 秒的"）就不用再问，直接照做；只有明确缺少的才问。
 
 何时不用（这条最容易搞错，请务必对照）：
 - 用户要的是**网页/页面/小工具/游戏/3D 场景** → 用 create_file(kind=html)，**不是**视频。
@@ -876,7 +1139,11 @@ export async function chatAgent(
           // generate_video 连续 20 次没执行、20 步预算烧光。下游 `clampDurationForBackend`
           // 本来就会 Math.round + 夹取，所以这里只要能收下字符串，值交给 `toFiniteNumber` 归一。
           duration: z.union([z.number(), z.string()]).describe("时长秒数，建议 4–15（越界会被自动夹到合法值）。用户没说就按 6。"),
-          count: z.union([z.number(), z.string()]).describe("生成数量，建议 1–4（越界会被自动夹到合法值）。用户没说就按 1。")
+          count: z.union([z.number(), z.string()]).describe("生成数量，建议 1–4（越界会被自动夹到合法值）。用户没说就按 1。"),
+          // **用哪个后端生成**。用普通字符串而不是 `z.enum`：模型写「本机」「ComfyUI」「comfy」
+          // 这类口语时，枚举会在 `parseToolCall` 阶段拒掉整个调用（本会话已修 19 处同类坑）。
+          // 认不出来的值由执行侧回一句"可选后端是哪些"，不会让整轮报废。
+          backend: z.string().nullish().describe("生成后端：local（本机 ComfyUI）/ ssh（SSH 远程显卡）/ minimax（MiniMax 云 API）/ rb（瞬映 RB 云生成）。**先问过用户再填**；省略则用「连接设置」里的默认后端。")
         }),
         // 与其他工具一致：失败要变成**给模型的说明**，而不是抛出。
         // `orchestrator.submit` 会做参数校验并抛中文错误（未保存卡密、RB 预设只收 4/6/8 秒、
@@ -891,10 +1158,14 @@ export async function chatAgent(
             const count = toFiniteNumber(params.count);
             // `prompt` 缺省（nullish）时传空串：`validateRequest` 本就有
             // 「请输入视频描述。」这条中文提示，交给它回答比在这里编一句更准。
+            // `backend` 同理交给下游解析：认不出来时 `main.ts` 会回一句"可选后端是哪些"，
+            // 而不是在这里 reject（本会话已修 19 处"schema 硬校验静默打死整轮"）。
+            const backend = typeof params.backend === "string" ? params.backend.trim() : "";
             return await callbacks.generateVideo({
               prompt: String(params.prompt ?? ""),
               duration: duration ?? 6,
-              count: count ?? 1
+              count: count ?? 1,
+              ...(backend ? { backend } : {})
             });
           } catch (error) {
             return `创建视频任务失败：${describeError(error, "未知错误")}。请如实告诉用户失败原因和需要先补什么（例如到「连接设置」保存对应后端的密钥/卡密），不要假装任务已创建，也不要重复调用本工具重试。`;
@@ -1158,7 +1429,7 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
         }
       }),
       // edit_artifact_batch（对齐 Codex `apply_patch` 一次提交多个 hunk）：
-      //
+      // 与 edit_artifact 同一道闸门：计划模式下一并摘除（二者都写文件）。
       // 实测动因：模型一次要修 5 处 bug，单处 edit 消耗 5 步，叠加步数上限后任务被打断
       // （真机那一轮最后一句就是"本轮工具调用已达上限"）。合成一次调用后，
       // 同样的工作只占 1 步，剩下的预算能留给自检与验证。
@@ -1179,23 +1450,16 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           name: z.string().nullish().describe("要修改的产物文件名，带扩展名。不能为空。"),
           // **`.nullish()` 同样必须有**（实测同类坑第十八处）：`edits` **整个键缺失**时
           // `z.array()` 会拒掉整个调用，和空数组是两条不同路径。两者都交到 execute 里说。
-          edits: z.array(z.object({
-            // **同单处编辑**：`.min(1)` 会让空串在 `parseToolCall` 阶段被拒、
-            // 整个调用被静默跳过；而工具层对空 oldText 本就有「第 N 条修改的 oldText 为空」的说明。
-            oldText: z.string().nullish().describe("被替换的原文，逐字符一致且在（前序修改后的）文件中唯一。不能为空。"),
-            newText: z.string().nullish().describe("替换成的新内容。允许为空字符串（删除）。")
-          // **下限必须是 1**（实测踩到）：原来写 `min(2)`，模型只给 1 条时
-          // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
-          // **整个调用被静默跳过**（toolCall 记进历史但不执行）——
-          // 模型看不到任何回执，会一直重试同一条，20 步预算全烧光，
-          // 而界面把原因归成"参数被上游截断"（完全误导）。
           //
-          // 而且这条约束本来就没有依据：`applyExactEdits` 对 1 条编辑照常工作，
-          // "2 条以上才值得批量"是给模型的**建议**，不该做成硬校验。
-          // **上限也不要写成 `.max(20)`**（实测同类坑第十处）：模型一次给 25 条时同样会在
-          // `parseToolCall` 阶段被拒、整个调用被静默跳过。改在 execute 里截断（保留前 20 条）
-          // 并把"只应用了前 N 条"如实告知——少改几处总比整轮报废好。
-          })).describe("修改列表，建议 1–20 条（超过 20 条只应用前 20 条）。按数组顺序依次应用。").min(0).nullish()
+          // **元素级也不能硬校验**（与 `update_plan` 那处同一个漏网）：原来写的是
+          // `z.array(z.object({oldText, newText}))`，模型很自然会给出两种更口语的形态：
+          // ① 元素是字符串 `["第 12 行改成 X"]` → 元素不是对象 → `InvalidToolInputError`
+          //    → 整个调用被**静默跳过**（execute 不跑、无回执），模型反复重试烧步数；
+          // ② 元素用了 `old` / `new` / `search` / `replace` 这类字段名 → zod 默认剥掉未知键
+          //    → 每条 edits 都变成空对象 → `oldText` 为空 → 工具回「第 N 条修改的 oldText 为空」，
+          //    模型照原样重发，一步一步耗光预算。
+          // 字段名归一放在 execute 里（见 `toEditPairs`）——代码能纠正的就不该让 schema 硬拒。
+          edits: z.array(z.unknown()).describe("修改列表，建议 1–20 条（超过 20 条只应用前 20 条）。每条形如 {oldText, newText}；写成字符串会按\"old → new\"改写时无法拆分，会被退回说明。按数组顺序依次应用。").min(0).nullish()
         }),
         execute: async (params) => {
           const safeName = String(params.name ?? "");
@@ -1211,10 +1475,30 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           // `oldText` / `newText` 缺省（nullish）时补空串：`applyExactEdits` 对空 oldText
           // 本就有「第 N 条修改的 oldText 为空」的中文说明——那是可纠正的，
           // 比 schema 层静默拒掉整个调用好（本会话已修 17 处同一类坑）。
-          const edits = rawEdits.slice(0, 20).map((edit) => ({
-            oldText: String(edit.oldText ?? ""),
-            newText: String(edit.newText ?? "")
-          }));
+          //
+          // 元素是 unknown（见 schema 处说明）：这里把模型实际会写的字段名统一过来。
+          // 只认 `oldText` / `newText` 时，写成 `old` / `new` / `search` / `replace` 的那批
+          // 会整条变空、然后被"oldText 为空"退回，模型照原样重发，白烧步数。
+          const editField = (entry: Record<string, unknown>, keys: readonly string[]): string => {
+            for (const key of keys) {
+              const value = entry[key];
+              if (typeof value === "string") return value;
+            }
+            return "";
+          };
+          const toEditPair = (edit: unknown): { oldText: string; newText: string } => {
+            // 字符串元素没有"改成什么"这一半，拆不出来：交给下游按空 oldText 处理，
+            // 由 `applyExactEdits` 回「第 N 条修改的 oldText 为空」——比整轮被跳过好。
+            if (typeof edit === "string") return { oldText: edit, newText: "" };
+            if (!edit || typeof edit !== "object") return { oldText: "", newText: "" };
+            const record = edit as Record<string, unknown>;
+            return {
+              oldText: editField(record, ["oldText", "old_text", "old", "search", "find", "from"]),
+              // `newText` 允许是空串（删除），所以只要字段存在就取它——不能因为"值为假"跳过。
+              newText: editField(record, ["newText", "new_text", "new", "replace", "replacement", "to"])
+            };
+          };
+          const edits = rawEdits.slice(0, 20).map(toEditPair);
           try {
             const result = await callbacks.editArtifactBatch({ name: safeName, edits });
             // 截断要明说：否则模型以为 25 条都改了，后面自检会对着"没改的部分"困惑。
@@ -1250,27 +1534,24 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           // `parseToolCall` 抛错 → 调用被静默跳过（与必填字段缺失同一后果）。
           // 用 `.nullish()` 收下，再在 execute 里把 null 归一成 undefined。
           explanation: z.string().nullish().describe("一句话说明这次更新的原因（如'已完成搜索，开始整理数据'）。仅当状态变化需要解释时才写。"),
-          plan: z.array(z.object({
-            // **`step` / `status` 也必须是可选**（实测同类坑第十七处）：
-            // 模型很自然只写 `{ plan: [{ step: "搜索资料" }] }`——省略 status。
-            // 必填时 AI SDK 在 `parseToolCall` 阶段抛错，调用被**静默跳过**。
-            // 探针实测 `update_plan` 连续 20 次没执行、步骤清单卡片一次都没渲染出来；
-            // 而这个工具几乎每步都会被调用，等于把整轮的进度可视化全部废掉。
-            step: z.string().nullish().describe("步骤描述，写清要做什么，如'搜索 2025 年国产显卡价格'。"),
-            // **不要用 z.enum**（同一类坑第八处）：模型常写 `done` / `in-progress` / `doing`，
-            // 枚举一拒，AI SDK 在 `parseToolCall` 阶段抛错、**整个调用被静默跳过**——
-            // 而 update_plan 几乎每步都调，等于把整轮的进度可视化全部废掉，
-            // 还白白烧步数。改在 execute 里归一（见下）。
-            status: z.string().nullish().describe("步骤状态：pending（未开始）/ in_progress（进行中，全清单最多一项）/ completed（已完成）。")
-          // **`.min(1)` 也不要**：模型偶尔会给空数组（"这轮没步骤"），
-          // schema 一拒就是整个调用被静默跳过。空清单在 execute 里回一句说明即可。
-          // **`.nullish()` 同样必须有**（实测同类坑第十八处）：整个 `plan` 键缺失
-          // 与"给了空数组"是两条不同路径，只修后者仍会静默跳过。
-          })).describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。").nullish()
+          // **整个 plan 只声明"是数组"，元素一律 unknown**（实测缺陷 probe-plan-shapes）：
+          // 元素级 `z.object({...})` 仍然守住了一道**硬校验**，而模型给出口语化清单的两种
+          // 常见形态都会撞上它，后果都是"整轮进度可视化失效"：
+          // ① `plan: ["搜索资料", "整理数据", "写报告"]`（纯字符串数组）——
+          //    元素不是对象，AI SDK 在 `parseToolCall` 抛 `InvalidToolInputError`，
+          //    整个调用被**静默跳过**（execute 不跑、无回执）、模型反复重试、步数烧光。
+          //    实测气泡里出现"本轮有 1 次工具调用没有真正执行（涉及：update_plan）"。
+          // ② `plan: [{ name: "搜索资料" }]`（字段名叫 name 而不是 step）——
+          //    zod 默认剥掉未知键，于是元素对象里**一个字段都不剩**，
+          //    清单照常显示但全是「步骤 1 / 步骤 2」这种占位，模型自己写的内容全丢。
+          //    这一种更隐蔽：没有报错、没有跳过提示，用户只看到一份没有信息的清单。
+          //
+          // 与本轮已修的其他工具同一口径：**只要代码本来就能纠正（这里能补 step 名、
+          // 能把口语 status 归一），就不该让 schema 硬拒**。形状归一全部交给 execute。
+          plan: z.unknown().describe("完整步骤清单（每次调用都要给全量，而不是只给变化的那几步）。通常是数组，元素可以是字符串或 { step, status } 对象。").nullish()
         }),
         execute: async (params) => {
-          // `plan` 已放宽为 nullish（见 schema 处说明）：缺键与空数组是同一件事，
-          // 都回一句可纠正的说明，而不是让 SDK 静默拒掉整个调用。
+          // `plan` 是 unknown（见 schema 处说明）：缺键、空数组、非数组都当作"没给"。
           const rawPlan = Array.isArray(params.plan) ? params.plan : [];
           if (rawPlan.length === 0) {
             return "步骤清单是空的：请给出至少一步（每步写清要做什么 + 当前 status）。如果这轮不需要清单，就不用调用本工具。";
@@ -1285,13 +1566,25 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
           };
           // **最多一项 in_progress**：模型常说"全都进行中"，渲染端的语义是"最多一个"。
           // 多出来的降级为 pending（不丢步骤，只修状态）。
-          // `step` 缺省时补一个占位：schema 已放宽为可选（见上），但下游 `PlanStep`
-          // 要求它必须是字符串——空串会让清单里出现一行没有任何文字的条目，
-          // 所以给「步骤 N」而不是 ""。
+          // `step` 缺省时补一个占位：下游 `PlanStep` 要求它必须是字符串——空串会让清单里
+          // 出现一行没有任何文字的条目，所以给「步骤 N」而不是 ""。
+          //
+          // 元素是字符串时**直接用那串当步骤**（`plan: ["搜索资料"]`）。这一种此前被 schema
+          // 挡在门外；现在能进来了就必须读对，否则变成了"步骤 1 / 步骤 2"的占位清单，
+          // 等于白收下这次调用。
+          const stepNameOf = (entry: unknown, index: number): string => {
+            if (typeof entry === "string") return entry.trim() || `步骤 ${index + 1}`;
+            if (!entry || typeof entry !== "object") return `步骤 ${index + 1}`;
+            const record = entry as Record<string, unknown>;
+            // 字段名不叫 step 的也要认：name / title / text 都是模型实际会写的叫法。
+            // 只认 step 时清单会全是占位（见 schema 处实测）。
+            const raw = record.step ?? record.name ?? record.title ?? record.text;
+            return String(raw ?? "").trim() || `步骤 ${index + 1}`;
+          };
           let sawInProgress = false;
           const plan = rawPlan.map((entry, index) => {
-            const step = String(entry.step ?? "").trim() || `步骤 ${index + 1}`;
-            const status = normalizeStatus(entry.status);
+            const step = stepNameOf(entry, index);
+            const status = normalizeStatus((entry && typeof entry === "object") ? (entry as Record<string, unknown>).status : undefined);
             if (status !== "in_progress") return { step, status };
             if (sawInProgress) return { step, status: "pending" as const };
             sawInProgress = true;
@@ -1308,6 +1601,51 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
         }
       })
       }),
+      // compute：**算数工具**（对齐 Codex 有而本应用此前没有的一环）。
+      //
+      // 真机依据（2026-10-21，deepseek-v4.1-flash）：让它统计 5000 行 CSV 的温度均值，
+      // 它读了 400 行后明确拒绝给平均值——「我没有可执行的代码工具用来对 399 个数求和，
+      // 只靠逐行心算平均值得出的数字是编出来的」。它说得对，但这意味着
+      // "数据统计"这类任务我们永远只能给部分结论。
+      //
+      // 为什么不做代码执行（shell / eval / vm）：本应用的安全红线不允许（渲染端 sandbox、
+      // 主进程不跑用户代码）；而且这里真正缺的只是"求和"这类确定性运算，
+      // 用穷举式原语覆盖即可，不必引入沙箱逃逸面。
+      compute: tool({
+        description: `对**本会话产物文件**里的一列数据做精确统计（最小值/最大值/求和/平均/中位数/标准差）。
+
+何时使用：产物是表格（csv/xlsx）且用户要"统计/汇总/算出平均/找最大最小"时；**必须用这个工具，不要靠心算**——
+逐行心算几千个数必然出错，而报一个错的数字比说"算不了"更糟。也可以直接传 values（一小串已知数字）做统计。
+
+何时不用：只是读内容（用 read_artifact）；要改文件（用 edit_artifact）；要生成新表格（用 create_file）。
+
+返回里会写明参与统计的样本数与**跳过的非数字个数**——如果跳过很多，说明列名可能选错了。`,
+        inputSchema: z.object({
+          // 与其他工具一致：不用 `.min(1)`、不用 `z.enum`——那些会让 AI SDK 在 parseToolCall
+          // 阶段拒掉整个调用（本项目已修 20+ 处同类坑），一律交给 execute 回可纠正的说明。
+          name: z.string().nullish().describe("产物文件名（带扩展名，如 data.csv / 报表.xlsx）。用 values 直接算时可省略。"),
+          column: z.union([z.string(), z.number()]).nullish().describe("要统计的列：表头名（如「温度」）或 0 起的列序号。"),
+          values: z.array(z.union([z.number(), z.string()])).nullish().describe("也可以直接给一串数字做统计（不走文件）。"),
+          decimals: z.union([z.number(), z.string()]).nullish().describe("结果保留几位小数，默认 4。")
+        }),
+        execute: async (params) => {
+          const rawValues = Array.isArray(params.values) ? params.values : undefined;
+          const hasFile = typeof params.name === "string" && params.name.trim().length > 0;
+          if (!rawValues && !hasFile) {
+            return "统计失败：要么给 name（产物文件名）+ column，要么直接给 values。两者都没有。";
+          }
+          try {
+            return await callbacks.compute({
+              name: String(params.name ?? ""),
+              column: params.column ?? undefined,
+              // 原样传下去：字符串数值（"1,234"/"85%"）由统计层归一，这里不提前转换。
+              values: rawValues as number[] | undefined
+            });
+          } catch (error) {
+            return `统计失败：${describeError(error, "未知错误")}。可以先用 read_artifact 确认列名与文件内容，再重试。`;
+          }
+        }
+      }),
       // request_user_input（对齐 Codex `request_user_input_spec.rs`）：把选择题做成工具，
       // 而不是让模型在回复里手写 A/B/C 等用户打字——手写选项用户得自己复述，容易理解错。
       // 主进程会挂起等渲染端回答，超时则按"无回答、按最佳判断继续"收尾。
@@ -1320,78 +1658,32 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
 
 一次调用最多 3 个问题，每个问题 2–4 个选项。用户可以选择不回答（超时或跳过），此时你必须按自己认为最合理的方式继续，不要卡住不动。`,
         inputSchema: z.object({
-          questions: z.array(z.object({
-            // **这几个字段一律可选**（实测同类坑第十四处）：模型很自然只写
-            // `{ id, question, options }`，省掉 `header`，或选项只给 `{ id, label }`
-            // 不给 `description`。必填时 AI SDK 在 `parseToolCall` 阶段抛
-            // `InvalidToolInputError`，整个调用被**静默跳过**——探针实测
-            // request_user_input 连续 20 次没执行，界面上连选择题卡片都不出现，
-            // 用户只看到「本轮工具调用已结束，没有产生可展示的产物」。
-            // 缺的值在 execute 里补默认（`formatAnswers` 本来也对缺字段做了兜底）。
-            id: z.string().nullish().describe("问题标识（英文短名，如'video_duration'），用于回传答案时对应。"),
-            header: z.string().nullish().describe("很短的中文标签，最多 12 个字（如'视频时长'）。"),
-            question: z.string().nullish().describe("完整问题，一句话说清要用户在什么之间做选择。"),
-            // **`.optional()` 只允许 undefined，不允许 null**（同类坑第十九处）：
-            // 模型写 `multiSelect: null` 时 zod 会拒掉整个对象 → 调用被静默跳过。
-            multiSelect: z.boolean().nullish().describe("是否允许多选。只有确实可以同时选多个时才设为 true。"),
-            // **不要在这里写 min(2).max(4)**（实测同类坑第五处）：模型只给 1 个选项时，
-            // AI SDK 在 `parseToolCall` 阶段抛 `InvalidToolInputError`，
-            // 整个调用被**静默跳过** → 模型收不到回执 → 反复重试 → 20 步预算烧光。
-            // 数量约束改在 execute 里夹取（见下），越界只会少一两个选项，不会让整轮失效。
-            // **空数组也收**（同类坑的收尾）：`questions: []` / `options: []` 在 schema 层
-            // 被拒会让整个调用静默跳过；这些交到 execute 里给一句可纠正的说明更合适。
-            options: z.array(z.object({
-              id: z.string().nullish().describe("选项标识（英文短名）。"),
-              label: z.string().nullish().describe("选项显示文字，简短（如'8 秒'）。"),
-              description: z.string().nullish().describe("这个选项意味着什么，一句话。")
-            })).describe("互斥选项，建议 2–4 个。").nullish()
-          })).describe("问题清单，建议 1–3 个。").nullish()
+          // **整个 questions 只声明"是数组"，元素一律 unknown**（实测第二十处同类坑，
+          // 也是危害最大的一处：`probe-question-shapes` 实测 9 种参数形状里 **7 种被拒**——
+          // options 写成字符串数组、questions 写成对象、multiSelect 写 "yes"、label 写数字……
+          // 每一种都会让 SDK 在 parseToolCall 阶段抛 `InvalidToolInputError`，
+          // 整个调用被**静默跳过**，界面上连卡片都不出现。
+          //
+          // 这次格外致命的理由：后端闸门（22f67da）唯一的出口就是让模型调这个工具问用户。
+          // 调用被跳过 → `backendSettled` 永远置不上位 → 闸门永远关着 → 模型反复重试 →
+          // 20 步烧光。真机 pelican 探针里已经出现过一次
+          // 「1 次工具调用没有真正执行（涉及：request_user_input）」。
+          //
+          // 所以这里**连"必须是数组"都不声明**（`z.unknown()`）：模型还会写
+          // `questions: "几秒？"`（当成单个问题）或 `{q1:"几秒？"}`（当成映射），
+          // 实测这两种照样被 `z.array()` 拒掉。形状归一全交给 `normalizeAgentQuestions`。
+          questions: z.unknown().describe(
+            "问题清单（1–3 个），通常写成数组。每个是对象：{ id?, header?, question, multiSelect?, options }。" +
+            "options 是 2–4 个互斥选项，可为 { id?, label, description? } 或直接写字符串。"
+          )
         }),
         execute: async (params) => {
-          // `questions` / `options` 已放宽为 nullish（见 schema 处说明）：
-          // **缺键与空数组是同一件事的两种写法**，都回一句可纠正的说明，
-          // 而不是让 SDK 静默拒掉整个调用。
-          const rawQuestions = Array.isArray(params.questions) ? params.questions : [];
-          if (rawQuestions.length === 0) {
-            return "没有要问的问题（questions 是空的）。如果确实需要用户拍板，请给出 1–3 个问题、每题 2–4 个选项；否则直接按最合理的方式继续。";
-          }
-          const emptyOptions = rawQuestions.findIndex((question) => !Array.isArray(question.options) || question.options.length === 0);
-          if (emptyOptions >= 0) {
-            return `第 ${emptyOptions + 1} 个问题没有任何选项。请为它提供 2–4 个互斥选项（每个带 label 与 description），再调用一次；不需要问的话就直接继续。`;
-          }
-          // **夹取而不是拒绝**（见 schema 处的说明）：渲染端能正常画 1 个选项的卡片，
-          // 超过 3 个问题/4 个选项则截断——少问一个总比整轮报废好。
-          //
-          // 缺字段在这里补默认（schema 已放宽为可选，见上面的说明）：
-          // - `id` 缺失时按下标生成，否则回传答案时对不上题（`formatAnswers` 按 id 匹配）；
-          // - `header` / `label` 缺失时退回「问题 N」/ 选项 id——渲染端会画出一个空标签的芯片；
-          // - `question` 缺失时用 header 顶上，总比一张只有标签的空卡片强。
-          //
-          // **id 必须去重**（实测缺陷）：模型偶尔把两个问题都写成同一个 id（复制粘贴、
-          // 或干脆都写 `q`）。而答案回传是按 id 查表的（`formatAnswers` 里
-          // `answers[question.id]`），同 id 会让**后一题顶用前一题的答案**——
-          // 用户只答了"时长 6 秒"，回执里"画幅"也变成"用户选择：横屏"
-          // （其实是第一题被选中的那个选项在第二题里的同名 id）。
-          // 渲染端与 formatAnswers 用的都是这份 `clipped`，在源头改一次即可。
-          const usedIds = new Set<string>();
-          const clipped = {
-            questions: rawQuestions.slice(0, 3).map((question, index) => ({
-              id: uniqueQuestionId(question.id?.trim() || `q${index + 1}`, usedIds, index),
-              header: question.header?.trim() || `问题 ${index + 1}`,
-              question: question.question?.trim() || question.header?.trim() || `请选择第 ${index + 1} 项的取值`,
-              // `boolean | null` → `boolean | undefined`：下游 `AgentQuestion.multiSelect?: boolean`
-              // 与 `PgQuestionCard` 都按三态之外的二态判断，塞 null 会走"非 true"分支（能跑），
-              // 但类型上不干净，且在 IPC 里会序列化成 `null`。统一归成 undefined。
-              multiSelect: question.multiSelect ?? undefined,
-              options: (question.options ?? []).slice(0, 4).map((option, optionIndex) => ({
-                id: option.id?.trim() || `opt${optionIndex + 1}`,
-                label: option.label?.trim() || option.id?.trim() || `选项 ${optionIndex + 1}`,
-                description: option.description?.trim() || ""
-              }))
-            }))
-          };
+          // **归一而不是拒绝**（见 schema 处的说明）：形状读不出来就降级，
+          // 但绝不能让整轮因参数形状失效——这个工具是闸门的唯一出口。
+          const normalized = normalizeAgentQuestions(params.questions);
+          if ("error" in normalized) return normalized.error;
           try {
-            return await callbacks.requestUserInput(clipped);
+            return await callbacks.requestUserInput(normalized);
           } catch (error) {
             // 用户没回答不算失败：必须让模型继续，而不是让它在这里死等或反复重试。
             return `未获得用户回答（${describeError(error, "用户选择了跳过或未在时限内回答")}）。请按你认为最合理的方式继续执行，并在回复里说明你做了哪些默认假设。`;
@@ -1426,8 +1718,6 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
     //
     // 只在**恰好跨过阈值**的那一步注入一次（返回的覆盖会 carry forward），
     // 每步都注入会让提示层层累积。
-    // 只在**恰好跨过阈值**的那一步注入一次（返回的覆盖会 carry forward），
-    // 每步都注入会让提示层层累积。
     //
     // 措辞必须**始终成立**：这条消息会一路带到本轮结束。写死"只剩 5 步"的话，
     // 到最后一步它仍在说"剩约 5 步"——过时的数字比没有更误导。故用"已不足 N 步"。
@@ -1454,9 +1744,24 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
     // 触发主进程"回落普通对话"并丢失视频生成意图。实测瞬时失败后第一次重试即可恢复，故只放 1 次
     // （SDK 的退避是指数的，放 2 次会把 500 这类真错误拖到 6 秒以上才回落，用户感知是"卡住"）。
     maxRetries: 1,
-    // 超时兜底：分块间隔超 2 分钟视为服务商卡死（抛错触发回落），整轮上限 10 分钟——
+    // 超时兜底：分块间隔超限视为服务商卡死（抛错触发回落），整轮上限——
     // 否则"没收到回复"会表现为永远转圈。
-    timeout: { chunkMs: 120_000, totalMs: 600_000 },
+    //
+    // **两个数字都必须容得下"工具等用户"**（实测缺陷 probe-slow-answer / probe-total-timeout）：
+    // SDK 的 `chunkMs` 与 `totalMs` 都是**墙钟计时**（`AbortSignal.timeout`），
+    // 而 `request_user_input` 挂起等用户答题期间，上游本来就不该有 chunk、
+    // 这段时间也确实在流逝。
+    //
+    // - `chunkMs` 提到 240_000：原值 120_000 小于答题上限（180_000），用户思考超过
+    //   2 分钟就会触发分块超时；实测思考 135 秒后气泡冒出「（连接中断，3 秒后重试 1/3…）」，
+    //   而且**多发了一次真实上游请求**（白烧 token）。
+    // - `totalMs` 提到 1_800_000（30 分钟）：原值 600_000 把答题时间也算了进去。
+    //   实测连问两张卡片、每张思考 330 秒 → 累计 724 秒时整轮被 abort，
+    //   上层重试逻辑因此**把整轮从头重跑**（上游被请求 5 次，本该 3 次），
+    //   用户已经答过的内容全部作废，界面还显示"连接中断"。
+    //   最坏预算：3 题 × 180 秒答题 = 540 秒，再加 20 步工具循环与模型生成，
+    //   30 分钟留足余量。真卡死时仍有上限，只是多等一会儿。
+    timeout: { chunkMs: 240_000, totalMs: 1_800_000 },
     abortSignal: signal,
     onError: ({ error }) => { underlyingError = error as Error; },
     // 工具执行开始即回调（SDK 在 execute 运行前触发）：把"正在搜索/正在生成视频"实时透给渲染端，
@@ -1533,17 +1838,78 @@ md/xlsx 不能自检（inspect_artifact 只跑网页），改完用 read_artifac
         }
       }
     }
-  } catch {
-    // steps 不可用时按 0 计（部分 provider 组合不产 steps）。
+  } catch (error) {
+    /**
+     * **上游真报错时不能在这里吞掉**（实测缺陷 probe-overflow-sideeffect, 2026-10-21）。
+     *
+     * 旧代码是一个裸 `catch {}`，注释写的是"steps 不可用时按 0 计（部分 provider 不产 steps）"。
+     * 但 `await stream.steps` **在上游失败时也会 reject**——于是 400「context length exceeded」
+     * 被这个 catch 吞掉，函数继续往下走，调用方拿到一个"成功但 0 工具调用"的结果，
+     * 接着按"工具调用没产出正文"收尾，用户看到的是
+     * 「本轮工具调用已达 20 步上限」这类**与真实原因完全无关**的文案。
+     *
+     * 三种情况要分开（少一种就会误伤）：
+     * ① 有 `underlyingError` → 那是上游真错误，**必须抛**；
+     * ② 没有 `underlyingError` 且拿到的是 AbortError → 用户取消，**原样抛**给调用方处理；
+     * ③ 其它（provider 不产 steps 导致的形状问题）→ 按 0 计，保持原行为。
+     */
+    const aborted = error instanceof DOMException && error.name === "AbortError";
+    if (underlyingError || aborted) throw underlyingError ?? error;
+    // ③ 真正的"steps 不可用"：按 0 计
+  }
+  /**
+   * **`onError` 被调用过 ≠ 这一轮失败**（实测回归 test-09, 2026-10-21）。
+   *
+   * SDK 的 `maxRetries` 会在首次请求失败时先调 `onError`，然后**自动重试并成功**——
+   * 此时 `underlyingError` 里留着那次失败，但整轮其实拿到了正常回复。
+   * 我第一版无条件 `throw underlyingError`，于是"重试后正常回复"变成了
+   * 「assistant error: 重试后正常回复请求失败：Response stream ended without a finish」。
+   *
+   * 判据改成「**这一轮什么都没拿到**」才算失败：有正文就说明重试成功了，
+   * 那次失败只该当作过程记录（真错误会在没有内容的路径上暴露出来）。
+   */
+  const gotAnything = textLength > 0 || toolCalls > 0;
+  if (!gotAnything && underlyingError) {
+    throw underlyingError;
   }
   // 工具调用全程在 streamText 内部完成；这里只等最终收尾。
+  let finalFinishReason: string | undefined;
   try {
-    await stream.finishReason;
+    finalFinishReason = await stream.finishReason;
   } catch (error) {
     // 有底层错误就抛它（调用方才能按"网络失败"还是"模型不支持工具"分流并给出可行动的中文提示）；
     // 没有则原样抛 AI SDK 的占位错误。
-    throw underlyingError ?? error;
+    // **只在什么都没拿到时抛**：拿到正文说明 SDK 的重试已经成功（见上面 `gotAnything` 的说明）。
+    // 拿到内容时把 finishReason 当作 "stop"（这一轮实际已经正常结束），继续往下走正常收尾。
+    if (!gotAnything) throw underlyingError ?? error;
+    finalFinishReason = "stop";
   }
+  /**
+   * **上游报错必须抛出去**（实测缺陷 probe-overflow-sideeffect, 2026-10-21）。
+   *
+   * 旧实现没有检查 `underlyingError`，于是上游 400「context length exceeded」被**静默吞掉**：
+   * 调用方拿到一个"成功但 0 工具调用"的结果，接着按"工具调用没产出正文"收尾，
+   * 用户看到的是「本轮工具调用已达 20 步上限」这类**与真实原因完全无关**的文案。
+   *
+   * 判据是 **`underlyingError` 非空**，不是 `finishReason === "error"`。
+   * 这条是实测出来的（`_scratch/sdk-probe.mjs` 用真实 AI SDK 复现）：
+   * 上游第二次返回 400 时，
+   *   - `steps` 只有 1 个（失败的步骤没进 steps），最后一步 finishReason 仍 `"tool-calls"`；
+   *   - `stream.finishReason` 是 **`"other"`**（不是 `"error"`）；
+   *   - **只有 `underlyingError` 里存着真实原因**。
+   * 我先前按 finishReason 判（先试 steps 的、再试 stream 的），两次都没生效——
+   * 就是因为我假设了 SDK 的取值，而没有先测。
+   *
+   * 为什么要抛而不是只记日志：调用方有两处依赖"错误能被看见"——
+   * ① `noteContextOverflow` 靠错误文本判断要不要压缩并重试；
+   * ② 内容被安全策略拒绝时要在历史末尾注入改写指引后重试。
+   * 吞掉错误等于把这两条补救路径全部废掉。
+   *
+   * **但判据必须带上"什么都没拿到"**（回归 test-09）：SDK 的 `maxRetries` 会先调 `onError`、
+   * 再自动重试成功，那时 `underlyingError` 里留着第一次的失败、而整轮其实拿到了正常回复。
+   * 无条件抛出会把"重试成功"误报成失败。上面 `if (!gotAnything && underlyingError)` 已统一处理，
+   * 这里不再重复判断一次（同一判据写两处必然会漂移）。
+   */
   // usage 用于上下文压缩的基线记账（inputTokens 是"本窗口的输入起点"）。
   // 上游不返回 usage 时字段为 undefined——调用方回落字符估算，不能当成 0。
   let usage: { inputTokens: number } | undefined;
@@ -1576,9 +1942,10 @@ export async function probeToolSupport(options: LlmServiceOptions): Promise<{ su
       readArtifact: async () => "（探测）",
       editArtifact: async () => "（探测）",
       editArtifactBatch: async () => "（探测）",
-      // 探测不需要真的弹选择题/改清单：给个无害的返回值即可。
+      // 探测不需要真的弹选择题/改清单/做统计：给个无害的返回值即可。
       updatePlan: async () => "（探测）",
-      requestUserInput: async () => "（探测）"
+      requestUserInput: async () => "（探测）",
+      compute: async () => "（探测）"
     }, () => { sent += 1; }, AbortSignal.timeout(60_000));
     const supported = result.toolCalls > 0 || result.textLength > 0;
     if (!supported) return { supported: false, message: "模型未返回任何内容，可能不支持工具调用（智能体模式不可用），将自动改用普通对话。" };

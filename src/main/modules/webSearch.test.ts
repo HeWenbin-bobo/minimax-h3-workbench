@@ -265,3 +265,44 @@ describe("searchWeb API 响应形状容错", () => {
     expect(text).not.toContain("[object Object]");
   });
 });
+
+/**
+ * **搜索页抓取必须有大小上限**（实测 2026-10-21）。
+ *
+ * `scrapeBing` / `scrapeSogou` 原本用裸 `response.text()`，把整个响应体读进内存、无任何上限。
+ * 实测正常页面：Bing 98KB、搜狗 1069KB（已接近 1MB）。若被重定向到大文件，
+ * 主进程会一口气吃掉几十 MB，而这段代码就在"等搜索结果"的关键路径上。
+ *
+ * 这里造一个**远超上限**的流，验证：
+ * ① 没有把整段读进内存（读取提前结束）；
+ * ② 已读到的部分仍能正常解析出结果（不是一截断就全废）。
+ */
+describe("搜索页抓取的读取上限", () => {
+  it("超大响应体被截断，已读部分仍能解析出结果", async () => {
+    // 造一个 12MB 的页面：开头是合法结果，后面是填充
+    const head = `<li class="b_algo"><h2><a href="https://example.com/a">测试标题</a></h2><p>摘要文字</p></li>`;
+    const padding = "x".repeat(1024 * 1024);
+    let produced = 0;
+    const stream = new ReadableStream({
+      pull(controller) {
+        if (produced === 0) {
+          controller.enqueue(new TextEncoder().encode(head));
+          produced += 1;
+          return;
+        }
+        if (produced > 12) { controller.close(); return; }
+        controller.enqueue(new TextEncoder().encode(padding));
+        produced += 1;
+      }
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(stream, { status: 200, headers: { "Content-Type": "text/html" } })));
+
+    const text = await searchWeb("查询", {});
+    // ① 正常解析出了开头那条结果
+    expect(text).toContain("测试标题");
+    // ② **读取在上限处真的停了**：用"生产者被 pull 了几次"来判定，
+    // 而不是看最终文本长度——`parseBing(...).slice(0, 6)` 会把文本截到很小，
+    // 按长度断言的话，把上限调成 64MB 也照样"通过"（我实测过这个假通过）。
+    expect(produced).toBeLessThan(10);
+  });
+});

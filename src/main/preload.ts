@@ -49,6 +49,8 @@ const api: WorkbenchApi = {
   onLlmQuestion: (listener) => subscribe<LlmQuestionEvent>("llm:question", listener),
   answerLlmQuestion: (requestId, answers) => invoke("llm:answer", requestId, answers),
   skipLlmQuestion: (requestId) => invoke("llm:skip-question", requestId),
+  pendingQuestion: (sessionId) => invoke("llm:pending-question", sessionId),
+  turnState: (sessionId) => invoke("llm:turn-state", sessionId),
   onUpdateProgress: (listener) => subscribe("update:progress", listener),
   onTaskUpdate: (listener) => subscribe("task:update", listener)
 };

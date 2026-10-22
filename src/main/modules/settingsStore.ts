@@ -83,13 +83,26 @@ export function normalizeSettings(raw: Partial<AppSettings>, defaults: AppSettin
       )).filter((entry) => entry !== currentOutput).slice(-MAX_OUTPUT_DIR_HISTORY)
     : [];
   return {
-    localComfyUrl: str(raw.localComfyUrl, defaults.localComfyUrl),
+    // **地址必须允许空串**（实测缺陷 probe-no-backend, 2026-10-21）：
+    // 这里原来用 `str()`，空串会回落成默认值 `http://127.0.0.1:8188`。
+    // 于是用户清空地址（表达"我不想用本机"）后，磁盘上又变回默认地址，
+    // `backendAvailability` 判"本机可用" → `generate_video` 的准入闸门放行 →
+    // **在用户没有任何可用后端的情况下建出一条注定失败的任务**，
+    // 工具回执还写着「已创建 1 个视频生成任务：后端=本机 ComfyUI」。
+    // 空串在这里是有语义的"未配置"，与 host / username / comfyuiRoot 同一口径。
+    localComfyUrl: maybeStr(raw.localComfyUrl, defaults.localComfyUrl),
     outputDirectory: currentOutput,
     outputDirectoryHistory: history,
     comfyuiRoot: maybeStr(raw.comfyuiRoot, defaults.comfyuiRoot),
-    rbBaseUrl: str(raw.rbBaseUrl, defaults.rbBaseUrl),
+    // **服务地址同理允许空串**（与 localComfyUrl 同一处缺陷的姊妹项）：
+    // `str()` 会把空串换成默认值，于是"清空地址"这个动作**静默无效**——
+    // 用户以为改成未配置了，实际仍在连默认服务。
+    // 这两个不会像 localComfyUrl 那样误放行闸门（`assertUsable` 只看密钥），
+    // 但"改了没生效"同样是缺陷，且下游 `describeEndpoint` 会显示回默认地址、更让人困惑。
+    // 地址为空时由 adapter 侧给出明确错误（见 `adapterRegistry.get` 的注释）。
+    rbBaseUrl: maybeStr(raw.rbBaseUrl, defaults.rbBaseUrl),
     defaultBackend,
-    minimaxBaseUrl: str(raw.minimaxBaseUrl, defaults.minimaxBaseUrl),
+    minimaxBaseUrl: maybeStr(raw.minimaxBaseUrl, defaults.minimaxBaseUrl),
     llm: {
       provider: str(llm.provider, defaults.llm.provider),
       baseUrl: str(llm.baseUrl, defaults.llm.baseUrl),
@@ -106,7 +119,13 @@ export function normalizeSettings(raw: Partial<AppSettings>, defaults: AppSettin
       // 主机可以为空（未配置），但不能是数字。
       host: maybeStr(ssh.host, defaults.ssh.host),
       port: num(ssh.port, defaults.ssh.port, 1, 65_535),
-      username: str(ssh.username, defaults.ssh.username),
+      // **用户名也必须允许空串**（实测缺陷 probe-assert-usable）：这里原来用 `str()`，
+      // 而 `str()` 对空串会回落到默认值 `"root"`。于是用户在连接设置里**清空用户名**
+      // 并保存后，磁盘上写回的却还是 `root`——界面看起来清空了、读回来又是 root，
+      // 更糟的是 `assertUsable("ssh")` 判据是"host 与 username 都非空"，
+      // 被这个假值骗过、放行提交，建出一条注定失败的任务（用户还得手动删）。
+      // 空串在这里是有语义的"未配置"，与 host / comfyuiRoot 同一口径。
+      username: maybeStr(ssh.username, defaults.ssh.username),
       privateKeyPath: maybeStr(ssh.privateKeyPath, defaults.ssh.privateKeyPath),
       hostFingerprint: maybeStr(ssh.hostFingerprint, defaults.ssh.hostFingerprint),
       remoteComfyHost: str(ssh.remoteComfyHost, defaults.ssh.remoteComfyHost),
@@ -214,7 +233,17 @@ export class SettingsStore {
     // 与 update 共用同一条队列：密钥写入同样是读-改-写，并发会丢键/写坏 tmp。
     return this.serialize(async () => {
       const secrets = await this.readSecrets();
-      secrets[name] = safeStorage.encryptString(value).toString("base64");
+      // **空值 = 删除该键**（实测缺陷 probe-retry-nocred）：
+      // `encryptString("")` 是成功的，于是存下一个"能解开但内容为空"的密文——
+      // `hasSecret` 据此报 true（界面显示「已保存」），而 `getSecret` 返回空串
+      // （真正调用时又报"请先保存卡密"）。两处结论相反，用户无从判断到底存没存。
+      // 删键之后 `hasSecret` 自然为 false，语义与用户预期一致。
+      if (!value) {
+        if (!(name in secrets)) return; // 本来就没有：不必写盘
+        delete secrets[name];
+      } else {
+        secrets[name] = safeStorage.encryptString(value).toString("base64");
+      }
       await this.atomicWrite(this.secretPath, secrets);
     });
   }

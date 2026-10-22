@@ -87,7 +87,18 @@ export function App() {
     window.h3.checkForUpdates().then((response) => {
       if (!response.data) return;
       setUpdateInfo(response.data);
-      if (response.data.updateAvailable) setNotice({ text: `发现新版本 v${response.data.latestVersion}，点击左下角“下载更新”即可安装。` });
+      // **不能无条件覆盖当前提示**（实测缺口：探针里三次读到的是这条更新提示，
+      // 而不是它们各自触发的业务提示）。
+      //
+      // `checkForUpdates()` 走网络（GitHub API），可能比用户操作慢好几秒：
+      // 用户在挂载后很快点了某个按钮、拿到「AI 正在等你回答上面的选择题」
+      // 「该会话正在生成回复…」这类**业务提示**，几秒后更新检查回来把它顶掉——
+      // 用户还没读完就没了，而且这类提示往往是"为什么刚才那下没反应"的唯一解释。
+      // 底部侧栏本来就有「下载更新」入口，这条 toast 不是唯一告知渠道。
+      // 与下面框架更新那条保持同一口径（`current ?? …`）。
+      setNotice((current) => (!response.data!.updateAvailable ? current : current ?? {
+        text: `发现新版本 v${response.data!.latestVersion}，点击左下角“下载更新”即可安装。`
+      }));
     }).catch(() => undefined);
     // 智能体框架（Vercel AI SDK）随安装包分发，版本独立于应用本体——
     // 应用不更新时也该提示框架有新版本。此前主进程与 preload 都已就绪，
@@ -401,10 +412,15 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       onError(error);
     }
   }
+  // 同 `submit` / `purge`：`activeProject` 在 await 前后不变，连点会重复发 `tasks:delete`。
+  // 软删除本身幂等，但每次都会派发 `h3-tasks-changed` 并弹一次「已移入回收站」，
+  // 且第二次之后 `activeProjectId` 已被清空、后续逻辑读到的是上一帧的旧项目。
+  const deletingRef = useRef(false);
   async function deleteProject() {
-    if (!activeProject) return;
-    // 传任一真实任务 id，orchestrator 按 parentId 整组软删除。
+    if (!activeProject || deletingRef.current) return;
+    deletingRef.current = true;
     try {
+      // 传任一真实任务 id，orchestrator 按 parentId 整组软删除。
       const response = await window.h3.deleteTasks([activeProject[0].id]);
       if (!response.ok) { onError(response.message); return; }
       setActiveProjectId(undefined);
@@ -412,6 +428,8 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       window.dispatchEvent(new Event("h3-tasks-changed"));
     } catch (error) {
       onError(error);
+    } finally {
+      deletingRef.current = false;
     }
   }
   return <section className="page studio-page"><div className="page-title"><div><span className="eyebrow">CREATE</span><h1>生成工作台</h1></div><div className="page-title-actions"><button className="text-button" onClick={() => setShowTrash((v) => !v)}>🗑 回收站</button><div className="backend-pill"><span />{backendLabel(request.backend)}</div></div></div>
@@ -420,7 +438,12 @@ function StudioPage({ settings, tasks, onError, onNotice }: { settings: AppSetti
       {catEdit.project ? <input className="cat-input" autoFocus value={catEdit.value} placeholder="分类名（留空清除）"
         onChange={(e) => setCatEdit({ project: true, value: e.target.value })}
         onBlur={() => commitProjectCategory()}
-        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") setCatEdit({ project: false, value: "" }); }} />
+        onKeyDown={(e) => {
+          // 输入法组字中按 Enter 是"选字"，不该提交/失焦（实测缺陷 probe-ime-enter）。
+          if (isComposingKey(e)) return;
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") setCatEdit({ project: false, value: "" });
+        }} />
         : <button className="text-button" title="给当前项目设置分类" disabled={!activeProject} onClick={() => { if (activeProject) setCatEdit({ project: true, value: activeProject[0].category || "" }); }}>＋ 分类</button>}
     </div>}
     <div className="project-tabs">
@@ -517,27 +540,50 @@ function TrashPanel({ onError, onNotice }: { onError: (e: unknown) => void; onNo
     return Math.max(0, Math.ceil((retentionMs - (Date.now() - time)) / 86_400_000));
   };
   const notifyChanged = () => window.dispatchEvent(new Event("h3-tasks-changed"));
+  // 同 `purge` 的同步守卫：连点「恢复」会重复发请求，第二、三次作用在已恢复的记录上，
+  // 界面会闪出一次「已恢复」之后又报错（或反之），用户不知道到底恢复没恢复。
+  const restoringRef = useRef(false);
   // 回收站两个操作同样要兜住 IPC reject：否则点了没反应，也没有任何提示。
   async function restore(ids: string[]) {
+    if (restoringRef.current) return;
+    restoringRef.current = true;
     try {
       const r = await window.h3.restoreTasks(ids);
       if (!r.ok) { onError(r.message); return; }
-      onNotice("已恢复");
+      const back = r.data?.length ?? 0;
+      onNotice(back > 0 ? `已恢复 ${back} 条` : "这些项目已不在回收站，刷新后即可看到最新状态");
       notifyChanged();
       void refresh();
     } catch (error) {
       onError(error);
+    } finally {
+      restoringRef.current = false;
     }
   }
+  // **彻底删除不可逆**，重复执行最不该发生：实测连点「确认删除」3 次，
+  // 主进程真的收到 3 次 `tasks:purge`（用临时日志计数复现）。
+  // 目前第 2、3 次恰好是"空删"（targets 已空、unlinkIfInside 对不存在文件静默返回），
+  // 不造成数据损坏；但这是靠下游几个实现细节叠出来的巧合，不是这里守住了。
+  // 且第 2、3 次会各自走一遍 store.save，提示文案也与实际执行次数脱节。
+  const purgingRef = useRef(false);
   async function purge(ids: string[]) {
+    if (purgingRef.current) return;
+    purgingRef.current = true;
     try {
       const r = await window.h3.purgeTasks(ids);
       if (!r.ok) { onError(r.message); return; }
-      onNotice("已彻底删除（含视频文件）");
+      // 提示必须用**主进程实际清掉的条数**，而不是固定文案。
+      // 一是让"点了但什么都没删到"这种情况能看见（空数组 = 记录已被别处清掉），
+      // 二是守卫若将来失效，重复执行会立刻在文案上暴露（"已彻底删除 0 条"），
+      // 不会再像旧文案那样连点三次都说"已彻底删除"、无从分辨。
+      const removed = r.data?.length ?? 0;
+      onNotice(removed > 0 ? `已彻底删除 ${removed} 条（含视频文件）` : "这些项目已不在回收站，刷新后即可看到最新状态");
       notifyChanged();
       void refresh();
     } catch (error) {
       onError(error);
+    } finally {
+      purgingRef.current = false;
     }
   }
   return <section className="trash-panel">
@@ -586,11 +632,21 @@ function TaskCard({ task, index, onError, allowDemoPlaceholder = true, onRetried
   const bundledPoster = `${import.meta.env.BASE_URL}demo-videos/showcase-0${index + 1}.jpg`;
   const media = task?.outputPath ? `h3media://local/file?path=${encodeURIComponent(task.outputPath)}` : task ? "" : showDemo ? bundledMedia : "";
   const [retrying, setRetrying] = useState(false);
+  /**
+   * 同步守卫（`retrying` 只管按钮文案）。
+   *
+   * **`useState` 挡不住双击**（实测缺陷 probe-double-retry）：同一 tick 内连点两次，
+   * 两次都读到 `retrying === false`，于是发出两次 `retryTask` ——
+   * 后端实测建出**两个新任务组**，而云端重试是**真扣费**的（RB 扣卡密次数）。
+   * 与 `submitVideo` 早已用 `videoSubmittingRef` 修过的是同一类问题。
+   */
+  const retryingRef = useRef(false);
   // 视频加载失败（文件被手动删除、被过期清理、磁盘故障）时 <video> 只显示黑屏，
   // 用户以为"生成坏了"。这里记下失败并在原位给出可执行提示。
   const [mediaBroken, setMediaBroken] = useState(false);
   async function retry() {
-    if (!task || retrying) return;
+    if (!task || retryingRef.current) return;
+    retryingRef.current = true;
     setRetrying(true);
     // IPC 可能 reject（不只是返回 ok:false）。不兜住的话按钮永远停在「重试中…」。
     try {
@@ -602,6 +658,7 @@ function TaskCard({ task, index, onError, allowDemoPlaceholder = true, onRetried
     } catch (error) {
       onError(error);
     } finally {
+      retryingRef.current = false;
       setRetrying(false);
     }
   }
@@ -742,6 +799,10 @@ function GuidePage() { const guides = [
 
 function ConnectionsPage({ settings, setSettings, onError, onNotice }: { settings: AppSettings; setSettings: (s: AppSettings) => void; onError: (e: unknown) => void; onNotice: (s: string) => void }) {
   const [draft, setDraft] = useState(settings); const [apiKey, setApiKey] = useState(""); const [sshPassword, setSshPassword] = useState(""); const [rbCardCode, setRbCardCode] = useState(""); const [llmKey, setLlmKey] = useState(""); const [searchKey, setSearchKey] = useState(""); const [testing, setTesting] = useState<BackendKind>(); const [results, setResults] = useState<Partial<Record<BackendKind, BackendTestResult>>>({}); const [llmResult, setLlmResult] = useState<BackendTestResult>(); const [llmTesting, setLlmTesting] = useState(false); const [llmModels, setLlmModels] = useState<string[]>(); const [fetchingModels, setFetchingModels] = useState(false);
+  // **连点的同步守卫**（见 `test()` 的说明）：`testing` / `llmTesting` 是 state，
+  // 同一 tick 内连点挡不住，会真的发出两次探测请求。这两个 ref 只用于去重。
+  const testingRef = useRef<BackendKind | undefined>(undefined);
+  const llmTestingRef = useRef(false);
   // 各密钥是否**真的**已保存（`hasSecret` 会实际尝试解密：换机器/Local State 丢失后
   // 密文仍在但解不开，此时报 false——这正是我们要的语义）。
   //
@@ -802,6 +863,12 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
     }
   }
   async function test(kind: BackendKind) {
+    // **同步守卫挡住连点**（实测缺口 2026-10-21）：`testing` 是 React state，
+    // 同一 tick 内连点两次会双双读到旧值，于是**发两次真实的后端探测请求**
+    // （每次几秒到几十秒，云端还会各扣一次）。与 `retry` / `submitVideo` /
+    // `manualCompact` / `answerQuestions` 同一类问题、同一套修法：用 ref。
+    if (testingRef.current) return;
+    testingRef.current = kind;
     setTesting(kind);
     // 同 detect()/update()：IPC reject 时 setTesting(undefined) 不执行 → 按钮永久卡在「测试中…」。
     try {
@@ -831,11 +898,15 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
     } catch (error) {
       onError(error);
     } finally {
+      testingRef.current = undefined;
       setTesting(undefined);
     }
   }
   // LLM 测试：先保存当前草稿（含可能刚输入的 Key），再发最小对话验证全链路。
   async function testLlm() {
+    // 同 `test()`：连点会重复保存草稿 + 重复发一次真实对话验证。用 ref 挡住。
+    if (llmTestingRef.current) return;
+    llmTestingRef.current = true;
     setLlmTesting(true); setLlmResult(undefined);
     try {
       // 这两处同样是"先把草稿落盘"，必须把回读值同步给父组件与草稿：
@@ -847,7 +918,7 @@ function ConnectionsPage({ settings, setSettings, onError, onNotice }: { setting
       if (llmKey) await must(window.h3.setSecret("llmApiKey", llmKey));
       const result = await window.h3.testLlm();
       if (result.data) setLlmResult(result.data); else onError(result.message);
-    } catch (e) { onError(e); } finally { setLlmTesting(false); }
+    } catch (e) { onError(e); } finally { llmTestingRef.current = false; setLlmTesting(false); }
   }
   // 从上游拉取模型列表：同样先保存草稿与 Key（列表接口需要鉴权）。
   async function fetchModels() {
@@ -952,8 +1023,24 @@ interface PlaygroundMessage {
 const pgSessionsKey = "h3-playground-sessions";
 
 /** token 数的可读格式：12345 → "12.3k"。用于上下文占用与压缩提示。 */
-function formatTokens(tokens: number): string {
-  if (!Number.isFinite(tokens) || tokens < 0) return "0";
+/**
+ * 这次按键是不是**输入法组字过程中**产生的（中文/日文用户按 Enter 选字）。
+ *
+ * 为什么必须判断（实测缺陷 probe-ime-enter）：输入法组字时按 Enter 是"上屏候选词"，
+ * 而我们的 `onKeyDown` 只判 `key === "Enter"` 就直接 `send()` ——
+ * 用户拼音还没选完（「帮我生成一个xiao」）就被发了出去，输入框还被清空，
+ * 刚敲的内容全丢。中文用户几乎每次输入都要经过这一步。
+ *
+ * 两个信号都要认：`isComposing`（标准）与 `keyCode === 229`（部分输入法/旧浏览器
+ * 只在 keydown 上给 229，isComposing 为 false）。
+ */
+function isComposingKey(event: { isComposing?: boolean; keyCode?: number; nativeEvent?: { isComposing?: boolean; keyCode?: number } }): boolean {
+  if (event.isComposing || event.nativeEvent?.isComposing) return true;
+  const keyCode = event.keyCode ?? event.nativeEvent?.keyCode;
+  return keyCode === 229;
+}
+
+function formatTokens(tokens: number): string {  if (!Number.isFinite(tokens) || tokens < 0) return "0";
   return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(Math.round(tokens));
 }
 
@@ -1190,6 +1277,25 @@ export function stripTransientForPersist(sessions: PlaygroundSession[]): Playgro
   }));
 }
 
+/**
+ * 收尾时把「本地已渲染的正文」与「主进程带来的全量正文」合成一份。
+ *
+ * 规则只有一条：**取更长的那个**。它同时解决两个方向的问题——
+ * - 切页期间 `llm:chunk` 被丢弃 → 主进程那份更长，用它补齐中间缺的段落；
+ * - 本地已经渲染出来的比主进程那份还长（极端时序：done 事件先于最后一个 chunk 到达）
+ *   → 保留本地的，避免真实回复被更短的版本覆盖（"发消息没回复"那类）。
+ *
+ * **必须只有一个实现**：这条规则原先在两处各写了一遍（`onLlmDone` 与
+ * `turnState` 补齐），抽出来是为了让"多会话并发 + 切页"时两边口径不可能漂移。
+ * 注意它**只处理同一会话内**的合并；跨会话串台由调用方按 `sessionId` 定位气泡来保证
+ * （实测 probe-concurrent-switch：两会话同时流式、切页再切回，各自 10/10 字无串台）。
+ */
+export function mergeLongerText(current: string | undefined, incoming: string | undefined): string {
+  const existing = current ?? "";
+  const next = incoming ?? "";
+  return next.length > existing.length ? next : existing;
+}
+
 function loadSessions(): PlaygroundSession[] {
   try {
     return normalizeStoredSessions(JSON.parse(localStorage.getItem(pgSessionsKey) || "[]"));
@@ -1207,6 +1313,31 @@ function loadSessions(): PlaygroundSession[] {
  */
 const PgMarkdown = memo(function PgMarkdown({ content }: { content: string }) {
   return <>{renderMarkdown(content)}</>;
+});
+
+/** 用户气泡的默认显示上限（字符）。超出的部分折叠，点一下展开。 */
+const USER_TEXT_PREVIEW = 1_200;
+
+/**
+ * 用户消息正文渲染（**长文本必须折叠**）。
+ *
+ * 实测（probe-long-attachment，2026-10-20）：把一个 3000 行的文本文件当附件发出去后，
+ * `send()` 会把附件全文拼进用户消息（模型需要它），而这里原样全量渲染 ——
+ * 气泡实测 **54091px 高**。用户只是想发"看下这份纪要"，结果自己那条消息变成一整面墙，
+ * 往下翻很久才能看到 AI 的回复。
+ *
+ * 折叠只影响**显示**：发给模型的历史完全不变（构造历史用的是消息原内容），
+ * 也不动会话存储格式——所以老会话里已经存下的长消息同样受益，不需要迁移。
+ */
+const PgUserText = memo(function PgUserText({ content }: { content: string }) {
+  const [open, setOpen] = useState(false);
+  if (content.length <= USER_TEXT_PREVIEW || open) return <>{renderMarkdown(content)}</>;
+  return <>
+    <div className="pg-user-clip">{renderMarkdown(sliceSafe(content, USER_TEXT_PREVIEW))}</div>
+    <button className="pg-user-more" onClick={() => setOpen(true)}>
+      展开全文（还有 {content.length - USER_TEXT_PREVIEW} 字）
+    </button>
+  </>;
 });
 
 /**
@@ -1236,6 +1367,115 @@ interface PlaygroundDraft {
 }
 let playgroundDraft: PlaygroundDraft | undefined;
 
+/**
+ * 切页时**必须留住**的"活着的那一轮"（内存态，关掉应用即丢）。
+ *
+ * 为什么需要（实测缺陷 probe-page-switch-card）：`App` 用
+ * `{page === "playground" && <PlaygroundPage …/>}` 切页，切走时组件**整个卸载**——
+ * `sessions` / `activeId` / `generatingIds` 全在组件里，随之蒸发。
+ * 切回来时从 localStorage 重读，而那份被 `stripTransientForPersist` 剥掉了
+ * `questions` / `streaming` / 工具步骤（那是给"重启后 requestId 失效"设计的）。
+ *
+ * 后果：AI 正挂着一张选择题等回答（主进程 `questionBridge` 还在等，最长 180 秒），
+ * 用户切去别的页面看一眼再回来 —— **卡片没了、停止键没了、气泡变成「（空回复）」**。
+ * 他不知道这道题还在等，只能干等到超时。
+ *
+ * 与 `playgroundDraft` 同一套语义：只存内存、不进 localStorage；
+ * 重启后确实拿不回来（requestId 已失效，卡片留着也点不动，那种情况本来就该剥掉）。
+ */
+interface PlaygroundLive {
+  sessions: PlaygroundSession[];
+  activeId: string;
+  generatingIds: string[];
+}
+let playgroundLive: PlaygroundLive | undefined;
+
+/**
+ * 流式正文与任务 id 的累积缓冲（**模块级**，切页卸载后仍然保留）。
+ *
+ * 为什么不能放在组件内的 `useRef`（实测缺陷 probe-switch-mid-stream）：
+ * `onLlmChunk` 是**整体替换** content（`patchLast(msg => ({ ...msg, content: buffered }))`），
+ * 缓冲就是"到目前为止的全文"。组件卸载重建后会得到空 Map，
+ * 切回后第一个 chunk 只把新那一段写进去 —— **切页前收到的正文被覆盖掉**。
+ * 实测：切页前已有「甲乙」，切完再跑完只剩「戊己庚辛」。
+ *
+ * 与 `playgroundLive` 同一套语义：只存内存，关掉应用即丢（重启没有续传，本来就该清）。
+ */
+const uiStreamBuffers = new Map<string, string>();
+const uiTaskIdBuffers = new Map<string, string[]>();
+/**
+ * 以 plan 语义发出的会话集合（**模块级**，切页卸载后仍保留）。
+ *
+ * 见 `planTurnRef` 处的说明：`offDone` 靠它判断"这一轮要不要亮「继续执行」"，
+ * 放在组件内 useRef 里会在切页后清空，导致"方案出来了却没有按钮让它开工"。
+ */
+const uiPlanTurns = new Set<string>();
+
+/**
+ * 「刚点了继续执行」的计划消息 id（按会话）。
+ *
+ * `executePlan()` 在发请求前就把计划消息上的 `plan` 抹掉（避免按钮重复出现），
+ * 而这一轮**可能失败**（中转抖动是常态）。失败后要把标记还回去，
+ * 否则用户只剩一句"请求失败"，「继续执行」按钮再也不出现。
+ *
+ * 成功时清掉；失败（含"智能体回落普通对话"）时按这个 id 恢复 `plan: true`。
+ */
+const uiPlanMessageIds = new Map<string, string>();
+
+/** 工具名的中文标签。每个工具都必须有——否则界面会冒出英文标识符（违反「界面文案一律中文」）。 */
+const TOOL_LABELS: Record<string, string> = {
+  web_search: "联网搜索",
+  generate_video: "生成视频",
+  open_page: "打开网页",
+  create_file: "生成文件",
+  inspect_artifact: "自检页面",
+  read_artifact: "读取文件",
+  edit_artifact: "修改文件",
+  edit_artifact_batch: "批量修改文件",
+  update_plan: "更新步骤清单",
+  request_user_input: "向你提问",
+  // **新增工具必须在这里登记**：漏了会显示成「工具调用完成（完成）」——
+  // 用户根本看不出 AI 做了什么（实测：compute 上线后步骤条就是这么显示的）。
+  compute: "统计数据"
+};
+const toolLabelOf = (tool: string) => TOOL_LABELS[tool] ?? "工具调用";
+
+/**
+ * 把一条 `llm:tool` 事件拼成步骤条上的那一行。
+ *
+ * **必须有单一实现**：这条规则同时被"实时事件"与"切页后恢复"两条路径使用，
+ * 各写一份必然漂移（本项目已因"同一判定写两处"踩过多次）。主进程只存原始事件，
+ * 拼装规则全部留在渲染端这里。
+ */
+function formatToolStep(event: {
+  tool: string;
+  phase?: "start" | "end";
+  input?: string;
+  result?: string;
+  ok?: boolean;
+}): string {
+  const name = toolLabelOf(event.tool);
+  if ((event.phase ?? "start") === "end") {
+    const summary = (event.result ?? "完成").replace(/\s+/g, " ").trim();
+    const short = summary.length > 60 ? `${sliceSafe(summary, 60)}…` : summary;
+    // 成败用结构化字段，不靠摘要文本猜。**失败时不再加"失败"前缀**：
+    // 摘要本身已经是"修改文件失败：…"，再包一层就成了重复。
+    return event.ok === false ? `✕ ${short}` : `✓ ${name}完成（${short}）`;
+  }
+  const input = event.input ?? "";
+  return event.tool === "web_search" ? `→ 正在搜索：${input}`
+    : event.tool === "generate_video" ? "→ 正在创建视频生成任务…"
+      : event.tool === "open_page" ? `→ 正在打开网页：${input}`
+        : event.tool === "create_file" ? "→ 正在生成文件…"
+          : event.tool === "inspect_artifact" ? `→ 正在运行页面自检：${input}`
+            : event.tool === "read_artifact" ? `→ 正在读取文件：${input}`
+              : event.tool === "edit_artifact" ? `→ 正在修改文件：${input}`
+                : event.tool === "edit_artifact_batch" ? `→ 正在批量修改：${input}`
+                  : event.tool === "update_plan" ? "→ 正在更新步骤清单…"
+                    : event.tool === "request_user_input" ? "→ 正在向你提问…"
+                      : `→ ${name}中…`;
+}
+
 function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { settings: AppSettings; tasks: GenerationTask[]; onError: (e: unknown) => void; onNotice: (s: string) => void; onNavigate: (page: Page) => void }) {
   // **只解析一次 localStorage**：此前 `useState(loadSessions)` 与
   // `useState(() => loadSessions().find(...))` 各读一遍，等于把整份会话
@@ -1244,8 +1484,11 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const loaded = loadSessions();
     return { sessions: loaded, activeId: loaded.find((s) => !s.deletedAt)?.id || "" };
   });
-  const [sessions, setSessions] = useState<PlaygroundSession[]>(initial.sessions);
-  const [activeId, setActiveId] = useState<string>(initial.activeId);
+  // **优先从内存活态恢复**（切页会卸载本组件，见 `playgroundLive` 的说明）：
+  // 那里带着 `questions` / `streaming` / 工具步骤这些**只存在于内存**的瞬态字段，
+  // 而 localStorage 那份是剥过的。没有它，切页回来就看不到还在等的选择题。
+  const [sessions, setSessions] = useState<PlaygroundSession[]>(() => playgroundLive?.sessions ?? initial.sessions);
+  const [activeId, setActiveId] = useState<string>(() => playgroundLive?.activeId ?? initial.activeId);
   const active = sessions.find((s) => s.id === activeId);
   // 输入框 / 附件 / 计划开关 / 视频表单都从模块级草稿恢复（切页会卸载本组件）。
   const [input, setInput] = useState(() => playgroundDraft?.input ?? "");
@@ -1299,7 +1542,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   // 智能体默认开启（用户指令）；模型不支持工具时主进程自动回落普通对话，前端无感。
   const [agentMode, setAgentMode] = useState(() => playgroundDraft?.agentMode ?? true);
   // generating 从"全局"改为"按会话"：多会话可并发生成，每个会话各有自己的发送守卫与流缓冲。
-  const [generatingIds, setGeneratingIds] = useState<string[]>([]);
+  // **同样从活态恢复**：切页回来若把它丢了，那个会话的「■ 停止」会消失、
+  // 而主进程其实还在跑（用户再也停不下来，只能等它自己结束）。
+  const [generatingIds, setGeneratingIds] = useState<string[]>(() => playgroundLive?.generatingIds ?? []);
   const [showVideoForm, setShowVideoForm] = useState(() => playgroundDraft?.showVideoForm ?? false);
   // 任何一处草稿变化都写回缓存；卸载时不必额外处理（引用一直是最新的）。
   // 必须放在上面所有 `useState(() => playgroundDraft?.x)` 之后——否则初始化表达式
@@ -1307,18 +1552,45 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   useEffect(() => {
     playgroundDraft = { input, attachments, videoRequest, planNext, webSearch, browserSearch, agentMode, showVideoForm };
   }, [input, attachments, videoRequest, planNext, webSearch, browserSearch, agentMode, showVideoForm]);
+  /**
+   * 把"活着的那一轮"同步进内存活态（切页卸载后靠它恢复）。
+   *
+   * 必须**先于卸载**执行：React 会在卸载前跑最后一次 effect，而 `sessions` /
+   * `generatingIds` 在流式期间每次都变，所以这个 effect 会持续刷新。
+   */
+  useEffect(() => {
+    playgroundLive = { sessions, activeId, generatingIds };
+  }, [sessions, activeId, generatingIds]);
   // 与工作台共用同一份合法时长定义：RB 的 reference/tail_frame 只收 4/6/8 秒，
   // 若这里仍放开 10/12/15，非法 seconds+preset 组合会真的发到云端——失败也照样扣卡密次数。
   const videoDurationOptions = durationOptionsFor(videoRequest.backend, videoRequest.preset);
   // 每个会话一条流：sessionId → 累积文本 / 已收到的任务 id / 同步发送守卫。
-  const streamBuffers = useRef(new Map<string, string>());
-  const taskIdBuffers = useRef(new Map<string, string[]>());
+  //
+  // **这两个缓冲必须是模块级的**（实测缺陷 probe-switch-mid-stream）：
+  // 它们是"流式正文的累计值"，而 `onLlmChunk` 是**整体替换** content：
+  //     streamBuffers.set(id, (get(id) ?? "") + delta);
+  //     patchLast(msg => ({ ...msg, content: buffered }));
+  // 放在组件内 useRef 里时，切页卸载 → 重建为空 Map → 切回后第一个 chunk
+  // 把缓冲重置成"只有新来的一段"，**切页前已收到的正文被覆盖掉**。
+  // 实测：切页前已有「甲乙」，切回并跑完后只剩「戊己庚辛」。
+  // 与 `playgroundLive` 同一套语义：只存内存，关掉应用即丢。见 `uiStreamBuffers`。
+  const streamBuffers = { current: uiStreamBuffers };
+  const taskIdBuffers = { current: uiTaskIdBuffers };
   const sendingRef = useRef(new Set<string>());
   // 「提交生成任务」的同步守卫：同一 tick 内连点两次会读到两次 false，
   // 于是创建两组任务（RB 后端每次提交都扣卡密次数，等于重复扣费）。
   const videoSubmittingRef = useRef(false);
   // 首条消息的会话尚未创建时的同步守卫（见 send()：active 为空时按 id 守卫会失效）。
   const creatingSessionRef = useRef(false);
+  /**
+   * 已作答的 `requestId`（同步守卫）。
+   *
+   * 双击同一个选项时，第一次已经把卡片摘掉、主进程也已落定；
+   * 第二次必然返回 false，而那个 false 会被解释成「这组问题已经超时或结束了」——
+   * 用户双击一次选项却被告知"你答慢了"（实测缺陷 probe-double-answer）。
+   * `useState` 在同一 tick 内挡不住连点，与 `videoSubmittingRef` / `retryingRef` 同一类修法。
+   */
+  const answeredRef = useRef(new Set<string>());
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // 用户是否贴在底部：流式期间只有贴底才自动跟随。否则用户往上翻看历史时，
@@ -1328,9 +1600,23 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   const storageWarnedRef = useRef(false);
   const searchReady = Boolean(settings.searchApi.baseUrl);
   const generating = generatingIds.includes(activeId);
+  /**
+   * AI 正在等用户回答选择题（卡片挂在气泡上）。
+   *
+   * 为什么单独提出来（实测缺陷 probe-send-kills-card）：这一刻方形主键是「■ 停止」，
+   * 而用户看到输入框还能打字，很自然地打完字去点它——**整轮对话当场被终止**，
+   * 选择题卡片一起消失，他刚才想说的内容再也发不出去。
+   * 所以在"等回答"期间，方形键不执行停止，改为提示去处；真停止仍可用下方的「■ 停止」。
+   */
+  const awaitingAnswer = Boolean(active?.messages.some((m) => m.questions));
   // 以 plan 语义发出的会话集合（按会话隔离，多会话并发时不串味）。
   // offDone 是订阅回调、读不到最新 state，故用 ref；由 onLlmDone 消费后自行删除。
-  const planTurnRef = useRef(new Set<string>());
+  //
+  // **必须模块级**（实测缺陷 probe-plan-turn-while-away）：它记录的是"这一轮是计划语义"，
+  // 而 `offDone` 靠它决定要不要给收尾消息打 `plan: true`（渲染端据此亮「继续执行」）。
+  // 放在组件内 useRef 里，切页卸载后重建为空 Set —— 切回来收尾时判不出是计划轮，
+  // 用户看到一份完整方案，却**没有任何办法让它开工**。
+  const planTurnRef = { current: uiPlanTurns };
   // 上下文占用：分母是「模型窗口 × 80%」= 压缩触发点。按当前会话的历史轮询（主进程持有记账状态）。
   const [contextStatus, setContextStatus] = useState<ContextStatus>();
   const [compacting, setCompacting] = useState(false);
@@ -1443,55 +1729,25 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       setSessions((all) => patchLast(all, targetId, (msg) => ({ ...msg, content: buffered })));
     });
     // 智能体多步工具日志：start 追加"→ …"，end 追加"✓ …"——用户能看到完整过程而非光标空闪。
-    // 每个工具都必须有**中文名**：此前只有 web_search / generate_video / open_page 有映射，
-    // create_file / update_plan / request_user_input 会直接冒出英文标识符（"→ 正在调用 create_file…"），
-    // 违反「界面文案一律中文」。end 的 result 可能很长（create_file 的确认文案约百字），截断展示。
-    const TOOL_LABELS: Record<string, string> = {
-      web_search: "联网搜索",
-      generate_video: "生成视频",
-      open_page: "打开网页",
-      create_file: "生成文件",
-      inspect_artifact: "自检页面",
-      read_artifact: "读取文件",
-      edit_artifact: "修改文件",
-      edit_artifact_batch: "批量修改文件",
-      update_plan: "更新步骤清单",
-      request_user_input: "向你提问"
-    };
-    const toolLabel = (tool: string) => TOOL_LABELS[tool] ?? "工具调用";
+    // **拼装规则在模块级 `formatToolStep`**（切页后恢复也用它，两处必须同一份实现）。
     const offTool = window.h3.onLlmTool((event) => {
       const targetId = event.sessionId;
       if (!targetId) return;
-      setSessions((all) => patchLast(all, targetId, (msg) => {
-        const steps = msg.toolSteps ?? [];
-        const name = toolLabel(event.tool);
-        const summary = (event.result ?? "完成").replace(/\s+/g, " ").trim();
-        const shortSummary = summary.length > 60 ? `${sliceSafe(summary, 60)}…` : summary;
-        if ((event.phase ?? "start") === "end") {
-          // 成败用结构化字段，不靠摘要文本猜："完成"指工具调用结束，不代表操作成功。
-          // 实测踩到：edit_artifact 拒绝歧义编辑时曾渲染成 `✓ 修改文件完成（oldText 出现了 2 次…）`。
-          // **失败时不要再加"失败"前缀**：摘要本身已经是"修改文件失败：…"，
-          // 再包一层就成了 `✕ 修改文件失败（修改文件失败：…）`（探针里看到的重复）。
-          // 缺省视为成功（兼容没有该字段的旧事件）。
-          return { ...msg, toolSteps: [...steps, event.ok === false ? `✕ ${shortSummary}` : `✓ ${name}完成（${shortSummary}）`] };
-        }
-        const label = event.tool === "web_search" ? `→ 正在搜索：${event.input}`
-          : event.tool === "generate_video" ? "→ 正在创建视频生成任务…"
-            : event.tool === "open_page" ? `→ 正在打开网页：${event.input}`
-              : event.tool === "create_file" ? "→ 正在生成文件…"
-                : event.tool === "inspect_artifact" ? `→ 正在运行页面自检：${event.input}`
-                  : event.tool === "read_artifact" ? `→ 正在读取文件：${event.input}`
-                    : event.tool === "edit_artifact" ? `→ 正在修改文件：${event.input}`
-                      : event.tool === "edit_artifact_batch" ? `→ 正在批量修改：${event.input}`
-                  : event.tool === "update_plan" ? "→ 正在更新步骤清单…"
-                  : event.tool === "request_user_input" ? "→ 正在向你提问…"
-                    : `→ ${name}中…`;
-        return { ...msg, toolSteps: [...steps, label] };
-      }));
+      setSessions((all) => patchLast(all, targetId, (msg) => ({
+        ...msg,
+        toolSteps: [...(msg.toolSteps ?? []), formatToolStep(event)]
+      })));
     });
     const offDone = window.h3.onLlmDone((event) => {
       const targetId = event.sessionId;
-      const buffered = targetId ? streamBuffers.current.get(targetId) ?? "" : "";
+      // **收尾优先用主进程带来的全量文本**（见 `LlmDoneEvent.fullText` 的说明）：
+      // 切页会卸载本组件，那段时间的 `llm:chunk` 没人接收、直接丢掉——
+      // 仅靠本地缓冲补出来会**中间缺一段**（实测：`甲乙` + `戊己庚辛`，缺「丙丁」）。
+      // 主进程逐 delta 累计过一份完整文本，这里取更长的那份即可补齐。
+      const localBuffered = targetId ? streamBuffers.current.get(targetId) ?? "" : "";
+      const buffered = (typeof event.fullText === "string" && event.fullText.length > localBuffered.length)
+        ? event.fullText
+        : localBuffered;
       const pendingGroups = targetId ? taskIdBuffers.current.get(targetId) ?? [] : [];
       // 本轮是否以 plan 语义发出：决定要不要给收尾消息打「待确认」标记（渲染端据此亮「继续执行」）。
       const wasPlanTurn = targetId ? planTurnRef.current.has(targetId) : false;
@@ -1502,8 +1758,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       }
       if (targetId) {
         setSessions((all) => patchLast(all, targetId, (msg) => {
-          // 收尾取缓冲区与消息内容的较长者：避免真实回复被空 content 覆盖（"发消息没回复"）。
-          const base = buffered.length > (msg.content?.length ?? 0) ? buffered : msg.content;
+          // 收尾取缓冲区与消息内容的较长者（规则见 `mergeLongerText`）：
+          // 避免真实回复被空 content 覆盖（"发消息没回复"）。
+          const base = mergeLongerText(msg.content, buffered);
           const failed = !event.ok && Boolean(event.message);
           // 收尾把缓冲里**尚未出现**的任务并入（保持"哪几路是一起提交的"）。
           //
@@ -1538,6 +1795,19 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
       if (targetId) {
         setGeneratingIds((all) => all.filter((id) => id !== targetId));
         sendingRef.current.delete(targetId);
+        // **这一轮其实没干成时，把「继续执行」还给用户**（实测缺陷 probe-execute-plan-fail）。
+        //
+        // 两种"没干成"都要算：
+        // ① `!event.ok`（硬失败）；
+        // ② `event.fellBack`（智能体失败、已自动回落普通对话——`ok` 仍是 true，
+        //    但用户点「继续执行」想要的事情一件没做）。
+        // `executePlan` 在发请求前就把计划消息上的 `plan` 抹掉了，不恢复的话
+        // 按钮再也不出现，用户只剩一句错误文案。
+        const planMessageId = uiPlanMessageIds.get(targetId);
+        if (planMessageId) {
+          uiPlanMessageIds.delete(targetId);
+          if (!event.ok || event.fellBack) restorePlanMark(targetId, planMessageId);
+        }
       }
       if (!event.ok && event.message) onError(new Error(event.message));
     });
@@ -1641,6 +1911,167 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
   useEffect(() => { setPreview(undefined); }, [activeId]);
   // 新会话创建完成后释放"正在建会话"哨兵（此时 active 已就绪，守卫由 sendingRef 接管）。
   useEffect(() => { if (activeId) creatingSessionRef.current = false; }, [activeId]);
+  /**
+   * **补齐"离开期间丢失的提问"**（实测缺陷 probe-question-while-away）。
+   *
+   * 切页会卸载本组件，那段时间 `llm:question` 事件没有订阅者、被直接丢弃；
+   * 而主进程的 `questionBridge` 仍在挂起等回答。用户切回来时若看不到卡片，
+   * 只能干等到 180 秒超时——AI 那边还以为在等人。
+   *
+   * 组件挂载（含切页回来）与切换会话时各问一次主进程，有就补挂上去。
+   * `msg.questions` 已存在时不动它（事件正常送达的情况由订阅那条路径负责）。
+   */
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await window.h3.pendingQuestion(activeId);
+        if (cancelled || !response.ok || !response.data) return;
+        const { requestId, questions } = response.data;
+        setSessions((all) => patchLast(all, activeId, (msg) => (
+          msg.questions ? msg : { ...msg, questions: { requestId, questions } }
+        )));
+      } catch {
+        // 补不回来就当没有：这条路径只是"锦上添花"，不能因为它让界面报错。
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeId]);
+  /**
+   * **补齐"离开期间丢掉的整轮收尾"**（实测缺陷 probe-tasks-while-away）。
+   *
+   * 切页会卸载本组件，那段时间 `llm:chunk` / `llm:tasks` / `llm:done` **全部**被丢弃。
+   * 最严重的是 `llm:done` —— 渲染端靠它清 `generatingIds` 与 `streaming`：
+   * 丢了这个，会话就**永久停在「生成中」**（■ 停止一直在），
+   * 而 `send()` 的守卫会一直 return，用户**再也发不出新消息**；
+   * 期间建出的视频任务卡片也一并消失。
+   *
+   * 主进程保留了本轮状态（正文 / 任务 id / 是否已收尾），挂载或切回会话时补齐。
+   */
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await window.h3.turnState(activeId);
+        if (cancelled || !response.ok || !response.data) return;
+        const state = response.data;
+        const target = activeId;
+        // 正文：只在比现有更长时覆盖（与 onLlmDone 同一口径）。
+        if (state.fullText) {
+          streamBuffers.current.set(target, state.fullText);
+        }
+        // 任务 id：并入当前气泡（与 onLlmTasks 同一口径，按 id 去重）。
+        if (state.taskIds.length > 0) {
+          setSessions((all) => patchLast(all, target, (msg) => {
+            const seen = new Set((msg.taskGroups ?? []).flat());
+            const missing = state.taskIds.filter((id) => !seen.has(id));
+            return missing.length ? { ...msg, taskGroups: [...(msg.taskGroups ?? []), missing] } : msg;
+          }));
+        }
+        // 产物同理：切页期间丢掉的 `llm:artifact` 靠它补齐
+        // （否则气泡写着"写好了"，却没有任何文件卡片，而磁盘上文件确实在）。
+        if (state.artifacts.length > 0) {
+          setSessions((all) => patchLast(all, target, (msg) => {
+            const existing = msg.artifacts ?? [];
+            if (existing.length === 0) return { ...msg, artifacts: [...state.artifacts] };
+            // **同一 path 要按主进程那份元数据就地更新**（实测缺陷 probe-edit-update-while-away）：
+            // 切页期间 `edit_artifact` 的更新事件被丢弃，文件已经变大、卡片却停在旧大小
+            // （实测：磁盘 12KB，卡片仍写 1 KB）。只按 path 跳过会把这种"同文件的新版本"漏掉。
+            let changed = false;
+            const merged = existing.map((item) => {
+              const fresh = state.artifacts.find((a) => a.path === item.path);
+              if (!fresh || (fresh.size === item.size && fresh.name === item.name)) return item;
+              changed = true;
+              return { ...item, name: fresh.name, size: fresh.size, kind: fresh.kind };
+            });
+            const missing = state.artifacts.filter((a) => !existing.some((b) => b.path === a.path));
+            if (!changed && missing.length === 0) return msg;
+            return { ...msg, artifacts: [...merged, ...missing] };
+          }));
+        }
+        // 工具步骤同理（同一根因的第五个实例）：切页期间 `llm:tool` 全丢，
+        // 用户切回来看「已执行 0 次工具调用」，而 AI 其实做了好几次搜索。
+        // **复用 `formatToolStep`**——拼装规则只该有一份，否则两处必然漂移。
+        if (state.toolSteps.length > 0) {
+          setSessions((all) => patchLast(all, target, (msg) => (
+            // 已经有步骤说明这轮事件正常送达，以现有为准；只在为空时还原。
+            msg.toolSteps && msg.toolSteps.length > 0
+              ? msg
+              : { ...msg, toolSteps: state.toolSteps.map((step) => formatToolStep(step)) }
+          )));
+        }
+        // 步骤清单同理（同一根因的第六个实例）：切页期间 `llm:plan` 全丢，
+        // 用户切回来气泡上一条清单都没有。清单是常驻显示、"做得对不对"的主要依据。
+        if (state.planSteps && state.planSteps.length > 0) {
+          setSessions((all) => patchLast(all, target, (msg) => (
+            msg.planSteps && msg.planSteps.length > 0 ? msg : { ...msg, planSteps: state.planSteps }
+          )));
+        }
+        // 压缩提示同理（第七个实例）：历史被摘要过了却没有任何说明，用户会以为对话丢了。
+        if (state.compactionNotices.length > 0) {
+          setSessions((all) => all.map((session) => {
+            if (session.id !== target) return session;
+            // 已经有一条压缩提示就说明事件送达过，不重复插。
+            if (session.messages.some((m) => m.notice && /上下文已从约/.test(m.content))) return session;
+            const notices = state.compactionNotices.map((info) => ({
+              id: crypto.randomUUID(),
+              role: "assistant" as const,
+              notice: true,
+              content: `（${info.reason}：上下文已从约 ${formatTokens(info.before)} 压到约 ${formatTokens(info.after)}，保留最近对话 + 交接摘要；此前细节以摘要形式保留）`
+            }));
+            // 插在最后一条助手消息**之前**（与实时路径同一位置约定）。
+            const messages = session.messages;
+            const last = messages[messages.length - 1];
+            const insertAt = last?.streaming ? messages.length - 1 : messages.length;
+            return { ...session, messages: [...messages.slice(0, insertAt), ...notices, ...messages.slice(insertAt)] };
+          }));
+        }
+        if (state.done) {
+          // **计划轮的「继续执行」标记也要补**（实测缺陷 probe-plan-turn-while-away）：
+          // `onLlmDone` 里靠 `planTurnRef` 判"这一轮是不是计划语义"，据此打 `plan: true`；
+          // 而那条路径在切页期间根本没跑过（事件丢了），恢复时若不算这一步，
+          // 用户会看到一份完整方案却**没有任何按钮让它开工**。
+          const wasPlanTurn = planTurnRef.current.has(target);
+          planTurnRef.current.delete(target);
+          setSessions((all) => patchLast(all, target, (msg) => {
+            const base = mergeLongerText(msg.content, state.fullText);
+            const failed = !state.ok && Boolean(state.message);
+            return {
+              ...msg,
+              streaming: false,
+              questions: undefined,
+              error: failed,
+              // 与 onLlmDone 同一判据（`looksLikePlan` 纯函数，两处共用）。
+              plan: wasPlanTurn && !failed && looksLikePlan(base) ? true : undefined,
+              content: failed
+                ? (base ? `${base}\n\n请求失败：${state.message}` : `请求失败：${state.message}`)
+                : base
+            };
+          }));
+          // **必须同时退出"生成中"**：否则停止键一直在、send() 守卫一直挡，
+          // 用户再也发不出新消息（这正是本缺陷最伤人的地方）。
+          setGeneratingIds((all) => all.filter((id) => id !== target));
+          sendingRef.current.delete(target);
+          streamBuffers.current.delete(target);
+          taskIdBuffers.current.delete(target);
+          // **与 `offDone` 同一口径**：执行轮失败（含智能体回落普通对话）时，
+          // 把「继续执行」还给用户。切页期间 `offDone` 根本没跑过，
+          // 少了这一步就会出现"在线路径有按钮、切页回来没按钮"的不一致。
+          const failedTurn = !state.ok || state.fellBack === true;
+          const planMessageId = uiPlanMessageIds.get(target);
+          if (planMessageId) {
+            uiPlanMessageIds.delete(target);
+            if (failedTurn) restorePlanMark(target, planMessageId);
+          }
+        }
+      } catch {
+        // 补不回来就当没有：这条路径只是兜底，不该让界面报错。
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeId]);
   const onMessagesScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1761,13 +2192,34 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     // 故无 active 时用 creatingSessionRef 这个同步哨兵挡住第二次点击。
     if (!text && attachments.length === 0) return;
     if (active) {
-      if (generatingIds.includes(active.id) || sendingRef.current.has(active.id)) return;
+      // **AI 挂着一张选择题等回答时，要先说清楚**（实测缺陷 probe-send-kills-card）：
+      // 此时用户在输入框打了字按 Enter，`send()` 原本静默 return —— 字还在框里、界面毫无反应，
+      // 他不知道该点上面的选项才能继续（而方形键那一刻是"停止"，点下去会直接终止整轮对话）。
+      // 这类"点了没反应"是最难自查的一类问题，所以宁可多一句提示。
+      if (active.messages.some((m) => m.questions)) {
+        onNotice("AI 正在等你回答上面的选择题——请点一个选项，或点「跳过，你决定」。");
+        return;
+      }
+      // **AI 正在回复时也要说清楚**（实测缺陷 probe-send-while-streaming）：
+      // 这一刻方形主键是「■ 停止」，用户在输入框打完字点它会被静默 return ——
+      // 字还在框里、界面毫无反应。他会以为"发了"或"卡住了"，然后反复点。
+      // 与上面"等回答选择题"那条同一类：被挡住必须说明原因。
+      if (generatingIds.includes(active.id) || sendingRef.current.has(active.id)) {
+        onNotice("AI 正在回复这条消息——等它说完，或点「■ 停止」后再发。你刚输入的内容还在框里。");
+        return;
+      }
     } else if (creatingSessionRef.current) {
       // 第一次点击已经进入"新建会话"流程，第二次点击必须被挡住。
       // 这个哨兵要**一直保持到 activeId 真正切换**（见下面重置的 useEffect），
       // 不能在 send() 里立即复位——React 是异步提交，同 tick 内 active 仍是 undefined。
       return;
     }
+    // **这条守卫目前是"防御性死代码"**（实测 2026-10-21）：`normalizeSettings` 里
+    // `llm.baseUrl` 用的是 `str()`——用户清空也会被回落成默认值，所以 `baseUrl` 永远非空。
+    // 保留它不是为了当下，是因为"服务地址是否允许为空"这条约定**已经改过三次**
+    // （`localComfyUrl` / `rbBaseUrl` / `minimaxBaseUrl` 都从"回落默认"改成了"允许空"）。
+    // 哪天 `llm.baseUrl` 也改成允许空串，没有这条守卫就会拿空地址去发请求。
+    // 注释写清楚，是为了避免下一个人误以为它在生产里真的会触发、白查一遍。
     if (!settings.llm.baseUrl) { onError(new Error("请先在连接设置中配置游乐场 LLM。")); return; }
     // 无会话时先本地创建会话对象再继续（不 return），避免首条消息被丢弃。
     let session = active;
@@ -1840,6 +2292,9 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     setGeneratingIds((all) => all.includes(target.id) ? all : [...all, target.id]);
     streamBuffers.current.set(target.id, "");
     taskIdBuffers.current.delete(target.id);
+    // 记下这条计划消息的 id：这一轮若失败（含"智能体回落普通对话"），
+    // 由 `offDone` 把「待确认」标记还回去（详见 `uiPlanMessageIds` 的说明）。
+    uiPlanMessageIds.set(target.id, planMsg.id);
     // 与 send() 同理：IPC 抛异常时必须清守卫，否则该会话永久发不出消息。
     try {
       const result = await window.h3.chatLlm(history, webSearch, agentMode, target.id, browserSearch, "execute");
@@ -1847,13 +2302,32 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
         setGeneratingIds((all) => all.filter((id) => id !== target.id));
         sendingRef.current.delete(target.id);
         setSessions((all) => patchLast(all, target.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${result.message || "未知错误"}` })));
+        restorePlanMark(target.id, planMsg.id);
       }
     } catch (error) {
       setGeneratingIds((all) => all.filter((id) => id !== target.id));
       sendingRef.current.delete(target.id);
       setSessions((all) => patchLast(all, target.id, (msg) => ({ ...msg, streaming: false, error: true, content: msg.content || `请求失败：${describeError(error, "未知错误")}` })));
+      restorePlanMark(target.id, planMsg.id);
       onError(error);
     }
+  }
+
+  /**
+   * 执行轮**失败**后把「待确认」标记还给计划消息。
+   *
+   * 实测缺陷 probe-execute-plan-fail：`executePlan` 在发请求**之前**就抹掉了 `plan`
+   * （为了"避免按钮重复出现"），而中转间歇性 ECONNRESET 是常态故障。
+   * 于是执行失败后按钮再也不出现，用户只剩一句"请求失败"，
+   * 唯一出路是手动再打一遍"按上面的计划执行"。
+   *
+   * 失败 = 这份计划还没被执行过，按钮理应还在；成功时才该把它永久去掉。
+   */
+  function restorePlanMark(sessionId: string, messageId: string) {
+    setSessions((all) => all.map((s) => s.id !== sessionId ? s : {
+      ...s,
+      messages: s.messages.map((m) => m.id === messageId ? { ...m, plan: true } : m)
+    }));
   }
 
   async function stop() {
@@ -1867,6 +2341,12 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     } finally {
       setGeneratingIds((all) => all.filter((id) => id !== activeId));
       sendingRef.current.delete(activeId);
+      // **本轮的两个缓冲也要清**：`streamBuffers` 保存着本轮已收到的全部 delta，
+      // 若不清，用户在"停止 → 切页 → 切回"之后它仍挂着；下一次 `send()` 虽然会重置它，
+      // 但中间那段时间它是纯占位（长回复可达几十 KB），且极端情况下
+      // `onLlmDone` 晚到会把旧缓冲补进新气泡。清掉最省心。
+      streamBuffers.current.delete(activeId);
+      taskIdBuffers.current.delete(activeId);
       // **主动停止要留下说明**（实测）：一个字都还没吐出来就点停止时，
       // 气泡会落到「（空回复）」——看起来像软件坏了，其实是用户自己停的。
       // 已经有内容时不动它（不要让"停止"覆盖已到的回复）。
@@ -1875,6 +2355,17 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           ? msg
           : { ...msg, streaming: false, content: msg.content || "（已停止生成）" }
       )));
+      // **执行计划被中途停止时，把「继续执行」还回去**（实测缺陷 probe-plan-stop）。
+      // `executePlan()` 发请求前就抹掉了计划标记，只靠 `offDone` 在"没干成"时恢复——
+      // 而它的判据是 `!event.ok || event.fellBack`，用户点停止时主进程发的是
+      // `done({ ok: true })`（abort 当正常收尾），于是按钮永远不回来，
+      // 用户想重来只能手动再打一遍"按上面的计划执行"。
+      // 半途而废的计划与"执行失败"是同一件事：都还没做完，都该能再点一次。
+      const planMessageId = uiPlanMessageIds.get(activeId);
+      if (planMessageId) {
+        uiPlanMessageIds.delete(activeId);
+        restorePlanMark(activeId, planMessageId);
+      }
     }
   }
 
@@ -1883,13 +2374,21 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
    * 无论成功与否都把卡片摘掉：留着会让用户以为还能再答一次，而那个 requestId 早已落定。
    */
   async function answerQuestions(requestId: string, answers: Record<string, string[]>) {
+    // **双击同一个选项要挡住**（实测缺陷 probe-double-answer）：第一次已经把卡片摘掉、
+    // 主进程也已落定；第二次调用必然返回 false，而下面的代码把 false 一律解释成
+    // 「这组问题已经超时或结束了」——用户双击一次选项，被告知"你答慢了"。
+    // 与 `retry` / `manualCompact` 同一类问题：React state 在同一 tick 内挡不住连点。
+    if (answeredRef.current.has(requestId)) return;
+    answeredRef.current.add(requestId);
+    // 只记最近一批（requestId 每个都是新的，正常不会长到这里）
+    if (answeredRef.current.size > 200) answeredRef.current.clear();
     setSessions((all) => all.map((session) => session.id !== activeId ? session : {
       ...session,
       messages: session.messages.map((msg) => msg.questions?.requestId === requestId ? { ...msg, questions: undefined } : msg)
     }));
     try {
       const result = await window.h3.answerLlmQuestion(requestId, answers);
-      // 返回 false 通常是超时竞态（用户点得太慢），不是错误——提示一下即可，不弹红色报错。
+      // 走到这里的 false 才是真的超时竞态（用户点得太慢），提示一下即可，不弹红色报错。
       if (!result.ok || !result.data) onNotice("这组问题已经超时或结束了，AI 会按最合理的方式继续。");
     } catch (error) {
       onError(error);
@@ -2051,9 +2550,18 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
     const running = generatingIds.includes(session.id);
     return <div key={session.id} className={`pg-session${session.id === activeId ? " active" : ""}${running ? " running" : ""}${indented ? " indented" : ""}`}>
       {renamingId === session.id
-        ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(undefined); }} onFocus={(e) => e.target.select()} />
+        ? <input className="pg-rename" autoFocus value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => {
+          // 输入法组字中按 Enter 是"选字"，不该提交（实测缺陷 probe-ime-enter）。
+          if (isComposingKey(e)) return;
+          if (e.key === "Enter") commitRename();
+          if (e.key === "Escape") setRenamingId(undefined);
+        }} onFocus={(e) => e.target.select()} />
         : catSessionId === session.id
-        ? <input className="pg-rename" autoFocus value={catSessionDraft} placeholder="分类名（留空清除）" onChange={(e) => setCatSessionDraft(e.target.value)} onBlur={commitSessionCategory} onKeyDown={(e) => { if (e.key === "Enter") commitSessionCategory(); if (e.key === "Escape") setCatSessionId(undefined); }} onFocus={(e) => e.target.select()} />
+        ? <input className="pg-rename" autoFocus value={catSessionDraft} placeholder="分类名（留空清除）" onChange={(e) => setCatSessionDraft(e.target.value)} onBlur={commitSessionCategory} onKeyDown={(e) => {
+          if (isComposingKey(e)) return;
+          if (e.key === "Enter") commitSessionCategory();
+          if (e.key === "Escape") setCatSessionId(undefined);
+        }} onFocus={(e) => e.target.select()} />
         : <button className="pg-session-body" onClick={() => { switchSession(session.id); }} onDoubleClick={() => { setRenamingId(session.id); setRenameDraft(session.title || "新对话"); }} title="双击重命名">
           <strong>{session.title || "新对话"}</strong>
           <small>
@@ -2100,7 +2608,7 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           {!active || active.messages.length === 0 ? <div className="pg-empty"><strong>和 AI 聊聊视频创意</strong><span>让它帮你润色提示词、答疑，或直接在对话里生成视频。先到「连接设置」配置 LLM。</span></div>
             : active.messages.map((msg) => <div key={msg.id} className={`pg-msg ${msg.role}${msg.error ? " error" : ""}`}>
               {msg.role === "user" && msg.images?.map((url, i) => <img key={i} className="pg-thumb" src={url} alt="附件" />)}
-              <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <PgToolSteps steps={msg.toolSteps} running={Boolean(msg.streaming)} />}{msg.content ? <PgMarkdown content={msg.content} /> : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
+              <div className="pg-bubble">{msg.toolSteps && msg.toolSteps.length > 0 && <PgToolSteps steps={msg.toolSteps} running={Boolean(msg.streaming)} />}{msg.content ? (msg.role === "user" ? <PgUserText content={msg.content} /> : <PgMarkdown content={msg.content} />) : msg.streaming ? <span className="pg-cursor" /> : <em>（空回复）</em>}{msg.streaming && msg.content && <span className="pg-cursor" />}{(() => {
                 // 优先用主进程推来的已落盘产物（元数据，内容在磁盘上）。
                 // 回落到扫描正文围栏：兼容历史消息，以及模型没用工具、直接在回复里写文件内容的老路径。
                 if (msg.role === "assistant" && msg.artifacts?.length) {
@@ -2174,10 +2682,21 @@ function PlaygroundPage({ settings, tasks, onError, onNotice, onNavigate }: { se
           {/* 单框内嵌工具条（对齐 Codex 的 composer 形态）：输入框与发送键同框，工具 chips 在框下。
               保留 .pg-input-row / .primary 类名——E2E 与既有样式都按它们定位，改类名等于无谓的回归面。 */}
           <div className="pg-input-row">
-            <textarea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder={generating ? "AI 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
+            <textarea rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder={generating ? "AI 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"} onKeyDown={(e) => {
+              // **输入法组字中的 Enter 是"选字"，不是"发送"**（实测缺陷 probe-ime-enter）。
+              if (e.key !== "Enter" || e.shiftKey || isComposingKey(e)) return;
+              e.preventDefault();
+              void send();
+            }} />
             {/* 这个方形键在生成中就是停止键：图标已经是 ■，却还 disabled（灰掉、点了没反应），
                 用户只能去下面 chips 里找「■ 停止」。图标语义已经说明它是停止，就让它真能停。 */}
-            <button className="primary" aria-label={generating ? "停止生成" : "发送"} title={generating ? "停止生成" : "发送（Enter）"} disabled={!generating && !input.trim() && attachments.length === 0} onClick={generating ? stop : send}>{generating ? "■" : "▲"}</button>
+            {/* 这个方形键在生成中就是停止键：图标已经是 ■，却还 disabled（灰掉、点了没反应），
+                用户只能去下面 chips 里找「■ 停止」。图标语义已经说明它是停止，就让它真能停。
+                **但"等用户回答选择题"期间例外**（实测 probe-send-kills-card）：那一刻用户
+                看到输入框还能打字，很自然会打完字去点这个键——而它是停止，一点就把整轮
+                连同选择题卡片一起终结，想说的话再也发不出去。这时改为提示去处；
+                真要中止仍可用下方 chips 里的「■ 停止」。 */}
+            <button className="primary" aria-label={awaitingAnswer ? "请先回答上面的选择题" : generating ? "停止生成" : "发送"} title={awaitingAnswer ? "AI 正在等你回答上面的选择题（点「跳过，你决定」也可以继续）" : generating ? "停止生成" : "发送（Enter）"} disabled={!awaitingAnswer && !generating && !input.trim() && attachments.length === 0} onClick={awaitingAnswer ? () => onNotice("AI 正在等你回答上面的选择题——请点一个选项，或点「跳过，你决定」。") : generating ? stop : send}>{awaitingAnswer ? "…" : generating ? "■" : "▲"}</button>
           </div>
           <div className="pg-chips">
             <button className={webSearch ? "pg-chip on" : "pg-chip"} title="联网搜索：未配置搜索 API 时自动回落到免 key 抓取 Bing/搜狗（稳定性一般，配了 API 更可靠）" onClick={() => setWebSearch(!webSearch)}>🌐 联网{searchReady ? "" : "（免 key 抓取）"}</button>
@@ -2513,6 +3032,31 @@ function PgPreviewPanel({ artifact, onClose, width, onResize, onError }: { artif
     dragCleanupRef.current?.();
     dragCleanupRef.current = undefined;
   }, []);
+  /**
+   * **Esc 关闭预览**（实测缺口 2026-10-21）。
+   *
+   * 应用里其它浮层都支持 Esc（重命名输入框、分类输入框、会话回收站遮罩），
+   * 唯独这个占掉半个屏幕的预览面板只能点右上角的小 ×。
+   * Esc 是用户对"浮层"的默认预期，缺了它就得多找一次鼠标。
+   *
+   * 挂在 `window` 上而不是面板自己（`tabIndex`）：焦点通常在 iframe 里
+   * （用户点过预览页面内部），keydown 事件根本到不了面板元素——
+   * 只有 window 级监听才能收到 iframe 之外的按键。
+   *
+   * **不拦输入框里的 Esc**：用户在聊天框里按 Esc 是想取消输入，
+   * 不该顺手把预览也关掉（这里只判目标不是 INPUT/TEXTAREA）。
+   */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
   function onDragStart(e: React.MouseEvent) {
     e.preventDefault();
     dragRef.current = { startX: e.clientX, startWidth: width };
@@ -2643,35 +3187,146 @@ function PgQuestionCard({ questions, onSubmit, onSkip }: {
   onSubmit: (answers: Record<string, string[]>) => void;
   onSkip: () => void;
 }) {
+  // 当前答到第几题（逐题推进）。
+  const [step, setStep] = useState(0);
   const [picked, setPicked] = useState<Record<string, string[]>>({});
-  const toggle = (question: LlmQuestion, optionId: string) => {
-    setPicked((all) => {
-      const current = all[question.id] ?? [];
-      if (!question.multiSelect) return { ...all, [question.id]: [optionId] };
-      return { ...all, [question.id]: current.includes(optionId) ? current.filter((id) => id !== optionId) : [...current, optionId] };
-    });
-    // 单选：点完立刻提交这一题（只有一道题时就是提交全部，多道题时逐题落定）。
-    if (!question.multiSelect && questions.length === 1) onSubmit({ [question.id]: [optionId] });
+  // 每题的自定义输入：`{ [questionId]: 文本 }`。非空即代表"选了自定义"。
+  const [custom, setCustom] = useState<Record<string, string>>({});
+  const question = questions[step];
+  const customText = question ? (custom[question.id] ?? "") : "";
+  const usingCustom = customText.trim().length > 0;
+  const pickedFor = question ? (picked[question.id] ?? []) : [];
+
+  /**
+   * 把「已选的选项 id」+「自定义原文」合成该题的答案。
+   * `override` 用于"刚点下的选项"：`setPicked` 是异步的，同一 tick 读 `picked` 还是旧值。
+   */
+  const answerFor = (target: LlmQuestion, override?: string[]): string[] => {
+    if (override) return override;
+    const text = (custom[target.id] ?? "").trim();
+    // **单选**：自定义优先，不叠加预设选项（否则模型会以为"两个都选了"）。
+    // **多选**：补一句自定义不该把已勾的选项清掉（实测缺陷 probe-multi-custom）——
+    // 用户勾了「加字幕」「配背景音乐」再写「再加个片尾」，本意是三个都要，
+    // 而旧逻辑只把自定义那一句交上去，前面两个白勾了。多选的语义本来就是"可以多个"。
+    if (target.multiSelect) {
+      const picks = picked[target.id] ?? [];
+      return text ? [...picks, text] : picks;
+    }
+    return text ? [text] : picked[target.id] ?? [];
   };
+  const answered = (target: LlmQuestion) => answerFor(target).length > 0;
+
+  /** 把**所有已答**的题合成最终载荷；未答的不放进 map（主进程据此逐题说"未作答"）。 */
+  const collect = (overrideFor?: { id: string; value: string[] }): Record<string, string[]> => {
+    const answers: Record<string, string[]> = {};
+    for (const item of questions) {
+      const value = answerFor(item, overrideFor?.id === item.id ? overrideFor.value : undefined);
+      if (value.length > 0) answers[item.id] = value;
+    }
+    return answers;
+  };
+
+  const advance = (target: LlmQuestion, justPicked?: string[]) => {
+    const answers = collect(justPicked ? { id: target.id, value: justPicked } : undefined);
+    // 还有下一题 → 推进一步；已是最后一题 → 提交。
+    if (step < questions.length - 1) {
+      setStep(step + 1);
+      return;
+    }
+    onSubmit(answers);
+  };
+
+  const toggle = (target: LlmQuestion, optionId: string) => {
+    // 点预设选项即清掉自定义输入（二选一，不该同时生效）。
+    setCustom((all) => (all[target.id] ? { ...all, [target.id]: "" } : all));
+    setPicked((all) => {
+      const current = all[target.id] ?? [];
+      if (!target.multiSelect) return { ...all, [target.id]: [optionId] };
+      return { ...all, [target.id]: current.includes(optionId) ? current.filter((id) => id !== optionId) : [...current, optionId] };
+    });
+  };
+
+  if (!question) return null;
+  const isLast = step === questions.length - 1;
+  const multi = Boolean(question.multiSelect);
+  const canAdvance = answered(question);
+
   return <div className="pg-question-card">
-    <div className="pg-question-head">AI 想先确认几件事</div>
-    {questions.map((question) => <div key={question.id} className="pg-question">
+    <div className="pg-question-head">
+      AI 想先确认几件事
+      {questions.length > 1 && <span className="pg-question-step">第 {step + 1}/{questions.length} 题</span>}
+    </div>
+    {/* **必须告诉用户"不答会怎样、还剩多少时间"**（真机实测）：
+        主进程挂起等回答的时限是 180 秒（`DEFAULT_QUESTION_TIMEOUT_MS`），
+        超时后会自动按最佳判断继续。但卡片上此前一个字都没写——
+        用户看到卡片只以为"必须现在答"，去接杯水回来发现 AI 已经自己决定了，
+        或者反过来干等着以为不答就会卡住。两种误解都源于没说明规则。 */}
+    <div className="pg-question-hint">
+      不答也行：{Math.round(180 / 60)} 分钟后会按最合理的方式自动继续，你也可以直接点「跳过，你决定」。
+    </div>
+    <div className="pg-question">
       <div className="pg-question-title">{question.header && <span className="pg-question-chip">{question.header}</span>}{question.question}</div>
       <div className="pg-question-options">
         {question.options.map((option) => <button
           key={option.id}
-          className={`pg-question-option${(picked[question.id] ?? []).includes(option.id) ? " picked" : ""}`}
-          onClick={() => toggle(question, option.id)}
+          className={`pg-question-option${!usingCustom && pickedFor.includes(option.id) ? " picked" : ""}`}
+          onClick={() => {
+            // 必须把"刚点的这一个"显式传给 advance：setPicked 是异步的，
+            // 同一 tick 里读 picked 还是旧值（否则这题会被当成未作答）。
+            const next = multi
+              ? (pickedFor.includes(option.id) ? pickedFor.filter((id) => id !== option.id) : [...pickedFor, option.id])
+              : [option.id];
+            toggle(question, option.id);
+            // 单选：点完立刻进入下一题 / 提交（省一次点击）。
+            if (!multi) advance(question, next);
+          }}
         >
           <strong>{option.label}</strong>
           <small>{option.description}</small>
         </button>)}
+        {/* **选项最后一项永远是可以自由输入的**（用户明确要求）：
+            预设选项覆盖不完真实需求（"要 9 秒"、"竖屏 2.35:1"）。
+            做成"选项列表里的最后一项"，而不是独立区块——用户在这里挑东西的心智模型
+            就是"从这一列里选一个"，多出来的输入框也该在同一列里。 */}
+        <label className={`pg-question-option pg-question-custom${usingCustom ? " picked" : ""}`}>
+          <strong>其它（自己填）</strong>
+          <input
+            value={customText}
+            placeholder="选项里没有合适的？直接写你要的（如「9 秒」「竖屏」）"
+            onChange={(event) => {
+              const text = event.target.value;
+              setCustom((all) => ({ ...all, [question.id]: text }));
+              // **单选**才开始手写就清掉已选的预设选项（避免两个答案同时生效）。
+              // **多选不能清**（实测缺陷 probe-multi-custom）：用户勾了「加字幕」「配背景音乐」
+              // 再补一句「再加个片尾」，本意是三个都要；清空的话前两个白勾了。
+              if (text.trim() && !question.multiSelect) setPicked((all) => ({ ...all, [question.id]: [] }));
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              if (customText.trim()) advance(question);
+            }}
+          />
+        </label>
       </div>
-    </div>)}
+    </div>
     <div className="pg-question-actions">
-      {/* 多选或有多个问题时需要显式提交；单选单题已在点选时直接提交，这里不重复渲染按钮。 */}
-      {!(questions.length === 1 && !questions[0].multiSelect) && <button className="pg-plan-run" onClick={() => onSubmit(picked)}>确认</button>}
-      <button className="pg-question-skip" onClick={onSkip} title="不回答，让 AI 自己按最合理的方式做">跳过，你决定</button>
+      {/* 上一题：答错了能回去改，不必跳过整组重来。 */}
+      {step > 0 && <button className="pg-question-skip" onClick={() => setStep(step - 1)}>← 上一题</button>}
+      {/* 多选必须显式确认；单选点选项已自动推进，这里只在"填了自定义"时出现。 */}
+      {(multi || usingCustom) && canAdvance && <button className="pg-plan-run" onClick={() => advance(question)}>{isLast ? "确认" : "下一题"}</button>}
+      {/* **「跳过」不能把已经答过的题一起扔掉**（实测 probe-partial-skip）：
+          用户在第 1 题明确选了「本机 ComfyUI」，到第 2 题点跳过，走 `onSkip` 是
+          `questionBridge.skip()` → **整组 reject**，回执只剩「未获得用户回答」。
+          他选过的东西不算数了，模型只好自己猜——而在生成视频这个场景里，
+          "猜"意味着可能落到默认后端开跑、或自行挑云端（按秒计费）。
+          所以：**已经答过的题就按作答提交**，剩下的交给主进程 `formatAnswers`
+          逐题说"未作答，请按最合理的方式处理"。只有一题都没答时才真的整组跳过。 */}
+      <button className="pg-question-skip" onClick={() => {
+        const answers = collect();
+        if (Object.keys(answers).length > 0) onSubmit(answers);
+        else onSkip();
+      }} title="已答的照常提交，没答的让 AI 自己定">跳过，你决定</button>
     </div>
   </div>;
 }
@@ -2722,6 +3377,22 @@ function PgTrashPanel({ sessions, onRestore, onPurge, onClose, retentionDays }: 
   // confirm 在 Electron 里会弹阻塞式原生对话框，且自动化（CDP）会被挂住；
   // 本项目对 prompt 已有同样教训（"prompt() is not supported"），统一步调。
   const [confirmingId, setConfirmingId] = useState<string>();
+  // **Esc 关闭**（与预览面板、重命名/分类输入框保持一致）：
+  // 这是个有遮罩的模态面板，用户按 Esc 想关掉它是很自然的预期。
+  // 注意 Esc **只关闭面板本身**，不取消"二次确认"状态——两次操作语义不同，
+  // 混在一起会让"按一下 Esc 结果把待确认的彻底删除也撤了"这种事发生（虽然更安全，
+  // 但会让"取消"与"关闭"两个动作互相干扰）。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
   return <div className="pg-trash-overlay" onClick={onClose}>
     <section className="pg-trash" onClick={(e) => e.stopPropagation()}>
       <header><strong>会话回收站</strong><small>删除的会话保留 {retentionDays} 天，到期自动清除</small><button className="text-button" onClick={onClose}>关闭</button></header>

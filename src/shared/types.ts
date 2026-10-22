@@ -312,6 +312,49 @@ export interface WorkbenchApi {
   /** 跳过整组问题：主进程立即放行工具循环（模型按最佳判断继续），不必等超时。 */
   skipLlmQuestion(requestId: string): Promise<ApiResponse<boolean>>;
   /**
+   * 取该会话**当前挂起**的选择题（没有则 `undefined`）。
+   *
+   * 为什么需要（实测缺陷 probe-question-while-away）：渲染端切页会卸载 `PlaygroundPage`，
+   * 那段时间 `llm:question` 事件没有订阅者、被直接丢弃，而主进程的 `questionBridge`
+   * 仍在挂起等回答。用户切回来时看不到卡片，只能干等到超时。
+   * 渲染端在**挂载时**与**切回会话时**各调一次即可把丢掉的那张卡片补回来。
+   */
+  pendingQuestion(sessionId: string): Promise<ApiResponse<{ requestId: string; questions: LlmQuestionEvent["questions"] } | undefined>>;
+  /**
+   * 取该会话**本轮运行状态**（正文、任务 id、是否已收尾）。
+   *
+   * 切页会卸载 `PlaygroundPage`，那段时间 `llm:chunk` / `llm:tasks` / `llm:done`
+   * 全部没有订阅者、被直接丢弃。最严重的是 `llm:done`：渲染端靠它清 `generatingIds`
+   * 与 `streaming`，丢了这个就**永久停在「生成中」、再也发不出新消息**，
+   * 期间建出的任务卡片也一并消失（实测缺陷 probe-tasks-while-away）。
+   *
+   * 渲染端挂载/切回会话时调一次，把这三样补齐。已收尾的条目读一次即清。
+   */
+  turnState(sessionId: string): Promise<ApiResponse<{
+    fullText: string;
+    taskIds: string[];
+    /** 本轮产出的文件（`create_file` 建的）。切页期间 `llm:artifact` 会丢，靠它补齐。 */
+    artifacts: Array<{ name: string; path: string; size: number; kind: "html" | "sheet" | "doc" }>;
+    /**
+     * 本轮的**原始**工具事件（start/end 各一条）。切页期间 `llm:tool` 会全部丢失，
+     * 用户切回来看到「已执行 0 次工具调用」。存原始事件而非拼好的字符串：
+     * 拼装规则（中文名映射、摘要截断）属于渲染端，主进程复制一份必然会漂移。
+     */
+    toolSteps: Array<
+      | { phase: "start"; tool: string; input: string }
+      | { phase: "end"; tool: string; result: string; ok: boolean }
+    >;
+    /** 本轮最新的步骤清单（`update_plan` 是整份替换）。切页期间 `llm:plan` 会丢，靠它补齐。 */
+    planSteps?: Array<{ step: string; status: "pending" | "in_progress" | "completed" }>;
+    /** 本轮发生的压缩提示。切页期间 `llm:compaction` 会丢，靠它补齐（历史被改写必须可见）。 */
+    compactionNotices: Array<{ reason: string; before: number; after: number }>;
+    done: boolean;
+    ok: boolean;
+    /** 本轮智能体失败、已自动回落普通对话（`ok` 仍为 true，但这一轮其实没干成）。 */
+    fellBack?: boolean;
+    message?: string;
+  } | undefined>>;
+  /**
    * 安装包下载进度（`downloadAndInstallUpdate` 期间推送）。
    *
    * 主进程早就把 electron-updater 的 `download-progress` 接出来了，界面也备好了
@@ -360,6 +403,28 @@ export interface LlmDoneEvent {
   message?: string;
   /** 发起该轮的会话 id（老调用方可能不带，渲染端按"当前流式会话"兜底）。 */
   sessionId?: string;
+  /**
+   * 本轮推给渲染端的**全部 delta 拼接结果**。
+   *
+   * 为什么主进程要多带一份（实测缺陷 probe-switch-mid-stream 的残留）：
+   * 渲染端切页会卸载 `PlaygroundPage`，那段时间没有订阅者，`llm:chunk` 事件被丢弃——
+   * 切回后恢复出来的正文**中间缺一段**（实测：`甲乙` + `戊己庚辛`，缺「丙丁」）。
+   * 主进程本来就经手每个 delta，顺手累计一份即可让渲染端在收尾时补齐。
+   *
+   * 语义：包含所有 `chunk()` 推过的文本（含"已停止生成""连接中断重试"这类提示），
+   * 与渲染端 `streamBuffers` 的累计口径**完全一致**（那边也是把所有 delta 相加）。
+   */
+  fullText?: string;
+  /**
+   * 本轮**智能体失败、已自动回落普通对话**。
+   *
+   * 为什么必须单独标出来（实测缺陷 probe-execute-plan-fail）：回落之后 `ok` 仍然是 `true`
+   * （确实拿到了一段回复），渲染端无法从 `ok` 判断"这一轮其实没干成"。
+   * 计划模式下这一点尤其要紧：`executePlan` 在发请求前就把「继续执行」按钮收起来了，
+   * 若回落也算成功，按钮就再也不回来——用户手里只剩一句"请求失败"，
+   * 唯一的出路是手动再打一遍"按上面的计划执行"。
+   */
+  fellBack?: boolean;
 }
 
 /** 智能体工具创建视频任务事件：渲染端据此把结果卡片挂到当前会话的助手气泡上（否则任务只在工作台可见）。 */

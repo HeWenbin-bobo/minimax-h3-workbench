@@ -55,9 +55,21 @@ export function buildAgentMemoryHint(tasks: GenerationTask[]): string {
   const stop = new Set(["的", "了", "在", "是", "一", "个", "镜头", "画面", "缓慢", "逐渐", "视频", "生成", "风格", "高清"]);
   const bigrams = new Map<string, number>();
   for (const task of real.slice(0, 60)) {
-    const words = task.prompt.replace(/[，。！？、\s]+/g, " ").split(" ").filter((w) => w.length >= 2 && w.length <= 6 && !stop.has(w));
-    for (let i = 0; i < words.length - 1; i++) {
-      const key = `${words[i]}${words[i + 1]}`;
+    // **英文标点也要当分隔符**（实测 2026-10-21）：`generate_video` 的工具描述写着
+    // 「画面感强的英文 prompt 效果更好」，真实提示词大量是英文、用逗号分隔短语。
+    // 旧正则只认中文标点与空白，`lake,` 于是成了 5 个字符的"词"（刚好通过长度过滤），
+    // bigram 产出 `overlake,`、`moonlitlake,` 这类无意义串——而这段会被注入**每一轮**
+    // 的系统提示词，一旦凑够 3 次重复就长期污染上下文。
+    const words = task.prompt
+      .replace(/[,，.。!！?？;；:：、"'“”‘’()（）[\]【】{}｛｝<>《》/\\|@#$%^&*+=~`]+/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length >= 2 && w.length <= 6 && !stop.has(w));
+    for (let i = 0; i < words.length - 1; i += 1) {
+      // 中文词组直接相连（「赛博朋克」+「城市」→「赛博朋克城市」读得通）；
+      // 英文相邻词用空格还原（`fairy over` 比 `fairyover` 可读，也不会让模型
+      // 把两个词当成一个生造词）。
+      const ascii = /^[\x20-\x7e]+$/.test(words[i]) && /^[\x20-\x7e]+$/.test(words[i + 1]);
+      const key = ascii ? `${words[i]} ${words[i + 1]}` : `${words[i]}${words[i + 1]}`;
       bigrams.set(key, (bigrams.get(key) ?? 0) + 1);
     }
   }
@@ -65,5 +77,10 @@ export function buildAgentMemoryHint(tasks: GenerationTask[]): string {
   if (themes.length > 0) lines.push(`常见主题：${themes.join("、")}`);
 
   if (lines.length === 0) return "";
-  return `\n\n（参考：用户历史使用习惯——${lines.join("；")}。用户未明确指定时可按习惯给默认值，但用户明确说了的参数永远优先。）`;
+  // **必须给"生成后端"单独开例外**（实测矛盾，2026-10-21）：
+  // 这句"未明确指定时可按习惯给默认值"会与后端闸门直接打架——
+  // 闸门要求"多个后端可用时必须先问用户"，而这里在鼓励它照习惯填。
+  // 模型同时收到两条指令时行为不可预测（真机见过它照习惯直接用本机开跑）。
+  // 时长/数量/主题按习惯取默认值没问题，**后端不行**：不同后端的花费差一个数量级。
+  return `\n\n（参考：用户历史使用习惯——${lines.join("；")}。用户未明确指定时可按习惯给默认值，但用户明确说了的参数永远优先。**例外：用哪个后端生成必须问用户**——本机不额外计费、云端按秒计费、RB 扣卡密次数，花费差别很大，不能按习惯替他挑。）`;
 }

@@ -11,7 +11,7 @@ vi.mock("@ai-sdk/openai-compatible", () => ({
   createOpenAICompatible: () => ({ chatModel: (id: string) => ({ id }) })
 }));
 
-import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, humanizeToolInput, humanizeToolOutput, isToolFailure, type LlmServiceOptions } from "./llmService";
+import { consumeSse, chatAgent, LlmService, resolveChatPath, rewriteChatEndpoint, humanizeToolInput, humanizeToolOutput, isToolFailure, normalizeAgentQuestions, type LlmServiceOptions } from "./llmService";
 
 // 构造一个 ReadableStream，把字符串分块推送（模拟网络分包边界不齐）。
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
@@ -157,7 +157,11 @@ describe("工具成败判定（isToolFailure）", () => {
       ["web_search", "搜索关键词是空的。请给出 3–6 个具体的词，不要写整句话。", "搜索关键词是空的"],
       ["update_plan", "步骤清单是空的：请给出至少一步（每步写清要做什么 + 当前 status）。", "步骤清单是空的"],
       ["request_user_input", "没有要问的问题（questions 是空的）。如果确实需要用户拍板，请给出 1–3 个问题。", "没有要问的问题（questions 是空的）"],
-      ["edit_artifact_batch", "没有可应用的修改：edits 是空的。请把要改的内容写成至少一条 {oldText, newText}。", "没有可应用的修改"]
+      ["edit_artifact_batch", "没有可应用的修改：edits 是空的。请把要改的内容写成至少一条 {oldText, newText}。", "没有可应用的修改"],
+      // 实测 probe-nocred-backend：模型选了没配密钥的后端，`submit()` 前的前置检查拒绝。
+      // 这类回执不含「失败」二字，旧判定打勾 → 步骤条编出
+      // `✓ 生成视频完成（已创建视频任务）`，而回执原文写着"任务没有创建"——界面替模型撒谎。
+      ["generate_video", "后端「MiniMax H3」现在用不了：还没保存 MiniMax API Key。\n目前可用的有：本机 ComfyUI（local）。\n**任务没有创建**，不要告诉用户已经提交。", "后端「MiniMax H3」现在用不了"]
     ];
     for (const [tool, text, expected] of cases) {
       expect(isToolFailure(text), `${tool} 应判为未成功`).toBe(true);
@@ -184,6 +188,68 @@ describe("工具成败判定（isToolFailure）", () => {
   it("正常按行读回仍报行数（不误伤）", () => {
     const text = humanizeToolOutput("read_artifact", "文件：鹈鹕.html（共 2118 行，本次显示第 1–400 行）\n   1| …");
     expect(text).toBe("共 2118 行");
+  });
+
+  // 实测 probe-skip-question（2026-10-20）：用户**自己点**了「跳过，你决定」，
+  // 步骤条却渲染成 `✕ 用户未回答，按默认继续`——把他的主动选择当成工具故障。
+  // 回执里本来就有区分依据（skip / 超时 / 停止 三句文案各不相同），摘要各说各的即可。
+  describe("request_user_input 的跳过/超时/停止不能判成失败", () => {
+    const answered = [
+      "未获得用户回答（用户跳过了这组问题。）。请按你认为最合理的方式继续执行，并在回复里说明你做了哪些默认假设。",
+      "未获得用户回答（用户未在时限内回答。）。请按你认为最合理的方式继续执行。",
+      "未获得用户回答（用户停止了本轮对话。）。请按你认为最合理的方式继续执行。"
+    ];
+
+    it("三种「没答成」都不是失败（用户跳过是他主动的选择）", () => {
+      for (const text of answered) expect(isToolFailure(text), text.slice(0, 20)).toBe(false);
+    });
+
+    it("摘要要说清是哪种情况，不能一律「用户未回答」", () => {
+      expect(humanizeToolOutput("request_user_input", answered[0])).toBe("已跳过（按默认继续）");
+      expect(humanizeToolOutput("request_user_input", answered[1])).toBe("等待超时，按默认继续");
+      expect(humanizeToolOutput("request_user_input", answered[2])).toBe("已停止本轮");
+    });
+
+    it("真的拿到回答时仍说收到了", () => {
+      expect(humanizeToolOutput("request_user_input", "用户已回答：\n【时长】用户选择：6 秒"))
+        .toBe("已收到你的回答");
+    });
+  });
+
+  /**
+   * 后端闸门拒绝（22f67da 引入）的回执也必须判成"没做成"。
+   *
+   * 实测（真机 probe-real-ask-first 的日志）：闸门拦住时步骤条渲染成
+   * `✓ 生成视频完成（没有创建任务）`——**打了勾，却说没有创建任务**。
+   * 用户看到的是"成功了但什么也没发生"。
+   *
+   * 成因：回执以 `**还没有确定用哪个后端，任务没有创建。**` 开头，
+   * 既不含"失败"，也不在 `REJECTION_RE` 的清单里。
+   */
+  describe("后端闸门拒绝不算「完成」", () => {
+    const blocked = [
+      "**还没有确定用哪个后端，任务没有创建。** 现在有 2 个可用的生成方式：\n- 本机 ComfyUI（`local`）— 不额外计费\n请先用 `request_user_input` 问用户用哪一个。",
+      "后端「MiniMax H3」现在用不了：还没保存 MiniMax API Key。\n**任务没有创建**，不要告诉用户已经提交。"
+    ];
+
+    it("闸门拒绝要判成未成功（不能打勾）", () => {
+      for (const text of blocked) expect(isToolFailure(text), text.slice(0, 24)).toBe(true);
+    });
+
+    it("摘要要说「没有创建任务」，不能只写「完成」", () => {
+      expect(humanizeToolOutput("generate_video", blocked[0])).toMatch(/没有创建任务|还没有确定/);
+    });
+
+    /**
+     * **摘要会渲染成纯文本**（`.pg-tool-step` 是 `<div>{step}</div>`，不走 markdown），
+     * 所以回执里的 `**` 会**原样显示**成星号——实测提取出来是
+     * `**还没有确定用哪个后端，任务没有创建`。
+     */
+    it("摘要里不能残留 markdown 粗体标记（步骤条按纯文本渲染）", () => {
+      const summary = humanizeToolOutput("generate_video", blocked[0]);
+      expect(summary).not.toContain("**");
+      expect(summary).not.toContain("`");
+    });
   });
 
   // 本会话自引入：允许 `duration` / `count` 写成 `"8 秒"` / `"2 路"` 之后，
@@ -258,6 +324,42 @@ describe("工具成败判定（isToolFailure）", () => {
 });
 
 describe("工具摘要（humanizeToolOutput）", () => {
+  /**
+   * **报错必须优先于"画面是空的"**（真机实测 probe-real-selfheal）。
+   *
+   * 模型写了个页面，脚本里调用了不存在的 API（必然抛 ReferenceError），
+   * 而页面主体是静态表格、背景纯白 —— 同时命中"整屏纯色"与"运行时报错"。
+   * 旧顺序先判前者，摘要只给出「自检发现画面是空的」：模型据此以为问题是布局/渲染，
+   * 改了一行样式就去改别处，**那个必错 API 一动没动**，最后交付了一个跑不起来的页面。
+   */
+  it("inspect_artifact：同时『整屏纯色』且有运行时报错时，摘要先报错", () => {
+    const output = [
+      "自检结果：页面已在本机 Chromium 中真实运行（标题「成绩单」，12 个元素，可见文本 30 字）。",
+      "画面采样：整屏约有 98% 是同一种颜色（平均亮度 250）。**这通常意味着页面上什么都没画出来**——请检查布局与首帧渲染。",
+      "运行时报错（共 1 条，已去重）：",
+      "- 错误：Uncaught ReferenceError: __h3ProbeMissing is not defined"
+    ].join("\n");
+    const summary = humanizeToolOutput("inspect_artifact", output);
+    expect(summary).toContain("报错");
+    expect(summary).toContain("1 条");
+    // 空白只作为附注出现，不能取代结论
+    expect(summary).toContain("画面也很空");
+    expect(summary).not.toBe("自检发现画面是空的");
+  });
+
+  it("inspect_artifact：只有纯色、没有报错时，仍如实说画面是空的", () => {
+    const output = "自检结果：页面已运行。\n画面采样：整屏约有 99% 是同一种颜色。**这通常意味着页面上什么都没画出来**。"
+      + "\n控制台没有任何 error/warning（不影响运行）。";
+    expect(humanizeToolOutput("inspect_artifact", output)).toBe("自检发现画面是空的");
+  });
+
+  it("inspect_artifact：有报错但画面正常时，不附「画面也很空」", () => {
+    const output = "自检结果：页面已运行，12 个元素。\n运行时报错（共 2 条，已去重）：\n- 错误：a\n- 错误：b";
+    const summary = humanizeToolOutput("inspect_artifact", output);
+    expect(summary).toBe("自检发现 2 条报错");
+    expect(summary).not.toContain("画面也很空");
+  });
+
   it("update_plan 只给进度，不泄漏写给模型的指令", () => {
     const text = humanizeToolOutput("update_plan", "步骤清单已更新（0/4 已完成），用户能在对话里看到。继续执行下一步，不要在回复里重复整个清单。");
     expect(text).toBe("步骤 0/4 已完成");
@@ -356,7 +458,9 @@ describe("工具摘要（humanizeToolOutput）", () => {
 
 describe("chatAgent 工具暴露", () => {
   const options: LlmServiceOptions = { baseUrl: "https://example.com/v1", apiKey: "k", model: "m", systemPrompt: "" };
-  const callbacks = { webSearch: async () => "结果", generateVideo: async () => "已创建" };
+  // compute 是 `AgentToolCallbacks` 的必需字段（工具表无条件注册它，见 planMode 只读清单）；
+  // fixture 里必须给上，否则类型上就是缺字段的（此前靠结构化宽松侥幸通过）。
+  const callbacks = { webSearch: async () => "结果", generateVideo: async () => "已创建", compute: async () => "统计完成" };
   const messages = [{ role: "user" as const, content: "hi" }];
 
   // 让假 streamText 返回可控的异步流
@@ -367,6 +471,31 @@ describe("chatAgent 工具暴露", () => {
       finishReason: Promise.resolve("stop")
     }));
   }
+  /**
+   * **上游报错必须抛出来**（实测缺陷 probe-overflow-sideeffect, 2026-10-21）。
+   *
+   * AI SDK 在 `maxRetries` 用尽后不抛异常，而是把真实原因放进 `onError` 回调的
+   * `underlyingError` 里（直连 SDK 复现：`steps` 只有 1 个、最后一步 finishReason 是
+   * `"tool-calls"`、`stream.finishReason` 是 `"other"`——**都不是 "error"**）。
+   * 旧代码 `await stream.steps` 外面是裸 `catch {}`，把错误吞掉，
+   * 调用方拿到"成功但 0 工具调用"的结果，最终给用户一句与真实原因无关的文案。
+   */
+  it("上游报错（onError 带 underlyingError）时必须抛出去，不能被吞成空结果", async () => {
+    const boom = new Error("context length exceeded: maximum context length is 65536 tokens");
+    streamTextMock.mockImplementation((opts: { onError?: (arg: { error: unknown }) => void }) => ({
+      textStream: (async function* () { yield* []; })(),
+      // steps 在上游失败时也会 reject —— 旧代码的裸 catch 正是在这里吞掉错误
+      steps: Promise.reject(boom),
+      finishReason: Promise.resolve("other"),
+      // 真实 SDK 会先调 onError
+      __boom: (() => { opts.onError?.({ error: boom }); return true; })()
+    }));
+    const error = await chatAgent(options, messages, callbacks, () => {}, new AbortController().signal, true)
+      .catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("context length exceeded");
+  });
+
   function lastTools(): Record<string, unknown> {
     return (streamTextMock.mock.calls.at(-1)?.[0] as { tools: Record<string, unknown> }).tools;
   }
@@ -500,6 +629,8 @@ describe("chatAgent 工具暴露", () => {
     // inspect_artifact 本身只读，但它服务于"刚生成的产物"——计划模式不产文件，
     // 留着只会让模型以为有东西可查。与 create_file 同块摘除。
     expect(tools).not.toContain("inspect_artifact");
+    // compute 只读（只统计、不改文件）→ 计划模式保留，与提示词里的"可用工具"清单保持一致。
+    expect(tools).toContain("compute");
   });
 
   it("非计划模式下这些产物工具都在", async () => {
@@ -550,7 +681,9 @@ describe("chatAgent 工具暴露", () => {
 // "会被自动纠正/夹紧/补齐"所承诺的输入**。新加工具时它会第一时间变红。
 describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", () => {
   const options: LlmServiceOptions = { baseUrl: "https://example.com/v1", apiKey: "k", model: "m", systemPrompt: "" };
-  const callbacks = { webSearch: async () => "结果", generateVideo: async () => "已创建" };
+  // compute 是 `AgentToolCallbacks` 的必需字段（工具表无条件注册它，见 planMode 只读清单）；
+  // fixture 里必须给上，否则类型上就是缺字段的（此前靠结构化宽松侥幸通过）。
+  const callbacks = { webSearch: async () => "结果", generateVideo: async () => "已创建", compute: async () => "统计完成" };
   const messages = [{ role: "user" as const, content: "hi" }];
 
   async function schemas(): Promise<Record<string, { safeParse: (v: unknown) => { success: boolean; error?: { issues: Array<{ message: string }> } } }>> {
@@ -642,6 +775,26 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
     }).success).toBe(true);
   });
 
+  /**
+   * `edits` 的元素此前也是 `z.object(...)`（与 `update_plan` 同一处漏网）：
+   * 元素写成字符串、或用了 `old`/`new` 这类字段名时，整个调用会被静默跳过，
+   * 或者每条都变成空对象后被"oldText 为空"退回——两种都白烧步数。
+   */
+  it("edit_artifact_batch：字符串元素与口语字段名都不能拒掉整轮", async () => {
+    const s = (await schemas()).edit_artifact_batch;
+    for (const value of [
+      { name: "a.html", edits: ["把第 12 行的 M.ident 改成 M.identity"] },
+      { name: "a.html", edits: [{ old: "a", new: "b" }] },
+      { name: "a.html", edits: [{ search: "a", replace: "b" }] },
+      { name: "a.html", edits: [{ from: "a", to: "" }] },
+      { name: "a.html", edits: [{ oldText: null, newText: null }] },
+      { name: "a.html", edits: [null, 42] }
+    ]) {
+      const parsed = s.safeParse(value);
+      expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
+
   it("open_page：不带协议的地址由代码补 https", async () => {
     expect((await schemas()).open_page.safeParse({ url: "example.com/foo" }).success).toBe(true);
   });
@@ -700,6 +853,33 @@ describe("工具 schema 契约：可自动纠正的输入不能拒掉整轮", ()
       { questions: [{ id: "q1", question: "多久？", options: [{ id: "a", label: "6 秒" }] }] },
       { questions: [{ id: "q1", header: "时长", options: [{ id: "a" }] }] },
       { questions: [{ options: [] }] }
+    ]) {
+      const parsed = s.safeParse(value);
+      expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
+    }
+  });
+
+  /**
+   * `update_plan` 此前是 `z.array(z.object({...}))`——**元素级**仍是硬校验（实测 probe-plan-shapes）。
+   *
+   * 两种模型实际会写的形态都撞上它：
+   * ① 纯字符串数组 → 元素不是对象 → `InvalidToolInputError` → 整个调用被静默跳过，
+   *    气泡只留一句"本轮有 1 次工具调用没有真正执行（涉及：update_plan）"；
+   * ② `{ name: "…" }`（字段名换了）→ zod 剥掉未知键、元素变成空对象，
+   *    清单照常显示但全是「步骤 1 / 步骤 2」占位，模型写的内容全丢——**不报错**，更隐蔽。
+   *
+   * 判据与其他工具一致：代码本来就能纠正（补 step 名、归一 status），就不该让 schema 硬拒。
+   */
+  it("update_plan：字符串数组 / name 字段名 / 缺键都不能拒掉整轮", async () => {
+    const s = (await schemas()).update_plan;
+    for (const value of [
+      { plan: ["搜索资料", "整理数据", "写报告"] },
+      { plan: [{ name: "搜索资料" }, { name: "整理数据" }] },
+      { plan: [{ title: "搜索资料" }] },
+      { plan: [{ step: "搜索资料", status: "done" }] },
+      { plan: [] },
+      {},
+      { plan: null }
     ]) {
       const parsed = s.safeParse(value);
       expect(parsed.success, `${JSON.stringify(value)} → ${parsed.error?.issues[0]?.message}`).toBe(true);
@@ -847,6 +1027,98 @@ describe("非流式响应体取内容（空串不能被当成有内容）", () =
   // 错误文案，实测（probe-http-error）界面上出现
   // `LLM 请求失败：502 <!DOCTYPE html><html><head><title>502 Bad Gateway</title>…`
   // ——整段标签糊在气泡里，用户既读不出信息也不知道该做什么。
+  /**
+   * **首字节前的网络抖动要自动重试一次**（对齐智能体路径的整轮重试）。
+   *
+   * 实测的不对称：智能体有 3 次整轮重试 + 退避，普通对话一次都不重试——
+   * 同一个中转 ECONNRESET，开着智能体能扛过去、关掉就直接报错。
+   * 用户看不出两条路径的区别，只会觉得"有时好有时坏"。
+   */
+  describe("普通对话的网络重试", () => {
+    const makeService = () => new LlmService({ baseUrl: "https://llm.test/v1", apiKey: "k", model: "m", systemPrompt: "" });
+
+    it("首字节前连接重置 → 自动重试并成功", async () => {
+      let calls = 0;
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) {
+          // undici 的连接重置形态：message 带 terminated / fetch failed
+          const error = new Error("fetch failed");
+          (error as { cause?: unknown }).cause = { code: "ECONNRESET" };
+          throw error;
+        }
+        return new Response("data: " + JSON.stringify({ choices: [{ delta: { content: "好" } }] }) + "\n\ndata: [DONE]\n\n", {
+          status: 200, headers: { "Content-Type": "text/event-stream" }
+        });
+      }));
+      const chunks: string[] = [];
+      await makeService().chat([{ role: "user", content: "hi" }], false, (e) => { if (e.delta) chunks.push(e.delta); });
+      vi.unstubAllGlobals();
+      expect(calls).toBe(2);
+      expect(chunks.join("")).toContain("好");
+    });
+
+    it("**已经吐出内容后**网络中断 → 不重试（否则同一气泡里出现两份开头）", async () => {
+      let calls = 0;
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        calls += 1;
+        // 用 pull 模拟**真实**网络形态：先收到一块、再断开。
+        // （不能在 start 里 enqueue 后立刻 controller.error——那样消费者只会拿到错误、
+        //   拿不到那块数据，测出来的行为与真实网络不同。实测验证过这个差异。）
+        let pulls = 0;
+        const stream = new ReadableStream({
+          pull(controller) {
+            pulls += 1;
+            if (pulls === 1) {
+              controller.enqueue(new TextEncoder().encode(
+                "data: " + JSON.stringify({ choices: [{ delta: { content: "第一块" } }] }) + "\n\n"
+              ));
+              return;
+            }
+            const error = new Error("terminated");
+            (error as { cause?: unknown }).cause = { code: "ECONNRESET" };
+            controller.error(error);
+          }
+        });
+        return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }));
+      const chunks: string[] = [];
+      const error = await makeService().chat([{ role: "user", content: "hi" }], false, (e) => { if (e.delta) chunks.push(e.delta); })
+        .catch((e: Error) => e);
+      vi.unstubAllGlobals();
+      expect(chunks.join("")).toContain("第一块");
+      expect(calls).toBe(1); // 已经出过内容 → 不重试
+      expect(error).toBeInstanceOf(Error);
+    });
+
+    it("**HTTP 4xx 不重试**（Key 错/模型名错，重试必然同样失败）", async () => {
+      let calls = 0;
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ error: { message: "invalid api key" } }), {
+          status: 401, headers: { "Content-Type": "application/json" }
+        });
+      }));
+      const error = await makeService().chat([{ role: "user", content: "hi" }], false, () => {}).catch((e: Error) => e);
+      vi.unstubAllGlobals();
+      expect(calls).toBe(1);
+      expect((error as Error).message).toContain("API Key");
+    });
+
+    it("用户取消不重试（停止要立刻生效，不能被重试拖住）", async () => {
+      let calls = 0;
+      const service = makeService();
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        calls += 1;
+        throw new DOMException("aborted", "AbortError");
+      }));
+      const error = await service.chat([{ role: "user", content: "hi" }], false, () => {}).catch((e: Error) => e);
+      vi.unstubAllGlobals();
+      expect(calls).toBe(1);
+      expect((error as Error).name).toBe("AbortError");
+    });
+  });
+
   describe("HTTP 失败文案", () => {
     async function failureFrom(status: number, body: string, contentType: string): Promise<string> {
       vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status, headers: { "Content-Type": contentType } })));
@@ -883,6 +1155,32 @@ describe("非流式响应体取内容（空串不能被当成有内容）", () =
     it("超长说明被截断（不把整段堆栈糊给用户）", async () => {
       const text = await failureFrom(500, JSON.stringify({ error: { message: "x".repeat(500) } }), "application/json");
       expect(text.length).toBeLessThan(400);
+    });
+
+    /**
+     * 模型不收图片时要给出**能照做的**结论（实测 probe-image-unsupported）。
+     *
+     * 通用文案是「请检查连接设置中的地址、Key 与模型名」——而这三样都是对的，
+     * 用户改哪个都没用。图片是我们按模型名猜能力后自己拼进请求的（`normalizeHistory`），
+     * 猜错时它才会留在请求里，所以这里能确定问题出在图。
+     */
+    it("400 提到图片不被支持时，指向「换视觉模型 / 去掉图片」", async () => {
+      const text = await failureFrom(400, JSON.stringify({ error: { message: "invalid_request_error: image_url is not supported by this model" } }), "application/json");
+      expect(text).toContain("不接受图片输入");
+      expect(text).toContain("视觉模型");
+      // 不能再说"检查 Key 与模型名"——那两个都没问题，会把人引偏。
+      expect(text).not.toContain("检查连接设置中的地址、Key 与模型名");
+    });
+
+    it("中文「不支持图片」也认", async () => {
+      const text = await failureFrom(400, JSON.stringify({ error: { message: "该模型不支持图片输入" } }), "application/json");
+      expect(text).toContain("不接受图片输入");
+    });
+
+    it("与图片无关的 400 仍给通用建议（不误报成图片问题）", async () => {
+      const text = await failureFrom(400, JSON.stringify({ error: { message: "context length exceeded" } }), "application/json");
+      expect(text).not.toContain("不接受图片输入");
+      expect(text).toContain("HTTP 400");
     });
   });
 });
@@ -936,6 +1234,102 @@ describe("chat 等响应头的超时", () => {
   });
 });
 
+/**
+ * 限流（429）与 5xx 的「按 retry-after 退避后重试一次」。
+ *
+ * 实测缺口（本轮）：原先 `chat` 只对"网络类错误"重试，于是上游明确回
+ * `429 + retry-after: 2` 时，我们**一次都不等就直接失败**——明明等两秒就能成功。
+ * 探针对照：修复前上游只收到 1 次请求、用户看到 HTTP 429 报错；
+ * 修复后上游收到 2 次、间隔 ≈2 秒、第二次成功。
+ *
+ * 这里用假 fetch 验证"重试与等待"的判定本身，不依赖真实计时（vi.useFakeTimers）。
+ */
+describe("chat 对 429/5xx 的按需重试", () => {
+  const okSse = () => new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "好" } }] })}\n\n`));
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        controller.close();
+      }
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } }
+  );
+
+  const service = () => new LlmService({ baseUrl: "https://llm.test/v1", apiKey: "k", model: "m", systemPrompt: "" });
+
+  it("429 带 retry-after 时会再试一次并成功", async () => {
+    const calls: number[] = [];
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls.push(Date.now());
+      if (calls.length === 1) {
+        return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+          status: 429,
+          headers: { "content-type": "application/json", "retry-after": "0" }
+        });
+      }
+      return okSse();
+    }));
+    let text = "";
+    await service().chat([{ role: "user", content: "hi" }], false, (e) => { text += e.delta; });
+    vi.unstubAllGlobals();
+    expect(calls).toHaveLength(2);
+    expect(text).toContain("好");
+  });
+
+  it("500 也会重试一次", async () => {
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      n += 1;
+      return n === 1
+        ? new Response(JSON.stringify({ error: { message: "boom" } }), { status: 500, headers: { "content-type": "application/json" } })
+        : okSse();
+    }));
+    let text = "";
+    await service().chat([{ role: "user", content: "hi" }], false, (e) => { text += e.delta; });
+    vi.unstubAllGlobals();
+    expect(n).toBe(2);
+    expect(text).toContain("好");
+  });
+
+  it("401 不重试（重试必然同样失败，白等一轮）", async () => {
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      n += 1;
+      return new Response(JSON.stringify({ error: { message: "bad key" } }), { status: 401, headers: { "content-type": "application/json" } });
+    }));
+    const error = await service().chat([{ role: "user", content: "hi" }], false, () => {}).catch((e: Error) => e);
+    vi.unstubAllGlobals();
+    expect(n).toBe(1);
+    expect((error as Error).message).toContain("401");
+  });
+
+  it("已经吐出内容后不再重试（避免同一气泡出现两份开头）", async () => {
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      n += 1;
+      if (n === 1) {
+        // 先推一段正文，再以 500 收尾
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "半截" } }] })}\n\n`));
+              controller.close();
+            }
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } }
+        );
+      }
+      return okSse();
+    }));
+    const chunks: string[] = [];
+    await service().chat([{ role: "user", content: "hi" }], false, (e) => { chunks.push(e.delta); }).catch(() => undefined);
+    vi.unstubAllGlobals();
+    // 只要已经开始输出，就不该再发第二次请求
+    expect(chunks.join("")).not.toContain("好");
+  });
+});
+
 // 实测误报（本会话自引入）：放宽 schema 后新增的「可纠正的拒绝」判定，最初写成裸的
 // `/是空的|没有要问的问题|…/`，于是搜索引擎返回的**标题**只要含这几个字
 // （`[1] 为什么杯子是空的`）就会被判成工具失败 —— 步骤条打 ✕、摘要只剩标题一行。
@@ -950,5 +1344,121 @@ describe("可纠正的拒绝对搜索结果不误报", () => {
   it("读回的正文里含这些字样也不算失败", () => {
     const output = "文件：a.html（共 3 行，本次显示第 1–3 行）\n    1| 没有要问的问题\n    2| x";
     expect(isToolFailure(output)).toBe(false);
+  });
+});
+
+/**
+ * 选择题参数的形状归一（`normalizeAgentQuestions`）。
+ *
+ * 实测背景（probe-question-shapes，2026-10-20）：9 种参数形状里 **7 种**被 AI SDK 在
+ * `parseToolCall` 阶段拒掉，`execute` 根本不跑、模型收不到回执。而 `request_user_input`
+ * 是后端闸门（"多个后端可用时必须先问用户"）的**唯一出口**——调用被跳过，
+ * 闸门就永远关不上，模型反复重试烧光 20 步。
+ *
+ * 所以这里的契约是：**任何"能猜出意图"的形状都要接住**，读不出来时回一句
+ * 可纠正的中文说明（而不是抛错）。
+ */
+describe("选择题参数归一（normalizeAgentQuestions）", () => {
+  const questionsOf = (raw: unknown) => {
+    const result = normalizeAgentQuestions(raw);
+    if ("error" in result) throw new Error(`预期归一成功，却返回了说明：${result.error}`);
+    return result.questions;
+  };
+
+  it("标准形状原样通过", () => {
+    const [q] = questionsOf([{ id: "dur", header: "时长", question: "几秒？", options: [{ id: "6", label: "6 秒", description: "短" }] }]);
+    expect(q.id).toBe("dur");
+    expect(q.header).toBe("时长");
+    expect(q.question).toBe("几秒？");
+    expect(q.options).toEqual([{ id: "6", label: "6 秒", description: "短" }]);
+  });
+
+  it("options 写成纯字符串数组也接住（模型真这么写）", () => {
+    const [q] = questionsOf([{ question: "几秒？", options: ["6 秒", "15 秒"] }]);
+    expect(q.options.map((o) => o.label)).toEqual(["6 秒", "15 秒"]);
+    // id 自动补，且两两不同（否则答案回传会把两个选项当成一个）
+    expect(new Set(q.options.map((o) => o.id)).size).toBe(2);
+  });
+
+  it("options 写成对象映射 / 单个字符串也接住", () => {
+    expect(questionsOf([{ question: "几秒？", options: { a: "6 秒", b: "15 秒" } }])[0].options.map((o) => o.label))
+      .toEqual(["6 秒", "15 秒"]);
+    expect(questionsOf([{ question: "几秒？", options: "6 秒" }])[0].options).toHaveLength(1);
+  });
+
+  it("questions 写成单字符串 / 对象映射也接住", () => {
+    // 单个字符串 = "只问这一个"（没给选项 → 走可纠正说明）
+    expect(normalizeAgentQuestions("几秒？")).toHaveProperty("error");
+    // 对象映射的**值**里带完整问题与选项时应能画出来
+    const [q] = questionsOf({ q1: { question: "几秒？", options: ["6 秒", "15 秒"] } });
+    expect(q.question).toBe("几秒？");
+    expect(q.options).toHaveLength(2);
+  });
+
+  it("问题元素本身是字符串时，用文本当问题", () => {
+    const result = normalizeAgentQuestions([{ question: "几秒？", options: [{ label: "6 秒" }, { label: "15 秒" }] }]);
+    expect("questions" in result && result.questions[0].question).toBe("几秒？");
+  });
+
+  it("multiSelect 接受 \"yes\" / 1 / \"是\"，拒绝无意义的值时按未开启", () => {
+    const bool = (value: unknown) => questionsOf([{ question: "哪些？", multiSelect: value, options: ["a", "b"] }])[0].multiSelect;
+    expect(bool("yes")).toBe(true);
+    expect(bool(1)).toBe(true);
+    expect(bool("是")).toBe(true);
+    expect(bool("no")).toBe(false);
+    expect(bool(0)).toBe(false);
+    expect(bool("???")).toBeUndefined();
+  });
+
+  it("label 是数字时转成文本（否则渲染端会画出空标签）", () => {
+    const [q] = questionsOf([{ question: "几秒？", options: [{ id: "6", label: 6 }, { id: "15", label: 15 }] }]);
+    expect(q.options.map((o) => o.label)).toEqual(["6", "15"]);
+  });
+
+  it("问题 id / 选项 id 双双去重（同 id 会让后一题顶用前一题的答案）", () => {
+    const list = questionsOf([
+      { id: "q", question: "几秒？", options: [{ id: "a", label: "6 秒" }, { id: "a", label: "15 秒" }] },
+      { id: "q", question: "什么比例？", options: ["16:9", "9:16"] }
+    ]);
+    expect(list[0].id).not.toBe(list[1].id);
+    expect(new Set(list[0].options.map((o) => o.id)).size).toBe(2);
+  });
+
+  it("越界夹紧而不是拒绝：超过 3 题 / 4 个选项时只截断", () => {
+    const many = Array.from({ length: 6 }, (_, i) => ({
+      id: `q${i}`,
+      question: `问题 ${i}`,
+      options: Array.from({ length: 8 }, (_, j) => ({ id: `o${j}`, label: `选项 ${j}` }))
+    }));
+    const list = questionsOf(many);
+    expect(list).toHaveLength(3);
+    expect(list[0].options).toHaveLength(4);
+  });
+
+  it("问不出来的形状给**中文可纠正说明**，而不是抛错（模型据此改）", () => {
+    // 只有一句话、没有选项 → 说清"缺选项"
+    const noOptions = normalizeAgentQuestions([{ question: "几秒？" }]);
+    expect("error" in noOptions && noOptions.error).toMatch(/没有任何选项/);
+    // 空/缺 → 说清"没有要问的问题"
+    for (const empty of [[], null, undefined, "", {}, 0]) {
+      const result = normalizeAgentQuestions(empty);
+      expect("error" in result, JSON.stringify(empty)).toBe(true);
+    }
+  });
+
+  it("缺 header / question 时补默认值，不让卡片空着", () => {
+    // 两个都缺 → 这一条读不出问题文本，**跳过它**；全被跳光时回可纠正说明
+    // （而不是画一张既没标题也没问题的空卡片）。
+    const empty = normalizeAgentQuestions([{ options: ["6 秒", "15 秒"] }]);
+    expect("error" in empty && empty.error).toMatch(/缺少 question/);
+
+    // 只缺 question、有 header → 用 header 顶上（总比空卡片强）
+    const [withHeader] = questionsOf([{ header: "时长", options: ["6 秒", "15 秒"] }]);
+    expect(withHeader.question).toBe("时长");
+    expect(withHeader.header).toBe("时长");
+
+    // 只缺 header、有 question → header 补「问题 N」
+    const [withQuestion] = questionsOf([{ question: "几秒？", options: ["6 秒", "15 秒"] }]);
+    expect(withQuestion.header).toBe("问题 1");
   });
 });

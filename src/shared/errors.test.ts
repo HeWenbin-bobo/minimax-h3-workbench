@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeError, isNetworkError } from "./errors";
+import { describeError, isNetworkError, isRetriableHttpStatus, isRetriableLoadAbort, retryAfterHeaderOf } from "./errors";
 
 // 背景：undici 的裸 "fetch failed" 会一路透传到卡片/toast/聊天气泡，用户看不懂也定位不了。
 // 这里固化"网络层英文异常必须翻成中文、业务异常必须原样保留"两条契约。
@@ -154,6 +154,109 @@ describe("isNetworkError", () => {
   });
 });
 
+/**
+ * 「值得重试的 HTTP 状态」与「网络错误」是**两件事**，故单独一个函数。
+ *
+ * 实测缺口（2026-10-22）：普通对话与智能体两条重试路径原先都只判 `isNetworkError`，
+ * 于是上游明确回 `429 + retry-after: 2` 时一次都不等就失败。
+ * 而 401/403/404/400 重试必然同样失败，必须排除——否则只是让用户白等一轮。
+ */
+describe("isRetriableHttpStatus", () => {
+  const withStatus = (status: number) => Object.assign(new Error("boom"), { status });
+
+  it("429 与 5xx 值得重试", () => {
+    expect(isRetriableHttpStatus(withStatus(429))).toBe(true);
+    expect(isRetriableHttpStatus(withStatus(500))).toBe(true);
+    expect(isRetriableHttpStatus(withStatus(502))).toBe(true);
+    expect(isRetriableHttpStatus(withStatus(503))).toBe(true);
+  });
+
+  it("4xx（除 429）不值得重试", () => {
+    expect(isRetriableHttpStatus(withStatus(400))).toBe(false);
+    expect(isRetriableHttpStatus(withStatus(401))).toBe(false);
+    expect(isRetriableHttpStatus(withStatus(403))).toBe(false);
+    expect(isRetriableHttpStatus(withStatus(404))).toBe(false);
+    expect(isRetriableHttpStatus(withStatus(422))).toBe(false);
+  });
+
+  it("也认 AI SDK 的 statusCode 字段", () => {
+    expect(isRetriableHttpStatus(Object.assign(new Error("x"), { statusCode: 503 }))).toBe(true);
+    expect(isRetriableHttpStatus(Object.assign(new Error("x"), { statusCode: 400 }))).toBe(false);
+  });
+
+  it("没有状态码的一律不算（网络错误交给 isNetworkError）", () => {
+    expect(isRetriableHttpStatus(new Error("ECONNRESET"))).toBe(false);
+    expect(isRetriableHttpStatus(undefined)).toBe(false);
+    expect(isRetriableHttpStatus(null)).toBe(false);
+    expect(isRetriableHttpStatus("429")).toBe(false);
+  });
+
+  // **必须下钻包裹果**（实测形状，直连 SDK 复现）：
+  // AI SDK 的 maxRetries 用尽后抛的是 `AI_RetryError`，它自己没有 statusCode，
+  // 真实信息在 lastError（APICallError）上。只在顶层找会得到 undefined，
+  // 于是"429 该重试"这个判断永远不成立——这正是智能体路径上的真实缺口。
+  it("认得 AI_RetryError 包裹（状态码在 lastError 上）", () => {
+    const wrapped = Object.assign(new Error("Failed after 2 attempts"), {
+      name: "AI_RetryError",
+      lastError: Object.assign(new Error("rate limited"), { name: "AI_APICallError", statusCode: 429 })
+    });
+    expect(isRetriableHttpStatus(wrapped)).toBe(true);
+  });
+
+  it("也认 errors[] 末项（没有 lastError 时）", () => {
+    const wrapped = Object.assign(new Error("Failed after 2 attempts"), {
+      name: "AI_RetryError",
+      errors: [
+        Object.assign(new Error("first"), { statusCode: 400 }),
+        Object.assign(new Error("last"), { statusCode: 503 })
+      ]
+    });
+    expect(isRetriableHttpStatus(wrapped)).toBe(true);
+  });
+
+  it("包裹果里是 400 时仍不重试", () => {
+    const wrapped = Object.assign(new Error("Failed"), {
+      name: "AI_RetryError",
+      lastError: Object.assign(new Error("bad"), { statusCode: 400 })
+    });
+    expect(isRetriableHttpStatus(wrapped)).toBe(false);
+  });
+
+  it("环形/自引用不会无限递归", () => {
+    const loop: Record<string, unknown> = { name: "AI_RetryError" };
+    loop.lastError = loop;
+    expect(isRetriableHttpStatus(loop)).toBe(false);
+  });
+});
+
+/**
+ * `retry-after` 头的取值也必须认包裹果。
+ *
+ * 智能体路径拿到的是 `AI_RetryError`，顶层 `responseHeaders` 是 undefined，
+ * 真实头挂 `lastError` 上。只读顶层 → `parseRetryAfter` 永远返回 undefined，
+ * "尊重服务端冷却窗口"就成了一句没生效的话。
+ */
+describe("retryAfterHeaderOf", () => {
+  it("读顶层 responseHeaders（大小写都认）", () => {
+    expect(retryAfterHeaderOf({ responseHeaders: { "retry-after": "2" } })).toBe("2");
+    expect(retryAfterHeaderOf({ responseHeaders: { "Retry-After": "5" } })).toBe("5");
+  });
+
+  it("读 lastError 上的 responseHeaders（真实 SDK 形状）", () => {
+    const wrapped = {
+      name: "AI_RetryError",
+      lastError: { name: "AI_APICallError", statusCode: 429, responseHeaders: { "retry-after": "2" } }
+    };
+    expect(retryAfterHeaderOf(wrapped)).toBe("2");
+  });
+
+  it("找不到时返回 undefined 而不是空串", () => {
+    expect(retryAfterHeaderOf(new Error("x"))).toBeUndefined();
+    expect(retryAfterHeaderOf(undefined)).toBeUndefined();
+    expect(retryAfterHeaderOf({ responseHeaders: {} })).toBeUndefined();
+  });
+});
+
 // 文件系统 errno 也必须翻成中文：保存产物 / 写设置 / 删回收站文件都会碰到，
 // 裸英文（"ENOSPC: no space left on device, write"）用户看不懂也不知道该怎么办。
 describe("describeError 文件系统错误", () => {
@@ -181,5 +284,42 @@ describe("describeError 文件系统错误", () => {
 
   it("普通业务异常仍原样返回（不误判）", () => {
     expect(describeError(new Error("尚未保存瞬映卡密。"), "兜底")).toBe("尚未保存瞬映卡密。");
+  });
+});
+/**
+ * 用户报「工作台启动失败」时截的图里，弹窗内容是
+ * `ERR_ABORTED (-3) loading 'file:///…/dist/index.html'`。
+ *
+ * 这个码的语义是**本次导航被取消**，不是文件不存在（-6）。受控复现（Electron 43）：
+ * 加载发起后 30ms 再发起一次导航 → 首次 loadFile 立刻 -3 失败 → 紧接着重试一次就成功。
+ * 所以它是"再来一次就好"的那类，必须在 loadApp 里自动重试，而不是弹窗把用户挡在门外。
+ */
+describe("isRetriableLoadAbort", () => {
+  it("ERR_ABORTED（code 字段）判定为可重试", () => {
+    const error = Object.assign(new Error("ERR_ABORTED (-3) loading 'file:///x/dist/index.html'"), { code: "ERR_ABORTED" });
+    expect(isRetriableLoadAbort(error)).toBe(true);
+  });
+
+  it("只有 message 带 ERR_ABORTED 也认（Electron 有些路径不带 code）", () => {
+    expect(isRetriableLoadAbort(new Error("ERR_ABORTED (-3) loading 'file:///x/dist/index.html'"))).toBe(true);
+  });
+
+  it("文件不存在不能当成可重试（重试必然同样失败，白让用户等）", () => {
+    const error = Object.assign(new Error("ERR_FILE_NOT_FOUND (-6) loading 'file:///x/dist/index.html'"), { code: "ERR_FILE_NOT_FOUND" });
+    expect(isRetriableLoadAbort(error)).toBe(false);
+  });
+
+  it("其它加载失败码都不重试", () => {
+    for (const code of ["ERR_ACCESS_DENIED", "ERR_CONNECTION_REFUSED", "ERR_FAILED", "ERR_NAME_NOT_RESOLVED"]) {
+      expect(isRetriableLoadAbort(Object.assign(new Error(code), { code })), code).toBe(false);
+    }
+  });
+
+  it("脏入参不抛错（错误对象可能不是 Error、甚至不是对象）", () => {
+    for (const value of [null, undefined, 0, "", "ERR_ABORTED", [], {}]) {
+      expect(() => isRetriableLoadAbort(value)).not.toThrow();
+    }
+    // 字符串形式（非对象）不认——那是调用方传错，不该据此触发重试
+    expect(isRetriableLoadAbort("ERR_ABORTED (-3)")).toBe(false);
   });
 });

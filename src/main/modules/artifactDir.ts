@@ -177,3 +177,21 @@ export function foldArtifactNames(names: readonly string[]): string[] {
   }
   return out;
 }
+
+/**
+ * 这个文件该不该出现在「本会话已产出的文件」清单里（注入给模型的环境事实）。
+ *
+ * 实测缺陷（2026-10-21）：清单原先只认 `.html|.md|.xlsx`，于是 `saveArtifact` 存下的
+ * `.csv` / `.tsv` / `.txt` **不在清单里**——模型看不到它，就好像这个会话从没产出过这份数据，
+ * 于是回一句「我这边看不到你的文件，麻烦上传或粘贴」。
+ * 而 `saveArtifact` 与产物预览都支持这些类型，清单必须与之一致。
+ *
+ * 抽成纯函数是为了能单测：这段逻辑原本是 `main.ts` 里的一段内联正则，
+ * 只有真机探针能覆盖，改坏了不会被任何单测挡住。
+ *
+ * 与 `saveArtifactFile` 的类型白名单保持一致（html / csv / tsv / md / xlsx），
+ * 再多认 `txt` / `json`——它们虽不能作为产物类型落盘，但用户可能手工放进产物目录。
+ */
+export function isListableArtifact(name: string): boolean {
+  return /\.(html?|md|xlsx|csv|tsv|txt|json)$/i.test(String(name || ""));
+}

@@ -54,6 +54,21 @@ describe("产物优先级（防「把所有能力用上」被理解成每个工�
     expect(defaultAgentPrompt()).toContain("**仅当用户要的就是视频本身时**才用");
   });
 
+  // 实测真机（2026-10-20）：用户给一段视频描述后，智能体**直接**用默认后端（本机 ComfyUI）
+  // 开跑，从没问过"想用哪个方式生成"。根因之一是提示词只说"能动手就不问"，
+  // 而 video 工具那句原文写的是"参数从描述里提取即可，不需要事先反问确认"——
+  // 直接鼓励跳过询问。现在必须显式要求先问后端/时长/数量。
+  it("generate_video 要求先问后端（不能默认撞上本机/云端计费）", () => {
+    const text = defaultAgentPrompt();
+    expect(text).toContain("动手前必须先问清后端");
+    // 花费差异必须写进提示词，否则模型不知道"为什么要问"。
+    expect(text).toMatch(/扣费|计费|扣卡密/);
+  });
+
+  it("「能动手就不问」要留出视频这个例外，否则两条规则互相打架", () => {
+    expect(defaultAgentPrompt()).toContain("但生成视频是例外");
+  });
+
   it("辅助工具标明「不是必做步骤」", () => {
     expect(defaultAgentPrompt()).toContain("不是必做步骤");
   });

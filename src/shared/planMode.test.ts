@@ -9,6 +9,7 @@ import {
   PLAN_MODE_TOOL_NOTE,
   extractProposedPlan,
   looksLikePlan,
+  settleStalePlan,
   withPlanMode
 } from "./planMode";
 
@@ -149,8 +150,19 @@ describe("looksLikePlan 判定", () => {
     expect(looksLikePlan(`${PLAN_BLOCK_OPEN}\n1. 甲\n${PLAN_BLOCK_CLOSE}`)).toBe(true);
   });
 
-  it("两条列表项但整体过短时不误判（避免把短回答当计划）", () => {
-    expect(looksLikePlan("1. 甲\n2. 乙")).toBe(false);
+  // 这一条此前断言的是 `false`，也就是把**缺陷当成了规格**：
+  // "1. 甲\n2. 乙"（10 字）是标准的两步计划，却因为长度门槛排在有序列表判据之前
+  // 被判成"不是计划"，用户拿不到「继续执行」按钮。
+  // 现在有序列表判据优先于长度门槛，故改为断言 true。
+  // 长度门槛仍然存在，只是只作用于"没有列表也没有标志词"的短回答（见下一条）。
+  it("紧凑的两步列表也算计划（有序列表判据优先于长度门槛）", () => {
+    expect(looksLikePlan("1. 甲\n2. 乙")).toBe(true);
+    expect(looksLikePlan("1. 先查资料\n2. 再写报告")).toBe(true);
+  });
+
+  it("只有一项有序列表且整体过短时不误判", () => {
+    // 单项列表 + 无标志词 + 过短 → 仍按"零碎回答"处理
+    expect(looksLikePlan("1. 甲")).toBe(false);
   });
 
   it("出现标志词也认为像计划（容忍格式差异）", () => {
@@ -165,5 +177,62 @@ describe("looksLikePlan 判定", () => {
   it("普通长回答（无列表无标志词）不算计划", () => {
     const paragraph = "这是一段普通的回答，".repeat(8) + "没有任何列表结构。";
     expect(looksLikePlan(paragraph)).toBe(false);
+  });
+});
+
+/**
+ * 收尾兜底步骤清单。
+ *
+ * 真机依据（2026-10-21，deepseek-v4.1-flash，国产 CPU 对比表）：模型列了 4 步，
+ * 做了 46 次工具调用、真交付了 xlsx，但**一次都没再更新 status**，界面停在 0/4。
+ * 工具描述里明明写着"每完成一步就更新一次"，模型不照做——按 CLAUDE.md 的结论，
+ * 文字约定约束不住它，只能在机制上兜底。
+ */
+describe("settleStalePlan 收尾兜底", () => {
+  const plan = [
+    { step: "搜索资料", status: "in_progress" as const },
+    { step: "整理数据", status: "pending" as const },
+    { step: "生成文件", status: "pending" as const }
+  ];
+
+  it("产出了东西 → 未完成的步骤一律标完成（不再停在 0/N）", () => {
+    expect(settleStalePlan(plan, true).map((s) => s.status)).toEqual(["completed", "completed", "completed"]);
+  });
+
+  it("没产出 → 只把「进行中」退回「未开始」，绝不假报完成", () => {
+    const result = settleStalePlan(plan, false);
+    expect(result.map((s) => s.status)).toEqual(["pending", "pending", "pending"]);
+    // 关键反例：不能因为"要收尾"就把没做的事标成完成。
+    // 用字符串数组比对而不是 `s.status === "completed"`——后者会被 TS 判成
+    // "两种类型没有重叠"的恒假比较（这个分支里字面量类型已被收窄），编译期报 TS2367。
+    // 断言意图不变：结果里不该出现 completed。
+    expect(result.map((s) => String(s.status))).not.toContain("completed");
+  });
+
+  it("已经全部完成时返回原引用（调用方据此跳过无意义的推送）", () => {
+    const done = plan.map((s) => ({ ...s, status: "completed" as const }));
+    expect(settleStalePlan(done, true)).toBe(done);
+    expect(settleStalePlan(done, false)).toBe(done);
+  });
+
+  it("空清单原样返回（没列过清单就不要凭空造一个）", () => {
+    const empty: never[] = [];
+    expect(settleStalePlan(empty, true)).toBe(empty);
+  });
+
+  it("不改入参（纯函数）", () => {
+    const snapshot = JSON.parse(JSON.stringify(plan));
+    settleStalePlan(plan, true);
+    expect(plan).toEqual(snapshot);
+  });
+
+  it("没产出且清单里只有 pending 时也返回原引用（无事可做）", () => {
+    const allPending = plan.map((s) => ({ ...s, status: "pending" as const }));
+    expect(settleStalePlan(allPending, false)).toBe(allPending);
+  });
+
+  it("保留步骤文字（只动 status，措辞不能变）", () => {
+    const result = settleStalePlan(plan, true);
+    expect(result.map((s) => s.step)).toEqual(["搜索资料", "整理数据", "生成文件"]);
   });
 });

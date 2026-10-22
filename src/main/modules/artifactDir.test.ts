@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback } from "./artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, isListableArtifact } from "./artifactDir";
 
 // 背景：`sessionId` 来自渲染端（可构造），而目录名同时用于落盘与 `artifact:purgeSession`。
 // 旧实现只把危险字符替换成 `_`，会产生**目录名碰撞**：
@@ -175,5 +175,47 @@ describe("describeArtifactFallback（名字回落的措辞）", () => {
 
   it("正常命中时没有多余说明", () => {
     expect(describeArtifactFallback(false, "a.html", "a.html", "read")).toBe("");
+  });
+});
+
+/**
+ * **「本会话已产出的文件」清单必须包含所有能落盘的类型**（实测缺陷 2026-10-21）。
+ *
+ * 清单原先只认 `.html|.md|.xlsx`，于是 `saveArtifact` 存下的 `.csv` / `.tsv` / `.txt`
+ * 不在清单里——模型看不到它，就好像这个会话从没产出过这份数据，
+ * 于是回一句「我这边看不到你的文件，麻烦上传或粘贴」。
+ *
+ * 这条逻辑原来是 `main.ts` 里的一段内联正则，只有真机探针能覆盖；
+ * 抽成纯函数后才有这层单测。
+ */
+describe("isListableArtifact：清单要覆盖所有可落盘类型", () => {
+  it("**五种产物类型全部在清单里**（漏一种模型就看不到那种文件）", () => {
+    for (const name of ["页面.html", "报告.md", "表格.xlsx", "数据.csv", "数据.tsv"]) {
+      expect(isListableArtifact(name), name).toBe(true);
+    }
+  });
+
+  it("用户手工放进产物目录的 txt / json 也列出来", () => {
+    expect(isListableArtifact("日志.txt")).toBe(true);
+    expect(isListableArtifact("配置.json")).toBe(true);
+  });
+
+  it("大小写不敏感（模型常把扩展名写大写）", () => {
+    for (const name of ["A.HTML", "B.MD", "C.CSV", "D.XLSX"]) {
+      expect(isListableArtifact(name), name).toBe(true);
+    }
+  });
+
+  it("非产物类型不列（清单是给模型看\"有什么可用\"的，不能塞二进制）", () => {
+    for (const name of ["视频.mp4", "图片.png", "压缩包.zip", "程序.exe", "无扩展名", ""]) {
+      expect(isListableArtifact(name), name).toBe(false);
+    }
+  });
+
+  it("脏入参不抛错", () => {
+    for (const bad of [null, undefined, 42, {}]) {
+      expect(() => isListableArtifact(bad as never)).not.toThrow();
+      expect(isListableArtifact(bad as never)).toBe(false);
+    }
   });
 });

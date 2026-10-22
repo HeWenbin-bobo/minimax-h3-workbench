@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describeError } from "../../shared/errors";
 import type { GenerationRequest, GenerationTask, TaskStatus } from "../../shared/types";
 import { MAX_PROMPT_LENGTH } from "../../shared/types";
-import { AdapterRegistry } from "../backends/adapterRegistry";
+import { AdapterRegistry, backendKindLabel as backendName } from "../backends/adapterRegistry";
 import { sliceSafe } from "../../shared/text";
 import { TaskStore } from "./taskStore";
 
@@ -221,6 +221,11 @@ export class GenerationOrchestrator {
 
   async submit(request: GenerationRequest): Promise<GenerationTask[]> {
     validateRequest(request);
+    // **建任务之前先确认这个后端能用**（实测缺陷 probe-retry-nocred）：
+    // 凭据要到 `runTask()` 里才检查，届时任务已经建出来并写进列表，
+    // 用户看到的是一张注定失败的卡片（得手动删）。放这里等于把"能不能发出去"
+    // 提前到"要不要建这条记录"之前。
+    await this.adapters.assertUsable(request.backend);
     const parentId = randomUUID();
     const now = new Date().toISOString();
     // 只在**没给**时才用默认 4。旧写法 `request.count || 4` 把显式的 0 也当成"没给"，
@@ -285,6 +290,9 @@ export class GenerationOrchestrator {
     // - 非法的 duration/preset 组合会真的发到云端（失败照样扣卡密次数）。
     // 放在建任务之前：脏记录应当被明确拒绝，而不是先建一条注定失败、还会计费的任务。
     validateRequest(request);
+    // **重试同样要先确认后端可用**（实测缺陷 probe-retry-nocred）：任务创建时卡密还在、
+    // 之后用户把它删了，点重试会先建出一条注定失败的记录（again 得手动删）。
+    await this.adapters.assertUsable(request.backend);
     // 和 submit 一样补齐可缺省字段：老记录（或手改过的 tasks.json）可能没有
     // width/height/ratio/resolution，直接透传会让工作流缺必填输入。
     const normalized = normalizeRequest(request);
@@ -395,7 +403,18 @@ export class GenerationOrchestrator {
       if (cancelled) {
         this.update(task, "cancelled", task.progress, "已取消");
       } else {
-        this.update(task, "failed", task.progress, messageOf(error));
+        // **失败文案要带上是哪个后端**（实测 probe-local-dead）：用户同时配了本机 ComfyUI
+        // 与云端时，「网络连接失败：目标服务未在监听（连接被拒绝）。请检查地址、端口与服务
+        // 是否已启动。」看不出失败的是谁——是本机 ComfyUI 忘了启动，还是云端地址填错？
+        // 两者该做的事完全不同（去启动本地服务 vs 去改设置里的地址）。
+        // 任务卡片上没有别的地方显示后端名，只能在这里补。
+        //
+        // **还要带上实际连的地址**（实测 probe-backend-down）：只说"请检查地址、端口"时，
+        // 用户改过端口、或同时装了两份 ComfyUI，就只能自己猜该启动哪一个。
+        // `describeEndpoint` 只返回地址、不含任何凭据（那条字符串会显示给用户）。
+        const endpoint = await this.adapters.describeEndpoint(request.backend).catch(() => "");
+        const where = endpoint ? `（${endpoint}）` : "";
+        this.update(task, "failed", task.progress, `${backendName(request.backend)}${where}：${messageOf(error)}`);
         task.errorCode = "GENERATION_FAILED";
       }
     } finally {

@@ -16,10 +16,10 @@ import {
   shell,
   type IpcMainInvokeEvent
 } from "electron";
-import { AdapterRegistry } from "./backends/adapterRegistry";
+import { AdapterRegistry, backendAvailability, backendKindLabel, backendMentionedInText, backendPickedFromQuestions, normalizeBackendKind } from "./backends/adapterRegistry";
 import { mediaMime, parseByteRange } from "./modules/mediaRange";
 import { RESOURCE_LINKS } from "../shared/resourceLinks";
-import { describeError, isNetworkError } from "../shared/errors";
+import { describeError, httpStatusOf, isNetworkError, isRetriableLoadAbort } from "../shared/errors";
 import type { ApiResponse, AppSettings, BackendKind, ChatMessage, GenerationRequest, LlmArtifactEvent, LlmDoneEvent, LlmPlanEvent, LlmQuestionEvent, LlmStreamEvent, LlmTasksEvent, LlmToolEvent, SecretName } from "../shared/types";
 import { downloadAndInstall, onDownloadProgress } from "./modules/autoUpdater";
 import { GenerationOrchestrator } from "./modules/generationOrchestrator";
@@ -34,8 +34,9 @@ import { searchWeb } from "./modules/webSearch";
 import { buildAgentMemoryHint } from "./modules/agentMemory";
 import { buildSections, diffWorldState, injectWorldState, type WorldStateSnapshot } from "./modules/worldState";
 import { QuestionBridge } from "./modules/questionBridge";
-import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, SHEET_REQUEST_EXTS } from "./modules/artifactDir";
+import { artifactSessionDirName, pickLatestVersion, artifactNameCandidates, foldArtifactNames, describeArtifactFallback, isListableArtifact, SHEET_REQUEST_EXTS } from "./modules/artifactDir";
 import { applyExactEdit, applyExactEdits, countLines, findMatchingLines, MAX_READ_CHARS, sliceWithLineNumbers } from "./modules/artifactEdit";
+import { extractColumn, summarizeColumn, type NumericSummary } from "./modules/artifactStats";
 import { PREVIEW_CSP } from "./modules/previewCsp";
 import { isPathInside, resolveWithinRoot, resolveWithinRootDetailed } from "./modules/safePath";
 import { assertPublicHttpUrlResolved } from "./backends/resultUrl";
@@ -56,7 +57,7 @@ import {
   type ContextWindowState
 } from "./modules/contextBudget";
 import { buildCompactedHistory, summarizeHistory } from "./modules/compaction";
-import { withPlanMode } from "../shared/planMode";
+import { settleStalePlan, withPlanMode } from "../shared/planMode";
 import { contextWindowFor } from "../shared/modelWindows";
 import { sliceSafe } from "../shared/text";
 import { decodeTextBytes, decodeTextPreview } from "./modules/textFile";
@@ -206,6 +207,13 @@ app.whenReady().then(async () => {
   // 宿主是 script-src 'self'（无 unsafe-inline）→ 预览页里的内联 <script> 被浏览器拦掉，
   // 游戏/小工具脚本根本不运行（用户报"预览时不能直接玩"就是这个）。按 CSP 规范，
   // **URL 加载的文档用自己的策略**，故改走本协议；宿主 CSP 保持严格、预览仍是 sandbox 不透明源。
+  //
+  // **这个协议只能用 iframe 加载，不能用 `fetch` 打**（实测 2026-10-21）：
+  // 宿主 CSP 的 `connect-src` 是 `'self' ws://127.0.0.1:* http://127.0.0.1:*`，
+  // **不含 `h3preview:`**，所以渲染端 `fetch('h3preview://…')` 一律 `Failed to fetch`。
+  // 那是正确的（协议只该经 `frame-src` 用于 iframe，不该被脚本当 API 调），
+  // 但写探针时容易踩空——我为此写废过一版"越界防护探针"，全是 `Failed to fetch`。
+  // 越界防护本身由 `safePath.test.ts` 的 15 条单测覆盖（根内外 / `..` / 符号链接 / 根自身是链接）。
   const artifactRoot = () => path.join(app.getPath("userData"), "artifacts");
   protocol.handle("h3preview", async (request) => {
     const requestedPath = new URL(request.url).searchParams.get("path");
@@ -315,9 +323,17 @@ app.whenReady().then(async () => {
   // 留在半初始化状态比退出更糟（协议 handler / IPC 可能只注册了一半）。
   const message = describeError(error, "未知错误");
   console.error("[main] 启动失败：", message);
+  // **提示要能对得上真实原因**（实测缺陷：用户截的图里是 ERR_ABORTED，
+  // 而弹窗让他"检查磁盘剩余空间与应用程序权限"、"删除 settings.json"——三条全都无关）。
+  // 加载被中断是"再启动一次就好"的那类问题（`loadApp` 已自动重试 3 次），
+  // 所以这里明确告诉用户重开，而不是让他去删配置。
+  const aborted = isRetriableLoadAbort(error);
+  const nextStep = aborted
+    ? "· 直接重新打开工作台即可（这次是页面加载被中途打断，重开通常就好）\n· 若反复出现：关闭其它正在运行的工作台窗口后再试"
+    : "· 检查磁盘剩余空间与应用目录权限\n· 删除用户数据目录下的 settings.json / tasks.json 后重试（会重置设置）";
   dialog.showErrorBox(
     "MiniMax H3 工作台启动失败",
-    `${message}\n\n可尝试：\n· 检查磁盘剩余空间与应用目录权限\n· 删除用户数据目录下的 settings.json / tasks.json 后重试（会重置设置）\n· 若反复出现，请附带本提示的完整内容反馈`
+    `${message}\n\n可尝试：\n${nextStep}\n· 若反复出现，请附带本提示的完整内容反馈`
   );
   app.exit(1);
 });
@@ -396,10 +412,41 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
+/**
+ * 加载渲染产物。
+ *
+ * **`ERR_ABORTED (-3)` 必须重试**（实测缺陷，用户报「工作台启动失败」）：
+ * 这个错误码的意思是"这次导航被**取消**了"，而不是"文件不存在"（那是 -6）。
+ * 触发它的真实场景是**加载进行中又发生了一次导航**——例如开关一次显示器/切换远程桌面
+ * 让 Chromium 重建渲染进程、或用户双击两次快捷方式时第二个实例抢锁前的短暂窗口。
+ * 受控复现（本机 Electron 43，同一份 dist）：
+ *   first loadFile → `ERR_ABORTED (-3) loading 'file:///…/dist/index.html'`
+ *   紧接着重试一次 → 成功。
+ * 也就是说这条错误**不可恢复地把用户挡在门外**，而它只需要再来一次就好。
+ *
+ * 只对 `-3` 重试（最多 2 次、间隔 250ms）：
+ * - `-6 ERR_FILE_NOT_FOUND` 重试必然同样失败（文件真的没有，比如 `npm run build` 的
+ *   `clean` 正在跑），重试只会让用户多等 0.5 秒才看到真正的提示；
+ * - 其它错误码（权限、崩溃）同理，重试无益。
+ */
 async function loadApp(window: BrowserWindow): Promise<void> {
   const devUrl = process.env.VITE_DEV_SERVER_URL;
-  if (devUrl) await window.loadURL(devUrl);
-  else await window.loadFile(path.join(__dirname, "../../dist/index.html"));
+  const navigation = async () => {
+    if (devUrl) await window.loadURL(devUrl);
+    else await window.loadFile(path.join(__dirname, "../../dist/index.html"));
+  };
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await navigation();
+      return;
+    } catch (error) {
+      // 判定抽在 `shared/errors.isRetriableLoadAbort`（纯函数，可单测——loadApp 本身依赖 BrowserWindow）。
+      if (!isRetriableLoadAbort(error) || attempt >= MAX_ATTEMPTS) throw error;
+      if (attempt === 1) console.warn("[main] 页面加载被中途打断（ERR_ABORTED），自动重试");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
 }
 
 function registerIpc(
@@ -420,7 +467,33 @@ function registerIpc(
     count: 1,
     baseSeed: 1
   };
-  const backendKindLabel = (kind: BackendKind) => kind === "local" ? "本机 ComfyUI" : kind === "ssh" ? "SSH 远程显卡" : kind === "rb" ? "瞬映 RB" : "MiniMax H3";
+  /**
+   * 四个后端**此刻能不能用**（单一真源的薄封装）。
+   * 真源在 `adapterRegistry.backendAvailability`（纯函数、可单测）；这里只把
+   * `settingsStore.hasSecret`（需要 Electron safeStorage）注进去。
+   *
+   * 为什么要单一判定（实测缺陷 probe-nocred-backend）：模型选了没配密钥的云端后端，
+   * `submit()` 只校验参数就把任务建出来、回执写"已创建"，随后 runTask 才抛
+   * "请先保存 API Key"——用户被告知"已经提交了"，卡片却是失败的。
+   * 两处各写一份判定必然漂移：一处认"有地址就行"、另一处要"有密钥"。
+   */
+  const videoBackendAvailability = (settings: AppSettings) =>
+    backendAvailability(settings, (name) => settingsStore.hasSecret(name));
+  /**
+   * 本轮**真的可用**的视频后端，供世界状态告诉模型。
+   *
+   * **不筛会怎样**（实测语义缺口）：模型现在要先问用户"用哪个方式生成"，
+   * 而它看不到「连接设置」。把没配密钥的云端选项摆给用户，用户选了必然报
+   * "未保存瞬映卡密"/"请先保存 API Key"——白走一轮，还显得软件不认账。
+   */
+  const availableVideoBackends = async (
+    settings: AppSettings
+  ): Promise<Array<{ kind: BackendKind; label: string; note?: string }>> => {
+    const all = await videoBackendAvailability(settings);
+    return all
+      .filter((entry) => !entry.reason)
+      .map(({ kind, label, note }) => ({ kind, label, note }));
+  };
   /**
    * 按后端约束夹取时长（智能体工具用）。
    *
@@ -465,6 +538,76 @@ function registerIpc(
    * 重启后丢快照不是 bug——下一轮一律按"新正文"渲染，最多多花一次 token。
    */
   const sessionWorldState = new Map<string, WorldStateSnapshot>();
+  /**
+   * 用户在这个会话里**明确选定过**的视频后端（`generate_video` 的准入闸门用）。
+   *
+   * 必须按会话持久（实测缺陷 probe-cross-turn-backend）：闸门状态原是
+   * `llm:chat` 里的每轮局部变量，于是计划模式下——轮 1 用户答了「本机 ComfyUI」、
+   * 轮 2 点「继续执行」时状态复位 → 模型调 `generate_video` 又被拦住 →
+   * 用户得把同一个后端问题再答一遍。用户已经答过，软件又问一遍。
+   *
+   * 只记**用户明确选过**的值，不记模型自己猜的：模型猜过一次不代表用户同意。
+   */
+  const sessionChosenBackend = new Map<string, BackendKind>();
+  /**
+   * 本轮运行的**收尾状态**（按会话，供渲染端在"离开期间丢了事件"时补齐）。
+   *
+   * 为什么需要（实测缺陷 probe-tasks-while-away，比丢正文严重得多）：
+   * 切页会卸载 `PlaygroundPage`，那段时间 `llm:done` **整个事件**也被丢弃——
+   * 而渲染端正是靠它来 `setGeneratingIds(剔除)` 与 `streaming: false`。
+   * 结果：用户切回来看到的是一个**永远转圈的空气泡**，`■ 停止` 一直在，
+   * 而且因为 `generatingIds` 里还有它，**再也发不出新消息**（`send()` 的守卫一直 return）。
+   * 同期建出的视频任务卡片也一并丢失（`llm:tasks` 同样没有订阅者）。
+   *
+   * 这里把"这一轮最终如何"留一份，渲染端挂载/切回会话时问一次即可补齐。
+   * 只存内存（重启后本就无从恢复，且那时渲染端也不会有残留的 generating 状态）。
+   */
+  const sessionTurnState = new Map<string, {
+    fullText: string;
+    taskIds: string[];
+    /**
+     * 本轮产出的产物（`create_file` 建的）。
+     *
+     * 同一根因的第四个实例（实测缺陷 probe-artifact-while-away）：`llm:artifact`
+     * 也靠 `PlaygroundPage` 订阅，切页期间被丢弃 —— 用户切回来时气泡写着
+     * 「写好了。」却没有**任何**文件卡片，而磁盘上文件确实在。
+     * 产物是这一轮的主要交付物，看不到就等于白做。
+     */
+    artifacts: Array<{ name: string; path: string; size: number; kind: "html" | "sheet" | "doc" }>;
+    /**
+     * 本轮的**工具步骤日志**（`llm:tool` 的 start/end 两条各存一条）。
+     *
+     * 同一根因的第五个实例（实测缺陷 probe-toolsteps-while-away）：切页期间
+     * `llm:tool` 没有订阅者，全部丢弃 —— 用户切回来看到「已执行 0 次工具调用」，
+     * 而实际上 AI 做了三次搜索。这一行正是用户判断"它到底干了什么"的主要依据。
+     *
+     * 存原始事件而不是拼好的字符串：拼装规则（`TOOL_LABELS`、摘要截断）属于渲染端，
+     * 主进程复制一份必然会漂移。这里只记事实，由渲染端按同一套规则还原。
+     */
+    toolSteps: Array<{ phase: "start"; tool: string; input: string } | { phase: "end"; tool: string; result: string; ok: boolean }>;
+    /**
+     * 本轮的**步骤清单**（`update_plan` 的最新一份）。
+     *
+     * 同一根因的第六个实例（实测缺陷 probe-plansteps-while-away）：切页期间
+     * `llm:plan` 没有订阅者 —— 用户切回来时气泡上**一条清单都没有**，
+     * 而清单是常驻显示、用来判断"它做得对不对"的主要依据。
+     * 只留最新一份（`update_plan` 语义本来就是整份替换）。
+     */
+    planSteps?: Array<{ step: string; status: "pending" | "in_progress" | "completed" }>;
+    /**
+     * 本轮发生的**压缩提示**（自动/手动压缩时插进对话流的那条系统提示）。
+     *
+     * 同一根因的第七个实例：切页期间 `llm:compaction` 丢失 → 用户切回来发现
+     * "历史怎么被摘要过了"却没有任何说明。压缩改写历史是用户可感知的变化，
+     * 静默就等于隐瞒（CLAUDE.md「失败必须可见」的同一条纪律）。
+     */
+    compactionNotices: Array<{ reason: string; before: number; after: number }>;
+    done: boolean;
+    ok: boolean;
+    /** 本轮智能体失败、已自动回落普通对话（`ok` 仍为 true，但这一轮其实没干成）。 */
+    fellBack?: boolean;
+    message?: string;
+  }>();
   /**
    * 交互提问桥：工具循环挂起等渲染端回答（`request_user_input`）。
    * 必须带超时——没有超时的话用户关窗走开会让该会话的取消器永久占着，
@@ -559,7 +702,26 @@ function registerIpc(
     try {
       const models = await service.listModels();
       if (models.ok) {
-        return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: settings.llm.model }, message: `连接成功（${Date.now() - start}ms），上游返回 ${models.models.length} 个模型。` };
+        // **顺带核对当前模型名是否在上游列表里**（实测缺口 2026-10-21）：
+        // 旧实现只要 /models 通就报「连接成功」——于是用户把模型名打错（`deepsek-chat`）时
+        // 测试照样通过，直到真正发消息才 404。他看到的是"测试通过但用不了"，无从下手。
+        //
+        // **不判失败**：有些服务商的模型名是别名/路由名（列表里本来就没有），
+        // 判失败会把这类正常配置挡在门外。只在消息里点出来，并给出最接近的候选名。
+        const wanted = String(settings.llm.model || "").trim();
+        const inList = models.models.some((name) => name === wanted);
+        // 近似匹配：忽略大小写与连字符差异（`deepseek-v4.1-flash` vs `deepseek-v4.1flash`）
+        const normalizeName = (value: string) => value.toLowerCase().replace(/[-_.\s]/g, "");
+        const similar = !inList && wanted
+          ? models.models.filter((name) => normalizeName(name).includes(normalizeName(wanted).slice(0, 6))
+            || normalizeName(wanted).includes(normalizeName(name).slice(0, 6))).slice(0, 3)
+          : [];
+        const modelNote = inList || !wanted
+          ? ""
+          : similar.length > 0
+            ? `\n⚠ 但当前模型名「${wanted}」不在上游返回的列表里。相近的有：${similar.map((name) => `「${name}」`).join("、")}——请确认拼写。`
+            : `\n⚠ 但当前模型名「${wanted}」不在上游返回的列表里（共 ${models.models.length} 个）。如果这是你服务商的别名/路由名可以忽略这条；否则请对照列表填写。`;
+        return { ok: true, label: "游乐场 LLM", latencyMs: Date.now() - start, details: { model: settings.llm.model }, message: `连接成功（${Date.now() - start}ms），上游返回 ${models.models.length} 个模型。${modelNote}` };
       }
       // /models 不支持：回退发一条最小对话验证全链路（Key+模型名+端点）。
       let streamed = "";
@@ -828,8 +990,41 @@ function registerIpc(
       sessionAborters.delete(session);
       throw error;
     }
-    const chunk = (event: LlmStreamEvent) => sendChunk({ ...event, sessionId: session });
-    const done = (event: LlmDoneEvent) => sendDone({ ...event, sessionId: session });
+    // **累计本轮所有 delta**（见 `LlmDoneEvent.fullText` 的说明）：渲染端切页会卸载组件，
+    // 那段时间没有订阅者、`llm:chunk` 被丢弃，切回后正文中间缺一段。
+    // 主进程本来就经手每个 delta，顺手存一份，收尾时让渲染端补齐。
+    // 口径必须与渲染端 `streamBuffers` 完全一致：**所有** `chunk()` 推过的文本都算
+    // （包括"已停止生成""连接中断重试"这类提示），否则补出来的内容会对不上。
+    let turnText = "";
+    // 本轮状态：渲染端离开期间丢掉的 `llm:tasks` / `llm:artifact` / `llm:done` 靠它补齐
+    // （见 `sessionTurnState` 的说明）。
+    const turnState: {
+      fullText: string;
+      taskIds: string[];
+      artifacts: Array<{ name: string; path: string; size: number; kind: "html" | "sheet" | "doc" }>;
+      toolSteps: Array<{ phase: "start"; tool: string; input: string } | { phase: "end"; tool: string; result: string; ok: boolean }>;
+      planSteps?: Array<{ step: string; status: "pending" | "in_progress" | "completed" }>;
+      compactionNotices: Array<{ reason: string; before: number; after: number }>;
+      done: boolean;
+      ok: boolean;
+      /** 本轮智能体失败、已自动回落普通对话（`ok` 仍为 true，但这一轮其实没干成）。 */
+      fellBack?: boolean;
+      message?: string;
+    } = { fullText: "", taskIds: [], artifacts: [], toolSteps: [], compactionNotices: [], done: false, ok: true, message: undefined };
+    sessionTurnState.set(session, turnState);
+    const chunk = (event: LlmStreamEvent) => {
+      if (typeof event.delta === "string" && event.delta) turnText += event.delta;
+      turnState.fullText = turnText;
+      sendChunk({ ...event, sessionId: session });
+    };
+    const done = (event: LlmDoneEvent) => {
+      turnState.fullText = turnText;
+      turnState.done = true;
+      turnState.ok = event.ok;
+      turnState.message = event.message;
+      turnState.fellBack = event.fellBack === true;
+      sendDone({ ...event, sessionId: session, fullText: turnText });
+    };
     /**
      * 上游报"上下文超窗"（对齐 Codex 的 `ContextWindowExceeded` 触发源）时的统一处理：
      * 本地窗口表把窗口估小了 → 记录 forceCompact，下一轮 maybeCompact 会无条件压缩。
@@ -843,7 +1038,12 @@ function registerIpc(
       // 本地模型表把窗口估小了——记下来，并在气泡里说清"下一轮会自动压缩"，
       // 而不是把上游的英文报错原样糊给用户。
       sessionBudgets.set(session, { ...budgetFor(session), window: markWindowExceeded(budgetFor(session).window) });
-      chunk({ seq: 1, delta: "（本轮上下文超出模型可接受的长度。已记录，下一条消息会自动压缩历史后再发送；也可点输入框右侧的「上下文」按钮立即压缩。）\n\n" });
+      // **文案不能承诺"一定会重试"**（实测缺陷 2026-10-21）：
+      // 智能体分支里若这一轮已经产出过副作用（建了任务 / 落了文件 / 改过文件 / 问过用户），
+      // 我们**不会**重试（重跑会重复扣费或重复写文件），而是直接收尾。
+      // 旧文案写死"正在自动压缩历史后重试…"，那种情况下用户会一直等着一个不会发生的重试。
+      // 现在只说"已超出长度、正在处理"，由调用方在确实重试时再补一句。
+      chunk({ seq: 1, delta: "（本轮上下文超出模型可接受的长度，正在压缩历史…）\n\n" });
       return true;
     };
     // 上下文压缩前置：超阈值才动手，未超时原样透传（零回归）。
@@ -851,7 +1051,18 @@ function registerIpc(
     // controller 已在上面（并发守卫处）创建并登记，这里不再重复建。
     let effective = safeHistory;
     try {
-      effective = (await maybeCompact(session, safeHistory, "auto", controller.signal)).messages;
+      const compacted = await maybeCompact(session, safeHistory, "auto", controller.signal);
+      effective = compacted.messages;
+      // 压缩提示记进本轮状态：切页期间 `llm:compaction` 会丢，用户切回来只发现
+      // "历史怎么被摘要过了"却没有任何说明。历史被改写是用户可感知的变化，
+      // 静默就等于隐瞒（CLAUDE.md「失败必须可见」的同一条纪律）。
+      if (compacted.info && compacted.info.reason) {
+        turnState.compactionNotices.push({
+          reason: compacted.info.reason,
+          before: compacted.info.before,
+          after: compacted.info.after
+        });
+      }
     } catch (error) {
       // 压缩链路异常绝不阻断对话：如实记录后按原历史继续。
       console.warn("[llm] 上下文压缩失败，按原始历史继续：", describeError(error, "未知错误"));
@@ -907,13 +1118,59 @@ function registerIpc(
     if (normalized.notes.length > 0) chunk({ seq: 0, delta: `${normalized.notes.join("\n")}\n\n` });
     if (!agent) {
       // 普通对话同样要能吃下"上游报超窗"这一信号（LlmService 用状态码+错误体摘要构造 message）。
-      void service.chat(effective, webSearch || browserOnly, chunk, browserOnly)
+      //
+      // **超窗必须在当轮自己救回来**（对齐 Codex `compact.rs` 的
+      // "报超窗 → 丢最老的再重试"）：
+      // 旧实现只是记下 `forceCompact` 并提示"下一条消息会自动压缩"——
+      // 也就是这一轮**直接失败**，用户得自己再发一次才拿得到回答。
+      // 实测（probe-real-overflow-recovery）：第一轮气泡是「请再发一次」，
+      // 第二轮才成功；用户视角是"我说了话，它让我重说一遍"。
+      //
+      // 现在的做法：捕获超窗 → 立刻 `forceCompact` → **当轮重新压缩并重试一次**。
+      // 只重试一次：压完还超窗说明是"单条消息本身就太大"（压缩保留策略保不住），
+      // 再试只会重复烧 token（对齐 Codex 的 `guardian_budget_compacted`）。
+      const runPlainChat = () => service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
+      void runPlainChat()
+        // **成功时必须发 done**（实测回归 test-08）：重构时我漏掉了这一行，
+        // 于是普通对话成功时什么都不发——渲染端收不到 `llm:done`，
+        // 会话**永久卡在「生成中」**（停止键一直在、再也发不出新消息）。
+        // 崩溃路径有 catch、兜底路径有 finally，唯独"一切正常"这条最常走的路上没有收尾。
         .then(() => done({ ok: true }))
-        .catch((error: unknown) => {
-          // 用户主动停止（abort）不算错误：正常收尾，不显示红色报错。
+        .catch(async (error: unknown) => {
           const aborted = error instanceof DOMException && error.name === "AbortError";
-          if (!aborted) noteContextOverflow(error);
-          done({ ok: aborted, message: aborted ? undefined : describeError(error, "对话失败") });
+          if (aborted) {
+            done({ ok: true });
+            return;
+          }
+          if (!noteContextOverflow(error)) {
+            done({ ok: false, message: describeError(error, "对话失败") });
+            return;
+          }
+          // 走到这里说明确实是超窗：上面已置 forceCompact，重新压缩后再试一次。
+          // **这里确实会重试**，所以补一句（`noteContextOverflow` 本身不再承诺重试——
+          // 智能体分支在"已产出副作用"时是不重试的）。
+          chunk({ seq: 1, delta: "已压缩，正在重试这一次…\n\n" });
+          try {
+            const retried = await maybeCompact(session, safeHistory, "auto", controller.signal);
+            effective = retried.messages;
+            if (retried.info?.reason) {
+              // 压缩提示走同一条通道：用户要能看到"历史被改写了"（同上文 turnState 的理由）。
+              turnState.compactionNotices.push({
+                reason: retried.info.reason,
+                before: retried.info.before,
+                after: retried.info.after
+              });
+            }
+            await runPlainChat();
+            done({ ok: true });
+          } catch (retryError: unknown) {
+            // 压缩后仍失败：如实报出，不再循环重试。
+            const retryAborted = retryError instanceof DOMException && retryError.name === "AbortError";
+            done({
+              ok: retryAborted,
+              message: retryAborted ? undefined : `上下文超长，自动压缩后仍未能发出：${describeError(retryError, "对话失败")}`
+            });
+          }
         })
         .finally(() => { sessionAborters.delete(session); });
       return true;
@@ -930,14 +1187,40 @@ function registerIpc(
       let agentArtifactCount = 0; // 本轮已落盘产物数：用于收尾文案（见下面 1243 行附近）
       /** 本轮**改动过**的文件数（编辑已有产物，不新建）。单独计数才能把收尾文案说对。 */
       let agentEditCount = 0;
+      /**
+       * 本轮问过用户几次。
+       *
+       * 为什么要参与"不得整轮重试"（实测缺陷 probe-total-timeout）：整轮中止后我们的重试
+       * 会把模型从**头**再跑一遍——而用户已经答过的问题会被**重新问一遍**，
+       * 他刚才的选择全部作废（实测：连问两题、累计超时后，上游被请求 5 次，
+       * 提问卡片反复出现，最终什么都没做成）。
+       * 用户的时间也是成本，重放询问比重放无副作用的搜索更不可接受。
+       */
+      let agentQuestionCount = 0;
       const agentSend = (event: LlmStreamEvent) => { agentSent += 1; chunk(event); };
-      const sendTasks = (taskIds: string[]) => { agentTaskCount += taskIds.length; sendLlmTasks({ taskIds, sessionId: session }); };
+      const sendTasks = (taskIds: string[]) => {
+        agentTaskCount += taskIds.length;
+        // 记进本轮状态：渲染端离开期间丢掉的 `llm:tasks` 靠它补齐
+        // （否则用户切回来只看到"生成中"，不知道任务已经建出来了）。
+        const state = sessionTurnState.get(session);
+        if (state) state.taskIds.push(...taskIds);
+        sendLlmTasks({ taskIds, sessionId: session });
+      };
       // 编辑产物后推一条"更新"事件：渲染端就地刷新卡片大小与已打开的预览。
       // 为什么需要（实测缺口）：此前只有 create_file 会推事件，于是模型改完文件后，
       // 卡片上的大小停在旧值、**已打开的预览面板也不会重载**——用户对着旧画面
       // 判断"还是坏的"，而模型那边已经改好了。两边看到的是两个不同的文件。
       const notifyArtifactUpdated = (absolutePath: string, name: string, size: number) => {
         const kind: LlmArtifactEvent["kind"] = /\.html?$/i.test(name) ? "html" : /\.xlsx$/i.test(name) ? "sheet" : "doc";
+        // **更新也要记进本轮状态**（实测缺陷 probe-edit-update-while-away）：
+        // 切页期间这条事件被丢弃，而恢复逻辑按 `path` 去重会跳过已存在的卡片 ——
+        // 于是切回来时卡片停在**改前的大小**（实测：文件已 12KB，卡片仍写 1 KB），
+        // 用户据此以为"没改成功"，再点一次预览才看到新内容。
+        // 记进 `artifacts` 时**按 path 覆盖**（同一文件只保留最新一份元数据）。
+        const existing = turnState.artifacts.findIndex((entry) => entry.path === absolutePath);
+        const record = { name, path: absolutePath, size, kind };
+        if (existing >= 0) turnState.artifacts[existing] = record;
+        else turnState.artifacts.push(record);
         sendLlmArtifact({ name, path: absolutePath, size, kind, updated: true, sessionId: session });
       };
       // world state：每轮都注入**完整**的环境事实（时间/联网/产物/余量）。
@@ -969,7 +1252,12 @@ function registerIpc(
       const artifactRoot = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
       const artifactFiles = await readdir(artifactRoot)
         .then(async (entries) => {
-          const wanted = entries.filter((name) => /\.(html?|md|xlsx)$/i.test(name));
+          // **覆盖所有可读产物扩展名**（实测缺陷 probe-real-compute-natural）：
+          // 原来只认 `.html|.md|.xlsx`，于是 `saveArtifact` 存下的 `.csv` / `.tsv` / `.txt`
+          // **不在清单里**——模型看不到它，就好像这个会话从没产出过这份数据，
+          // 于是它回一句"我这边看不到你的文件，麻烦上传或粘贴"（实测就是这样）。
+          // 而 `saveArtifact` 与产物预览都支持这些类型，清单必须与之一致。
+          const wanted = entries.filter((name) => isListableArtifact(name));
           const withTime = await Promise.all(wanted.map(async (name) => {
             const info = await stat(path.join(artifactRoot, name)).catch(() => undefined);
             return { name, mtime: info?.mtimeMs ?? 0 };
@@ -988,6 +1276,14 @@ function registerIpc(
           searchApiReady: Boolean(turn.value.searchBaseUrl),
           artifactKinds: turn.value.planMode === "plan" ? [] : ["html（网页/小工具）", "xlsx（表格，由 csv/tsv 生成）", "md（文档）"],
           artifactFiles,
+          // **只有真的配好凭据的后端才列出来**（实测缺口）：模型现在要先问用户
+          // "用哪个方式生成"，而它看不到「连接设置」。不筛的话它会把没配密钥的云端
+          // 选项摆给用户，选了必然报"未保存卡密"/"请先保存 API Key"，白走一轮。
+          //
+          // 计划模式传 **undefined**（而不是 `[]`）：空数组是"有这一段、但一个都没有"，
+          // 会向模型断言"去连接设置配置"——而计划模式下 generate_video 根本没下发，
+          // 真实原因是"本轮只出方案"。不传就不出现这一段，不会给出误导的原因。
+          videoBackends: turn.value.planMode === "plan" ? undefined : await availableVideoBackends(turnSettings),
           contextBudget: { remainingTokens: Math.max(0, modelLimit - activeTokens), modelLimitTokens: modelLimit }
         }),
         sessionWorldState.get(session)
@@ -1012,6 +1308,27 @@ function registerIpc(
         searchBaseUrl: turn.value.searchBaseUrl || undefined,
         searchApiKey: turn.value.searchApiKey
       };
+      /**
+       * 「这一轮到底问过用户没有」——`generate_video` 的准入闸门（见那里的说明）。
+       *
+       * 为什么需要它：真实模型会把 `backend:"local"` 直接写进参数，绕开"未指定才拦"的判定
+       * （真机实测 deepseek-v4.1-flash）。所以判据只能是"问没问过"，不是"传没传参"。
+       *
+       * **初值从会话记忆里读**（实测缺陷 probe-cross-turn-backend）：计划模式下轮 1 用户
+       * 答了「本机 ComfyUI」，轮 2 点「继续执行」时如果仍从 false 起算，闸门又会拦住
+       * 同一个问题，用户得重新答一遍——他明明已经答过。
+       */
+      const rememberedBackend = sessionChosenBackend.get(session);
+      let backendSettled = Boolean(rememberedBackend);
+      /** 用户自己在原话里点名、或答题卡片里选定的后端（优先级高于模型自己填的）。 */
+      let backendFromUser: BackendKind | undefined = rememberedBackend;
+      /**
+       * 本轮**用户自己说的话**（不含我们注入的环境事实）。
+       *
+       * 环境事实是最后追加的一条 user 消息（见 injectWorldState），里面有「视频生成后端」
+       * 清单——把它算进来会让"用户点名过"永远为真，闸门就形同虚设。
+       */
+      const userText = [...safeHistory].reverse().find((message) => message.role === "user")?.content ?? "";
       const agentCallbacks = {
         // 与普通对话共用同一条搜索链路：配了搜索 API 就优先用它，未配置则回落免 key 抓取 Bing/搜狗。
         // browserOnly（「浏览器搜索」联网项）时只用 Chromium 渲染，跳过 API 与 HTTP 直抓。
@@ -1023,25 +1340,133 @@ function registerIpc(
           renderHtml: (url, signal) => renderHtml(url, undefined, signal),
           browserOnly: turn.value.browserOnly
         }, controller.signal),
-        generateVideo: async (params: { prompt: string; duration: number; count: number }) => {
+        generateVideo: async (params: { prompt: string; duration: number; count: number; backend?: string }) => {
+          // **后端必须能按模型给的值走，不能永远用默认后端**（实测缺口）：
+          // 旧实现无条件 `backend: turn.value.defaultBackend`，于是用户说"生成一段视频"时
+          // 无论问没问过、想用哪个后端，都会直接落到「连接设置」里的默认后端（常见是本机
+          // ComfyUI）开跑——云端按次计费的选项用户压根没机会选。
+          // 现在接受模型显式传的 backend；认不出来或没传时才回落到默认。
+          // 别名表抽在 `adapterRegistry.normalizeBackendKind`（纯函数，可单测）。
+          const requested = String(params.backend ?? "").trim();
+          // 认不出来的值要**说清有哪些可选**，而不是悄悄换成默认后端——
+          // 用户以为自己选了云端、实际跑在本机，结果与花费完全不同。
+          if (requested && !normalizeBackendKind(requested)) {
+            return `不认识的生成后端「${params.backend}」。可选：local（本机 ComfyUI）/ ssh（SSH 远程显卡）/ minimax（MiniMax 云 API）/ rb（瞬映 RB）。请向用户确认用哪一个再调用。`;
+          }
+          // **有多个后端可用时，模型必须先问用户，不许自己挑**（实测缺陷 probe-real-ask-first）。
+          //
+          // 为什么不能只靠提示词（真机实测 2026-10-20，deepseek-v4.1-flash）：本机配了
+          // ComfyUI 又有瞬映卡密，世界状态里已写明「用户没指定时不要自己挑——花费差别很大」，
+          // `generate_video` 的工具描述也写了「动手前必须先问后端/时长/数量」。真实模型拿到
+          // 用户那段小仙女描述后**一句没问**，直接 `generate_video({backend:"local"})` 建出了任务
+          // （步骤条只有「→ 正在创建视频生成任务…」「✓ 生成视频完成」两条）。
+          //
+          // 这正是 CLAUDE.md 那条规律的实例：模型更信"有没有这个工具"，不信提示词里的话。
+          // 第一版只拦"没传 backend"的情形，模型照样显式传了 `local` 绕过去——所以判据必须是
+          // **这一轮到底问过用户没有**（`backendSettled`）：没问过、用户原话里也没点名 → 一律不建任务。
+          const asked = normalizeBackendKind(requested);
+          const userSaid = backendMentionedInText(userText);
+          const usableBackends = (await videoBackendAvailability(turnSettings)).filter((entry) => !entry.reason);
+          // **用户本轮原话优先于会话记忆**（实测缺陷 probe-change-mind）：
+          // 轮 1 说「用本机」→ 记进会话；轮 2 改口「改用瞬映」时，如果只看
+          // `backendSettled`（记忆里已是 true）就会整块跳过，`userSaid` 根本不被读取，
+          // 于是仍按 local 生成。用户说了新选择，软件照旧选择执行。
+          // 所以这里**先读本轮原话**，它永远能覆盖记忆值。
+          if (userSaid && usableBackends.some((entry) => entry.kind === userSaid)) {
+            backendFromUser = userSaid;
+            backendSettled = true;
+            sessionChosenBackend.set(session, userSaid);
+          }
+          // **用户点名的后端不可用时，必须说清楚，不能静默换一个**（实测缺陷
+          // probe-named-unavailable）：用户说「用瞬映生成」，而这台机器没存瞬映卡密、
+          // 只有本机 ComfyUI 可用。此时 `usableBackends.length === 1`，下面那个闸门
+          // 整块被跳过（它是 `> 1` 才生效），于是 `backend` 落到默认的 `local`——
+          // **用户明确说了用瞬映，软件却用本机跑，且没有任何提示**。
+          //
+          // 这正是 CLAUDE.md 点过的那类错：用户以为走了云端、实际跑在本机，
+          // 结果与花费完全不同，而他看不出任何异常。
+          if (userSaid && !usableBackends.some((entry) => entry.kind === userSaid)) {
+            const all = await videoBackendAvailability(turnSettings);
+            const why = all.find((entry) => entry.kind === userSaid)?.reason;
+            const others = usableBackends.filter((entry) => entry.kind !== userSaid);
+            return [
+              `你提到要用「${backendKindLabel(userSaid)}」，但它现在用不了${why ? `：${why}` : ""}。`,
+              others.length
+                ? `目前可用的只有：${others.map((entry) => `${backendKindLabel(entry.kind)}（\`${entry.kind}\`）— ${entry.note}`).join("、")}。**任务没有创建。** 请把这个情况告诉用户，问他要不要改用这一个，别自己替他换。`
+                : `现在没有任何可用的生成后端。**任务没有创建。** 请让用户去「连接设置」配好一个再试。`
+            ].join("\n");
+          }
+          if (usableBackends.length > 1 && !backendSettled) {
+            // 走到这里说明：本轮原话没点名后端（否则上面已 return 或已置位），会话记忆里也没有
+            // （否则 `backendSettled` 初值就是 true）——**必须先问用户**。
+            return [
+              `**还没有确定用哪个后端，任务没有创建。** 现在有 ${usableBackends.length} 个可用的生成方式：`,
+              usableBackends.map((entry) => `- ${backendKindLabel(entry.kind)}（\`${entry.kind}\`）— ${entry.note}`).join("\n"),
+              `它们的花费差别很大（本机不额外计费、云端按秒计费、瞬映扣卡密次数），不能替用户默认挑一个。`,
+              `请先用 \`request_user_input\` 问用户用哪一个（选择题里把上面几个都列上），拿到答复后再带 \`backend\` 重新调用本工具。`,
+              `如果用户已经明确说了用哪个（如"用本机""走云端"），直接把那个值放进 \`backend\` 再调用。`
+            ].join("\n");
+          }
+          const backend: BackendKind = backendFromUser ?? asked ?? turn.value.defaultBackend;
+          // **提交前必须确认这个后端此刻能不能用**（实测缺陷 probe-nocred-backend）：
+          // `orchestrator.submit()` 只做参数校验、不查凭据，会先把任务建出来并返回成功，
+          // 于是工具回执写"已创建 1 个视频生成任务"，随后 `runTask()` 异步抛
+          // "请先在连接设置中保存 MiniMax API Key" —— 气泡里模型据此告诉用户
+          // "已经帮你提交了，稍等就好"，卡片却是失败的。用户被两边打架的说法绕进去。
+          //
+          // 用与「告诉模型有哪些可选」**同一个判定**（`videoBackendAvailability`），
+          // 否则一处认"填了地址就行"、另一处要"有密钥"，迟早漂移。
+          const availability = await videoBackendAvailability(turnSettings);
+          const chosen = availability.find((entry) => entry.kind === backend);
+          if (chosen?.reason) {
+            const others = availability.filter((entry) => !entry.reason);
+            return [
+              `后端「${backendKindLabel(backend)}」现在用不了：${chosen.reason}。`,
+              others.length
+                ? `目前可用的有：${others.map((entry) => `${backendKindLabel(entry.kind)}（${entry.kind}）`).join("、")}。可以问用户要不要改用其中一个。`
+                : `现在没有任何可用的视频生成后端，请让用户去「连接设置」配好一个再试。`,
+              `**任务没有创建**，不要告诉用户已经提交。`
+            ].join("\n");
+          }
           const request: GenerationRequest = {
             ...initialAgentVideoRequest,
-            // 跟随用户当前默认后端；不写死（写死 rb 会让没配瞬映卡密的用户必然失败）。
-            backend: turn.value.defaultBackend,
+            backend,
             prompt: params.prompt,
             // 时长必须按**后端**约束夹取：工具 schema 允许 4–15 秒，但 RB 的
             // reference/tail_frame 只收 4/6/8（validateRequest 会直接拒）。
             // 不夹的话模型传 10 秒时任务根本建不出来，而工具报错后模型往往
             // 换个说法重试同一个时长，用户看到的是"一直失败"。
-            duration: clampDurationForBackend(turn.value.defaultBackend, params.duration),
+            duration: clampDurationForBackend(backend, params.duration),
             count: Math.max(1, Math.min(4, Math.round(params.count || 1))),
             baseSeed: Math.floor(Math.random() * 1_000_000)
           };
           const response = await orchestrator.submit(request);
           // 把新任务 id 推给渲染端：对应会话气泡下直接挂结果卡片（工具文案承诺了"卡片将在下方实时显示"）。
           sendTasks(response.map((task) => task.id));
+          // **夹取必须说出来**（实测缺陷 probe-clamp-disclosure）：用户说「10 秒」、后端只能 4/6/8，
+          // 任务按 8 秒建出来后，回执若只写「时长=8 秒」，模型分不清这是
+          // "用户本来就要 8 秒"还是"你要的 10 秒被改了"——它会照 8 秒复述成"按你选的 10 秒"，
+          // 或者再调一次工具想改回 10 秒，白烧一步。
+          //
+          // 这里自己收敛成数字（不引 `llmService` 的 `toFiniteNumber`：那是它的私有函数，
+          // 而 `params.duration` 在本层已声明为 number，只需防运行时的非有限值）。
+          const wantedDuration = Number.isFinite(Number(params.duration)) ? Math.round(Number(params.duration)) : undefined;
+          // **措辞不能说「只支持 N 秒」**（我自己第一版就这么写的，是错的）：
+          // RB 允许的是 **4/6/8 三档**，夹到 8 秒只是"这一次落在 8"，
+          // 说成"只支持 8 秒"会让模型转述给用户一个错误事实。
+          // 只说"已按这个后端允许的档位调整"，并给出实际值。
+          const durationNote = wantedDuration !== undefined && wantedDuration !== request.duration
+            ? `（你要的是 ${wantedDuration} 秒，已按这个后端允许的档位调整为 ${request.duration} 秒。**对用户说明实际时长，不要复述原来的数字。**）`
+            : "";
+          // **数量被夹同样要说**（实测缺陷 probe-count-clamp）：云端**按路计费**，
+          // 模型要 8 路、实际只建 4 路时，回执若只写"数量=4 路"，它可能对用户说
+          // "按你要的 8 条来"（实际 4 条），或者再调一次工具想补足（又一次计费）。
+          const wantedCount = Number.isFinite(Number(params.count)) ? Math.round(Number(params.count)) : undefined;
+          const countNote = wantedCount !== undefined && wantedCount !== request.count
+            ? `（你要的是 ${wantedCount} 路，单次最多 ${request.count} 路，已按它调整。**对用户说明实际条数，不要复述原来的数字。**）`
+            : "";
           // 返回文本带全量参数：模型据此在收尾时能准确复述任务细节（收尾质量），而不是含糊的"已创建"。
-          return `已创建 ${response.length} 个视频生成任务：后端=${backendKindLabel(request.backend)}，时长=${request.duration} 秒，数量=${request.count} 路，画面描述="${params.prompt}"。任务卡片已实时显示在本会话气泡下方，完成后可直接预览与下载。请向用户简短确认这些任务参数（一两句话即可，不要重复长描述）。`;
+          return `已创建 ${response.length} 个视频生成任务：后端=${backendKindLabel(request.backend)}，时长=${request.duration} 秒${durationNote}，数量=${request.count} 路${countNote}，画面描述="${params.prompt}"。任务卡片已实时显示在本会话气泡下方，完成后可直接预览与下载。请向用户简短确认这些任务参数（一两句话即可，不要重复长描述）。`;
         },
         // open_page（让模型能真正"打开浏览器"）：复用 browserFetch 的 Chromium 渲染。
         // 安全边界：只允许 http/https，**且必须拒绝内网地址**——URL 由模型生成（还可能被它刚抓到的
@@ -1090,6 +1515,9 @@ function registerIpc(
           // （几十 KB 的 3D 页面 ≈ 每轮多烧上万 token，还会触发压缩）。内容已在磁盘上。
           const renderKind: "html" | "sheet" | "doc" =
             /\.html?$/i.test(saved.name) ? "html" : /\.xlsx$/i.test(saved.name) ? "sheet" : "doc";
+          // 记进本轮状态：切页期间丢掉的 `llm:artifact` 靠它补齐
+          // （否则用户切回来只看到"写好了"，却没有任何文件卡片）。
+          turnState.artifacts.push({ name: saved.name, path: saved.path, size: saved.size, kind: renderKind });
           sendLlmArtifact({ name: saved.name, path: saved.path, size: saved.size, kind: renderKind, sessionId: session });
           agentArtifactCount += 1;
           return `文件已生成并保存：${saved.name}（${saved.size >= 1024 * 1024 ? `${(saved.size / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(saved.size / 1024))}KB`}）。文件卡片已显示在对话中，用户可点「预览」查看或在文件夹中打开。**不要**把文件内容重复贴进回复——卡片已经承载了它。请用一两句话说明文件内容概要即可。`;
@@ -1119,7 +1547,7 @@ function registerIpc(
           // 时，若先按 `safeName` 判扩展名 → 没有 `.html` → 直接报"只能自检 html 产物"，
           // 而文件其实就在那里、也确实能跑。解析器已支持无扩展名补全，先让它找出实际文件。
           const found = await resolveArtifactQueued(dir, safeName);
-          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          if (!found) throw new Error(describeMissingArtifact(safeName));
           if (!/\.html?$/i.test(found.name)) throw new Error(`「${found.name}」不是 html 产物，无法自检（csv/md 没有可运行的脚本）。`);
           const resolved = found.path;
           const actualName = found.name;
@@ -1160,7 +1588,7 @@ function registerIpc(
           const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
           const safeName = path.basename(String(params.name || "").trim());
           const found = await resolveArtifactForTool(dir, safeName);
-          if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+          if (!found) throw new Error(describeMissingArtifact(safeName));
           const resolved = found.path;
           // xlsx 是二进制，但**不能因此拒绝**（实测真机，表格案例）：模型好不容易
           // 生成出 xlsx，却完全无法核验内容——`read_artifact` 抛"二进制"、
@@ -1380,7 +1808,7 @@ ${tableNote}` : ""}`;
           // 后者会再排一次队，等于自己等自己，永久挂起（与 `readArtifact` 那条注释同理）。
           return artifactWriteQueue.run(async (): Promise<string> => {
             const found = await resolveArtifactForTool(dir, safeName);
-            if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+            if (!found) throw new Error(describeMissingArtifact(safeName));
             const resolved = found.path;
             // 下落必须说出来，且**分清成因**（名字不存在 / 已过期 / 没写扩展名 / csv 落成 xlsx）。
             // 不说的话模型以为改的就是自己点的那份（界面上同名只展示最新版）。
@@ -1446,7 +1874,7 @@ ${tableNote}` : ""}`;
           // 界面只展示最新版，用户看到"一点没变"。
           return artifactWriteQueue.run(async (): Promise<string> => {
             const found = await resolveArtifactForTool(dir, safeName);
-            if (!found) throw new Error(`本会话里找不到产物「${safeName}」。请确认文件名（带扩展名）与 create_file 生成的一致。`);
+            if (!found) throw new Error(describeMissingArtifact(safeName));
             const resolved = found.path;
             const fellBackNote = describeArtifactFallback(found.fellBack, safeName, found.name, "edit");
             if (/\.xlsx$/i.test(resolved)) throw new Error("表格产物是二进制，不支持局部编辑；请用 create_file 重新生成。");
@@ -1493,6 +1921,9 @@ ${tableNote}` : ""}`;
         },
         // update_plan：把任务拆解写出来让用户看得见进度。纯展示，不产生副作用。
         updatePlan: async (params: { explanation?: string; plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> }) => {
+          // 记进本轮状态：切页期间丢掉的 `llm:plan` 靠它补齐。
+          // 只留最新一份（`update_plan` 语义本来就是整份替换，不是增量）。
+          turnState.planSteps = params.plan;
           sendLlmPlan({ plan: params.plan, explanation: params.explanation, sessionId: session });
           const done = params.plan.filter((entry) => entry.status === "completed").length;
           return `步骤清单已更新（${done}/${params.plan.length} 已完成），用户能在对话里看到。继续执行下一步，不要在回复里重复整个清单。`;
@@ -1501,9 +1932,101 @@ ${tableNote}` : ""}`;
         // 超时/跳过会 reject（见 QuestionBridge），execute 层把它翻译成"按最佳判断继续"。
         requestUserInput: async (params: { questions: AgentQuestion[] }) => {
           const requestId = randomUUID();
+          // **问过就计数**：整轮重试会把已经答过的题重新问一遍，那不可接受
+          // （见 `agentQuestionCount` 的说明）。挂在挂起之前，超时/跳过也算问过。
+          agentQuestionCount += 1;
           // 先推事件再挂起：渲染端要拿到 requestId 才能回传答案。
           sendLlmQuestion({ requestId, questions: params.questions, sessionId: session });
-          return questionBridge.ask(session, requestId, params.questions, controller.signal);
+          try {
+            const answer = await questionBridge.ask(session, requestId, params.questions, controller.signal);
+            // **问过就算数**（闸门的语义是"不许不问就挑"，不是"必须拿到明确后端名"）。
+            // 用户答了但答的是时长、没提后端时，也应该允许模型自己定——
+            // 否则它会为了"凑一个后端名"再问一次，白烧步骤。
+            backendSettled = true;
+            // **只在「我们自己给出的选项」里找后端**（实测缺陷 probe-custom-answer-backend）。
+            //
+            // 答案串是 `formatAnswers` 拼出来的：`【header】用户选择：<label>（<description>）`。
+            // 它既包含预设选项的 label，**也包含用户手写的自定义文本**——两者混在一段字符串里。
+            //
+            // 旧写法对整段答案走 `loose` 模式（裸「云端」也算），于是用户在自定义框里写
+            // 「云端漂浮的城堡那种感觉」就被判成"选了 MiniMax 云端"，直接按秒计费生成。
+            // 他明明只是在描述画面。
+            //
+            // **光看"label 出现在答案里"还不够**（第二个实测缺陷 probe-style-option-backend）：
+            // 模型也会问画面风格，而风格选项完全可能叫「云端漂浮的城堡」——
+            // 选了这种**风格**同样会被当成"选了云端后端"，任务按秒计费。
+            // 判定收进 `backendPickedFromQuestions`（纯函数、可单测）：
+            // ① 选项 id 本身就是后端名（模型显式写 `local`/`minimax`）→ 认；
+            // ② 否则要求**这道题问的就是后端**（id/header/question 里出现「后端」「生成方式」）。
+            // 整段答案（含用户手写内容）只走**严格**模式，认「用/走/选 云端」这类明确指令。
+            const picked = backendPickedFromQuestions(params.questions, answer) ?? backendMentionedInText(answer);
+            if (picked) {
+              backendFromUser = picked;
+              // **记进会话**：计划模式下轮 2 点「继续执行」时不该再问一遍。
+              sessionChosenBackend.set(session, picked);
+            }
+            return answer;
+          } catch (error) {
+            // **跳过 / 超时也是"问过了"**（实测 probe-skip-then-gate）：
+            // 用户点「跳过，你决定」走的是 reject，没有这一段的话 `backendSettled`
+            // 永远不会置位，闸门继续拦着——用户明确授权 AI 自己决定，
+            // 软件却不许它决定，模型只能再问一次，用户再点跳过……
+            // 这正是"问了又拦、拦了又问"的死循环形状（探针复现：2 轮都被拦）。
+            backendSettled = true;
+            throw error;
+          }
+        },
+        /**
+         * compute：对本会话产物的一列做**精确统计**。
+         *
+         * 真机依据（2026-10-21）：模型统计 5000 行 CSV 的温度均值时拒绝心算——
+         * 「我没有可执行的代码工具…只靠逐行心算平均值得出的数字是编出来的」。
+         * 那是正确回答，但也说明"数据统计"这类任务它只能给部分结论。
+         *
+         * 安全边界：**只读本会话产物目录**（与 read_artifact 同一套 `resolveArtifactQueued`
+         * 与路径白名单），只做确定性统计，**不执行任何用户/模型提供的代码**。
+         */
+        compute: async (params: { name: string; column?: string | number; values?: number[] }) => {
+          // ① 直接给了一串数字：不走文件
+          if (Array.isArray(params.values) && params.values.length > 0) {
+            const summary = summarizeColumn(params.values);
+            return formatSummary(summary, "你提供的数值");
+          }
+          const safeName = path.basename(String(params.name || "").trim());
+          if (!safeName) return "统计失败：name 是空的。请填上要统计的产物文件名（带扩展名）。";
+          if (params.column === undefined || params.column === null || params.column === "") {
+            return "统计失败：column 是空的。请说明要统计哪一列（表头名或 0 起的列序号）。";
+          }
+          const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(session));
+          const found = await resolveArtifactQueued(dir, safeName);
+          if (!found) {
+            return `统计失败：${describeMissingArtifact(safeName, "如果数据是别人给的，可以先用 create_file 存成 csv 再来统计。")}`;
+          }
+          // ② xlsx 是二进制：用与 read_artifact 相同的 SheetJS 反解（不新增依赖）
+          let text: string;
+          if (/\.xlsx$/i.test(found.path)) {
+            const XLSX = await loadXlsx();
+            try {
+              const book = XLSX.readFile(found.path);
+              const first = book.SheetNames[0];
+              text = first ? XLSX.utils.sheet_to_csv(book.Sheets[first]) : "";
+            } catch (error) {
+              return `统计失败：表格文件无法读取（${describeError(error, "未知错误")}）。`;
+            }
+          } else if (/\.(csv|tsv|txt|md)$/i.test(found.path)) {
+            text = decodeTextBytes(await readFile(found.path));
+          } else {
+            return `统计失败：${found.name} 不是表格/文本产物，无法按列统计（支持 csv / tsv / xlsx / txt / md）。`;
+          }
+          const columnValues = extractColumn(text, params.column);
+          if (!columnValues) {
+            // **列出实际有哪些列**：只说"列不存在"模型只能瞎猜一个再试，白烧一步。
+            const headerLine = text.replace(/\r\n/g, "\n").split("\n").find((line) => line.trim()) ?? "";
+            const columns = headerLine.split(/[,\t;|]/).map((c) => c.trim()).filter(Boolean).slice(0, 30);
+            return `统计失败：在 ${found.name} 里找不到列「${params.column}」。这个文件的表头是：${columns.join(" / ") || "（没有表头）"}。请从里面选一个列名，或用 0 起的列序号。`;
+          }
+          const summary = summarizeColumn(columnValues);
+          return formatSummary(summary, `${found.name} 的「${params.column}」列（共 ${columnValues.length} 行）`);
         }
       };
       let result: AgentRunResult | undefined;
@@ -1536,18 +2059,72 @@ ${tableNote}` : ""}`;
           // 环境事实拼成一条 user 消息附在**当轮**历史末尾（见 injectWorldState 的通道说明）。
           // 放在循环内：内容过滤重试会往 effective 追加改写指引，须基于最新历史注入。
           result = await chatAgent(agentOptions, injectWorldState(effective, worldStateText), agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
+            // 记进本轮状态：切页期间丢掉的 `llm:tool` 靠它补齐（同一根因的第五个实例）。
+            // 用户判断"AI 到底做了哪些事"主要就看这一行，丢了会显示"已执行 0 次"。
+            turnState.toolSteps.push({ phase: "start", tool, input });
             sendLlmTool({ tool, input, phase: "start", sessionId: session });
           }, (tool, summary, ok) => {
+            turnState.toolSteps.push({ phase: "end", tool, result: summary, ok });
             sendLlmTool({ tool, input: "", phase: "end", result: summary, ok, sessionId: session });
           }, planArg === "plan");
           break;
         } catch (error) {
           if (controller.signal.aborted) { done({ ok: true }); return; }
           agentError = error;
-          // 上游报"上下文超窗"：与普通对话同一套处理（记录 forceCompact，下一轮无条件压缩）。
-          // 必须在这里就停：重试同一段超长历史必然同样被拒，回落普通对话也会同样超窗——
-          // 提前拦下，避免用户看到"发了半天全是同一堵墙"。追加提示即使已有输出也安全（不重发正文）。
-          if (noteContextOverflow(error)) { done({ ok: true }); return; }
+          // 上游报"上下文超窗"：**当轮自己救回来**（与普通对话同一套，对齐 Codex
+          // "报超窗 → 丢最老的再重试"）。旧实现只记录 forceCompact 就 `done` 收尾，
+          // 用户得手动再发一次（实测 probe-real-overflow-recovery 量到：第一轮失败、
+          // 第二轮才成功）。这里改成压缩后在同一轮内重试一次。
+          //
+          // **只在没有产出副作用时重试**：这一轮可能已经 create_file / 建了任务，
+          // 重跑会让它再落一份或再扣一次费（这与下面 `producedSideEffects` 是同一条判据）。
+          if (noteContextOverflow(error)) {
+            const alreadyProduced = agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0 || agentQuestionCount > 0;
+            if (alreadyProduced) {
+              // **这一轮到此为止，而且没做完**——必须说清楚。
+              // 不重试是因为已经产出过东西（重跑会重复落文件/重复扣费），
+              // 但用户需要知道"现在停在这里、不是正常收尾"，
+              // 否则他会以为任务已完整结束（实测：旧文案停在"正在重试…"，之后什么都没发生）。
+              chunk({
+                seq: 1,
+                delta: `（本轮因上下文超长而中断，**没有做完**。这一轮已经产出了东西，重新跑会重复创建/重复写入，所以没有自动重试。可以点输入框右侧的「上下文」立刻压缩，然后回复「继续」让我接着做。）\n\n`
+              });
+              done({ ok: true });
+              return;
+            }
+            chunk({ seq: 1, delta: "已压缩，正在重试这一次…\n\n" });
+            try {
+              const retried = await maybeCompact(session, safeHistory, "auto", controller.signal);
+              effective = retried.messages;
+              if (retried.info?.reason) {
+                turnState.compactionNotices.push({
+                  reason: retried.info.reason,
+                  before: retried.info.before,
+                  after: retried.info.after
+                });
+              }
+              // 压缩后重跑**同一轮智能体**：`agentSent` 仍是 0（超窗时还没出正文），
+              // 所以不会出现"两份回答拼接"。
+              result = await chatAgent(agentOptions, injectWorldState(effective, worldStateText), agentCallbacks, agentSend, controller.signal, webSearch || browserOnly, (tool, input) => {
+                turnState.toolSteps.push({ phase: "start", tool, input });
+                sendLlmTool({ tool, input, phase: "start", sessionId: session });
+              }, (tool, summary, ok) => {
+                turnState.toolSteps.push({ phase: "end", tool, result: summary, ok });
+                sendLlmTool({ tool, input: "", phase: "end", result: summary, ok, sessionId: session });
+              }, planArg === "plan");
+              break;
+            } catch (retryError: unknown) {
+              if (controller.signal.aborted) { done({ ok: true }); return; }
+              // 压缩后仍超窗：如实收尾，不再循环（与普通对话同一判断）。
+              agentError = retryError;
+              if (agentSent > 0) throw retryError;
+              const reason = describeError(retryError, "智能体请求失败");
+              chunk({ seq: 1, delta: `（上下文超长，自动压缩后仍未成功：${reason}，已自动改用普通对话模式）\n\n` });
+              await service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
+              done({ ok: true, fellBack: true });
+              return;
+            }
+          }
           // 内容被安全策略拒绝：原样重试同一个 prompt 必然同样被拒，得先注入改写指引。
           // 注入在历史末尾（作为一条普通 user 消息），下一轮重试就会带上它。
           //
@@ -1561,13 +2138,28 @@ ${tableNote}` : ""}`;
           // - edit_artifact 更糟——oldText 已经被改掉，重放必然 not-found，
           //   模型于是开始怀疑自己、换片段重试，把预算烧在"修一个已经修好的东西"上。
           // 已经产出东西的这一轮，直接如实报错 + 回落普通对话，比悄悄重放更可控。
-          const producedSideEffects = agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0;
+          // **问过用户也算副作用**（实测缺陷 probe-total-timeout）：重放会把已经答过的
+          // 问题**重新问一遍**，用户刚才的选择全部作废（实测连问两题后整体超时，
+          // 上游被请求 5 次、卡片反复出现，最终什么都没做成）。
+          const producedSideEffects = agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0 || agentQuestionCount > 0;
           if (isContentFilterError(error) && attempts < 3 && agentSent === 0 && !producedSideEffects) {
             chunk({ seq: 0, delta: contentFilterNotice(attempts, 3) });
             effective = [...effective, { role: "user", content: CONTENT_FILTER_GUIDANCE }];
             continue;
           }
-          const retryable = attempts < 3 && agentSent === 0 && !producedSideEffects && isNetworkError(error);
+          // 重试判据：网络抖动 **或** 限流（429）。
+          //
+          // 429 是实测缺口（2026-10-22）：这里已经用了 `retryDelayMs` 去尊重 retry-after，
+          // 判据却只放行网络错误，于是上游回 `429 + retry-after: 2` 时根本不进重试分支——
+          // 明明等两秒就成。401/403/404/400 不重试（必然同样失败，白等一轮）。
+          //
+          // **5xx 刻意不放行**（与普通对话那边不同）：智能体路径的 SDK 已经设了
+          // `maxRetries: 1`，5xx 在 SDK 层就重试过一次。整轮再重试 3 次 + 每次 3 秒退避
+          // 会让"服务端 500"这类必然失败的错误拖到十几秒才报出来（实测 E2E test-02 从
+          // 6 秒等到 12 秒还没收尾）。速率限制则不同——它是**有冷却窗口**的，
+          // SDK 的瞬时重试撞在窗口里注定失败，必须由整轮重试按 retry-after 等待。
+          const retryable = attempts < 3 && agentSent === 0 && !producedSideEffects
+            && (isNetworkError(error) || httpStatusOf(error) === 429);
           if (!retryable) break;
         }
       }
@@ -1580,14 +2172,17 @@ ${tableNote}` : ""}`;
         const reason = describeError(agentError, "智能体请求失败");
         chunk({ seq: 1, delta: `（智能体模式请求失败：${reason}，已自动改用普通对话模式）\n\n` });
         await service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
-        done({ ok: true });
+        // **回落也要如实标记**（见 `LlmDoneEvent.fellBack`）：`ok` 仍是 true（确实拿到了一段
+        // 回复），但"这一轮想干的事"没干成。不标的话渲染端无从判断，
+        // 计划模式下的「继续执行」按钮就再也不回来（实测缺陷 probe-execute-plan-fail）。
+        done({ ok: true, fellBack: true });
         return;
       }
       if (agentSent === 0 && result.textLength === 0 && result.toolCalls === 0) {
         // 模型走了 agent 路径但没出文本也没出工具调用——基本就是不支持函数调用。自动回落普通对话。
         chunk({ seq: 1, delta: "（当前模型不支持工具调用，已自动改用普通对话模式）\n\n" });
         await service.chat(effective, webSearch || browserOnly, chunk, browserOnly);
-        done({ ok: true });
+        done({ ok: true, fellBack: true });
         return;
       }
       if (agentSent === 0 && result.toolCalls > 0) {
@@ -1650,6 +2245,20 @@ ${tableNote}` : ""}`;
       // world state 快照写回：本轮已把这批环境事实发给了模型，下一轮只发差异。
       // 放在采样成功之后——中途失败没真正注入，不该记成"已注入"（否则下一轮会漏发）。
       sessionWorldState.set(session, worldDiff.snapshot);
+      // **收尾兜底步骤清单**（实测缺陷 probe-plan-stale）：模型常常只列一次清单就埋头干活，
+      // 交付完了也不回头更新 status，界面于是永久停在「○ 未开始」——比没有清单更误导。
+      // 判据放在纯函数 `settleStalePlan` 里（可单测），这里只负责"变了就推一次"。
+      // 必须放在 `done` 之前：渲染端按事件顺序消费，收尾之后再推会落在已结束的气泡上。
+      const settledPlan = settleStalePlan(turnState.planSteps ?? [],
+        agentTaskCount > 0 || agentArtifactCount > 0 || agentEditCount > 0);
+      if (settledPlan !== turnState.planSteps) {
+        turnState.planSteps = [...settledPlan];
+        sendLlmPlan({
+          plan: turnState.planSteps,
+          explanation: "本轮已结束，未单独更新的步骤按实际进展收尾",
+          sessionId: session
+        });
+      }
       done({ ok: true });
     })().catch((error: unknown) => {
       const aborted = controller.signal.aborted;
@@ -1680,6 +2289,37 @@ ${tableNote}` : ""}`;
   });
   // 跳过整组问题：立即放行工具循环（模型按最佳判断继续），不必干等超时。
   handle("llm:skip-question", (_event, requestId: string) => questionBridge.skip(requestId));
+  /**
+   * 取该会话**当前挂起**的选择题（没有则 undefined）。
+   *
+   * 切页会卸载 `PlaygroundPage`，那段时间 `llm:question` 事件没有订阅者、被直接丢弃，
+   * 而 `questionBridge` 仍在挂起等回答。渲染端在挂载/切回会话时调这个接口，
+   * 就能把丢掉的那张卡片补回来（实测缺陷 probe-question-while-away）。
+   */
+  handle("llm:pending-question", (_event, sessionId: string) => {
+    const session = typeof sessionId === "string" && sessionId ? sessionId : "";
+    return session ? questionBridge.pendingFor(session) : undefined;
+  });
+  /**
+   * 取该会话**本轮运行状态**（正文、任务 id、是否已收尾）。
+   *
+   * 切页会卸载 `PlaygroundPage`，那段时间 `llm:chunk` / `llm:tasks` / `llm:done`
+   * **全部**没有订阅者，被直接丢弃。最严重的是 `llm:done`：渲染端靠它清 `generatingIds`
+   * 与 `streaming`，丢了这个就**永久停在「生成中」、再也发不出新消息**，
+   * 期间建出的任务卡片也一并消失（实测缺陷 probe-tasks-while-away）。
+   *
+   * 渲染端挂载/切回会话时调一次，把这三样补齐。
+   */
+  handle("llm:turn-state", (_event, sessionId: string) => {
+    const session = typeof sessionId === "string" && sessionId ? sessionId : "";
+    if (!session) return undefined;
+    const state = sessionTurnState.get(session);
+    if (!state) return undefined;
+    // 已收尾的条目读一次就清掉：渲染端补齐之后不再需要，
+    // 留着会让"下一轮开始时短暂读到上一轮的 done=true"造成瞬态错判。
+    if (state.done) sessionTurnState.delete(session);
+    return state;
+  });
 
   /**
    * 上下文占用查询：渲染端据此显示「上下文 42%」，并在超阈值时把压缩按钮点亮。
@@ -1706,14 +2346,34 @@ ${tableNote}` : ""}`;
   });
 
   /** 手动压缩：用户点「立即压缩上下文」时触发（对齐 Codex 的 Manual trigger）。 */
+  /**
+   * 手动压缩的并发守卫（按会话）。
+   *
+   * **`useState` 在渲染端挡不住双击**（实测缺陷 probe-double-compact）：同一 tick 内连点两次，
+   * 两次都读到 `compacting === false`，于是发出**两次** `compactContext`。
+   * 而 `maybeCompact` 内部会调 `summarizeHistory` —— 那是一次**真实计费**的完整上游请求。
+   * 实测：双击后上游收到 2 次摘要请求（本该 1 次）。
+   *
+   * 守卫放在主进程而不是只修按钮：这是所有压缩请求的唯一出口，
+   * 无论从按钮、快捷键还是将来的自动路径进来都挡得住。
+   */
+  const compactingSessions = new Set<string>();
   handle("llm:compact", async (_event, messages: ChatMessage[], sessionId: string) => {
     const session = typeof sessionId === "string" && sessionId ? sessionId : "anon";
+    // 已在压缩中：直接返回"进行中"，不重复计费。前端会显示同一份占用数据，
+    // 用户不会因此看到不同结果（两次压缩的输入相同）。
+    if (compactingSessions.has(session)) {
+      return { before: 0, after: 0, windowNumber: 0, reason: "压缩正在进行中，请稍候" };
+    }
+    compactingSessions.add(session);
     const controller = new AbortController();
     try {
       const { info } = await maybeCompact(session, safeMessages(messages), "manual", controller.signal);
       return info ?? { before: 0, after: 0, windowNumber: 0, reason: "未触发压缩" };
     } catch (error) {
       throw new Error(describeError(error, "压缩失败"));
+    } finally {
+      compactingSessions.delete(session);
     }
   });
 
@@ -1937,6 +2597,13 @@ ${tableNote}` : ""}`;
     sessionServicesGeneration.delete(id);
     sessionBudgets.delete(id);
     sessionWorldState.delete(id);
+    // 新加的会话态（用户选定过的后端）同样要清：不删会随"反复新建/删除对话"慢慢累积，
+    // 而且**会话删掉后 id 理论上可被复用**时，新会话会继承旧会话的后端选择。
+    sessionChosenBackend.delete(id);
+    // 本轮运行状态同理。**它比别的条目更该清**：里面带着 `fullText`（整段回复正文）
+    // 与产物元数据，会话删掉后留着纯属占用，而且若 id 被复用时，
+    // 新会话会把上一轮的内容"补"进自己的气泡里（比继承一个后端选择离谱得多）。
+    sessionTurnState.delete(id);
     const root = path.join(app.getPath("userData"), "artifacts");
     const target = path.join(root, artifactSessionDirName(id));
     // 再兜一层：resolve 后必须仍在 artifacts 根之下（规则若被改动，这里也不会越界）。
@@ -1992,6 +2659,21 @@ async function saveArtifactFile(sessionId: string, name: string, content: string
   // kind=html + name="page.md" 同理：落盘 page.md，卡片按 md 渲染一个 HTML 文件。
   let base = path.basename(String(name || "")).replace(/[\\/:*?"<>|]/g, "_").trim();
   base = base.replace(/\.(html?|csv|tsv|md|xlsx)$/i, "").trim();
+  /**
+   * **Windows 的额外两条硬约束**（实测 probe-special-filenames 逐个验过）：
+   *
+   * ① **尾部点与空格**：Windows 会静默把它们去掉——`尾部点号...md` 写下去，
+   *    磁盘上的名字可能变成 `尾部点号.md`，而我们回给卡片的 `name` 仍是带点的那个。
+   *    卡片名字与磁盘对不上，用户按卡片名去找文件就找不到。
+   *    统一在落盘前剥掉，让"回给模型的名字"永远等于"磁盘上的名字"。
+   *
+   * ② **保留设备名**（`con` / `prn` / `aux` / `nul` / `com1..9` / `lpt1..9`）：
+   *    在不带扩展名时是设备引用。现代 Win10/11 的 NTFS 对 `con.md` 已放宽（实测可写可删），
+   *    但旧系统/某些网络盘会直接报错——而模型完全可能给产物起名叫 `con`。
+   *    加前缀而不是替换，保留用户可读性（`_con` 比 `___` 好认）。
+   */
+  base = base.replace(/[. ]+$/, "");
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) base = `_${base}`;
   const safeName = `${base || "artifact"}${ext}`;
   // 目录名规则与清理共用同一函数（见 artifactDir.ts 的注释）。
   const dir = path.join(app.getPath("userData"), "artifacts", artifactSessionDirName(sessionId));
@@ -2186,6 +2868,49 @@ function resolveArtifactQueued(
   requestedName: string
 ): Promise<{ name: string; path: string; fellBack: false | "missing" | "stale" | "ext" | "alias" } | undefined> {
   return artifactWriteQueue.run(() => resolveArtifactForTool(dir, requestedName));
+}
+
+/**
+ * 把统计结果写成模型能直接用的中文说明。
+ *
+ * **必须写清样本数与跳过数**（实测需要）：`parseNumber` 会把 `"N/A"`、空单元格这类跳过，
+ * 如果只报"平均 24.4"，模型会当成"全表算完了"——而实际上可能只算了一半的行。
+ * 被跳过很多时还要提示"列名可能选错了"，让它自己纠正而不是硬编结论。
+ */
+/**
+ * "本会话里找不到这个产物"的统一文案。
+ *
+ * 抽出来的理由（2026-10-21）：这句话原本在 `inspect_artifact` / `read_artifact` /
+ * `edit_artifact` / `edit_artifact_batch` 四处**逐字重复**，`compute` 里还有第五份变体。
+ * 本项目已经因为"同一判定写两处"踩过两次（收尾合并规则、自检摘要优先级），
+ * 五处各自维护必然漂移——改一处措辞、其余四处就变成旧说法。
+ *
+ * @param name 用户/模型给的文件名
+ * @param hint 额外提示（如 compute 那句"数据是别人给的，可以先 create_file 存成 csv"）
+ */
+function describeMissingArtifact(name: string, hint?: string): string {
+  const base = `本会话里找不到产物「${name}」。请确认文件名（带扩展名）与 create_file 生成的一致。`;
+  return hint ? `${base}${hint}` : base;
+}
+
+function formatSummary(summary: NumericSummary, label: string): string {
+  if (summary.count === 0) {
+    return `${label}：没有可统计的数字（共 ${summary.skipped} 个值都不是数字）。请确认列名选对了，或数据本身不是数值型。`;
+  }
+  const lines = [
+    `${label}：样本 ${summary.count} 个${summary.skipped > 0 ? `，另有 ${summary.skipped} 个非数字值已跳过` : ""}。`,
+    `- 最小值：${summary.min}`,
+    `- 最大值：${summary.max}`,
+    `- 求和：${summary.sum}`,
+    `- 平均值：${summary.mean}`,
+    `- 中位数：${summary.median}`,
+    `- 标准差：${summary.stdDev}`
+  ];
+  if (summary.skipped > 0) {
+    lines.push(`（统计只基于上面这 ${summary.count} 个数字。如果跳过数很多，可能是列名选错了——先用 read_artifact 看一眼表头。）`);
+  }
+  lines.push("以上是精确计算结果，请直接采用，不要自己再心算一遍。");
+  return lines.join("\n");
 }
 
 /**

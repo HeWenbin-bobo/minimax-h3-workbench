@@ -108,7 +108,8 @@ export const PLAN_EXECUTION_PROMPT = `# 计划已确认，开始执行
 export const PLAN_MODE_BLOCKED_TOOLS = ["generate_video", "create_file", "edit_artifact", "edit_artifact_batch", "inspect_artifact", "update_plan"] as const;
 
 /** 计划模式下**仍然可用**的只读工具（写进提示词，避免模型以为一律不能调）。 */
-export const PLAN_MODE_READONLY_TOOLS = ["web_search", "open_page", "read_artifact", "request_user_input"] as const;
+// `compute` 是只读的（只统计产物、不改文件），计划模式保留——写方案前先算清数据是正当需求。
+export const PLAN_MODE_READONLY_TOOLS = ["web_search", "open_page", "read_artifact", "request_user_input", "compute"] as const;
 
 /**
  * 计划模式下的工具说明：写清"哪些还在、哪些没了"，不让模型对着提示词猜边界。
@@ -130,6 +131,10 @@ export function planModeToolNote(available: { webSearch: boolean }): string {
   if (available.webSearch) readonly.push("- web_search(query)：联网查资料");
   readonly.push("- open_page(url)：打开具体网页看正文");
   readonly.push("- read_artifact(name, …)：读回本会话已有的产物");
+  // compute 是**只读**工具（只统计、不改文件），计划模式该保留——
+  // 写方案前先算清楚数据，往往正是"这份计划该怎么写"的依据。
+  // 漏登记会让模型在计划里凭空编数字，而它明明有工具能算出真值。
+  readonly.push("- compute(name, column)：对本会话产物的某一列做精确统计（只读，可以放心用）");
   readonly.push("- request_user_input(questions)：问清 1–3 个关键取舍（用户不答就按最佳判断写进「假设」）");
   const webNote = available.webSearch
     ? ""
@@ -177,9 +182,56 @@ export function looksLikePlan(text: string): boolean {
   const body = String(text || "");
   // 计划块是显式契约，优先判定——但它要求内容非空（空块不该亮按钮）。
   if (extractProposedPlan(body)) return true;
-  if (body.length < 30) return false;
   // 中文习惯用"1."但序号后可能是全角句点/顿号，也可能带空格；从宽匹配。
   const orderedItems = (body.match(/^\s*\d+\s*[.、)]\s*\S/gm) || []).length;
+  // **有序列表判据要先于长度门槛**（实测缺陷）：原来这一行在长度判断之后，
+  // 于是"1. 先查资料\n2. 再写报告"（15 字、标准两步计划）被判成"不是计划"，
+  // 用户拿不到「继续执行」按钮，只能自己再打一遍"开始吧"。
+  // 长度门槛本意是挡掉"太短、看不出是计划"的零碎回答，而有序列表本身就是
+  // 最明确的计划形态——它命中时不该再受长度限制。
   if (orderedItems >= 2) return true;
+  if (body.length < 30) return false;
   return /确认后|开始执行|执行计划|以下是计划|计划如下/.test(body);
+}
+
+export interface PlanStepLike {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/**
+ * 收尾时把"没走完的步骤"收拾干净。
+ *
+ * 真机实测（2026-10-21，deepseek-v4.1-flash，国产 CPU 对比表任务）：
+ * 模型用 `update_plan` 列了 4 步，然后连做 **46 次工具调用**、真把 xlsx 交付了，
+ * 但**再没调过一次 `update_plan`**——清单从头到尾停在 `0/4`，四步全是「○ 未开始」。
+ * 用户看到的是"AI 说做完了、进度条说一步没开始"，比不显示清单更糟：
+ * 他会以为任务半途而废，或者以为清单坏了。
+ *
+ * 这与 CLAUDE.md 那条规律一致：**文字约定约束不住模型**（工具描述里写了
+ * "每完成一步就更新一次状态"，真机照样不照做）。所以要在机制上兜底。
+ *
+ * 判据刻意保守——只在**确实干成了事**时才收尾：
+ * - 本轮产出了任务或文件（`produced`）→ 把 `pending` / `in_progress` 一律标完成；
+ * - 什么都没产出 → **只**把 `in_progress` 退回 `pending`（"正在做"但不能假装做完）。
+ *   收尾仍停在 `in_progress` 是错的：那一轮已经结束了，界面上却还挂着"进行中"。
+ *
+ * 纯函数：不读时钟、不碰 IO，便于单测。
+ *
+ * @param plan 本轮的步骤清单（没有清单时传空数组，返回空数组）
+ * @param produced 本轮是否真的产出了东西（建了任务 / 落了文件 / 改了文件）
+ * @returns 新数组（不改入参）；不需要变化时**原样返回同一引用**，让调用方能靠 `!==` 跳过推送
+ */
+export function settleStalePlan<T extends PlanStepLike>(plan: readonly T[], produced: boolean): readonly T[] {
+  if (plan.length === 0) return plan;
+  // 已经全部完成：不必推送（避免多一次无意义的 UI 刷新）
+  if (plan.every((entry) => entry.status === "completed")) return plan;
+  const next = plan.map((entry) => {
+    if (produced) return entry.status === "completed" ? entry : { ...entry, status: "completed" as const };
+    // 没产出：只把"进行中"退回"未开始"，绝不假报完成
+    return entry.status === "in_progress" ? { ...entry, status: "pending" as const } : entry;
+  });
+  // 一个字段都没变时返回原引用
+  const changed = next.some((entry, index) => entry.status !== plan[index].status);
+  return changed ? next : plan;
 }

@@ -152,6 +152,29 @@ export function describeError(error: unknown, fallback: string): string {
 }
 
 /**
+ * "页面加载被中途打断"这类错误能否直接重试。
+ *
+ * 只认 `ERR_ABORTED (-3)`：它的语义是**这次导航被取消**，而不是文件不存在（-6）。
+ * 实测（本机 Electron 43，同一份 dist/index.html）：加载发起后 30ms 再发起一次导航，
+ * 首次 `loadFile` 立刻以 `ERR_ABORTED (-3) loading 'file:///…/dist/index.html'` 失败，
+ * 紧接着重试一次就成功——用户看到的却是「工作台启动失败」弹窗并被挡在门外。
+ *
+ * 为什么单独抽成纯函数：`loadApp` 在 main.ts 里依赖 BrowserWindow，没法直接单测；
+ * 判定规则放这里就能用普通对象覆盖全部错误码。
+ *
+ * 为什么只认这一个码：其它码重试无益甚至有害——`-6` 说明文件真的不在
+ * （`npm run build` 的 `clean` 正在跑），重试只会让用户多等一会儿才看到正确提示；
+ * 权限/崩溃同理。错误码优先于文案（文案随 Chromium 版本变化，code 才是稳定契约），
+ * 但 Electron 某些路径只把码塞进 message，故两者都看。
+ */
+export function isRetriableLoadAbort(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as { code?: unknown; message?: unknown };
+  if (record.code === "ERR_ABORTED") return true;
+  return /ERR_ABORTED/.test(String(record.message ?? ""));
+}
+
+/**
  * 网络层异常判定（连接重置/超时/拒绝等），用于"整轮重试"这类网络专项兜底。
  * 与 describeError 分开：这里要的是布尔判断，且作用在原始异常对象上（含 AI SDK 的多层包裹）。
  */
@@ -177,4 +200,78 @@ export function isNetworkError(error: unknown): boolean {
     ...(wrapped.errors ?? []).map((entry) => entry.message ?? "")
   ].join(" ");
   return NETWORK_HINT_RE.test(text);
+}
+
+/**
+ * 从异常里挖出 HTTP 状态码。找不到返回 undefined。
+ *
+ * **必须下钻包裹果**（实测 2026-10-22）：AI SDK 的 `maxRetries` 用尽后抛的不是
+ * `APICallError` 而是 `AI_RetryError`，它自己**没有** `statusCode` / `status`，
+ * 真实信息在 `lastError`（最后一次的 APICallError）与 `errors[]` 里。
+ * 只在顶层找会得到 undefined —— 于是"429 该重试"这个判断永远不成立。
+ * 实测形状（`/tmp/sdk-err-shape.mjs` 直连 SDK 复现）：
+ *   name=AI_RetryError, statusCode=undefined,
+ *   lastError={ name:"AI_APICallError", statusCode:429,
+ *               responseHeaders:{ "retry-after":"2", … } }
+ */
+export function httpStatusOf(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const record = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    lastError?: unknown;
+    errors?: unknown;
+  };
+  if (typeof record.status === "number") return record.status;
+  if (typeof record.statusCode === "number") return record.statusCode;
+  // 包裹果：取最后一次失败（`lastError` 优先，其次 errors 的末项）。
+  const nested = record.lastError
+    ?? (Array.isArray(record.errors) ? record.errors[record.errors.length - 1] : undefined);
+  if (nested && nested !== error) return httpStatusOf(nested);
+  return undefined;
+}
+
+/**
+ * HTTP 状态码是否"值得再试一次"：限流（429）与服务端临时故障（5xx）。
+ *
+ * 为什么与 `isNetworkError` 分开（实测缺口 2026-10-22）：普通对话与智能体两条重试路径
+ * 原先都只判 `isNetworkError`，于是上游明确回 `429 + retry-after: 2` 时**一次都不等就失败**——
+ * 明明等两秒就能成功。`errorRecovery.retryDelayMs`（对齐 Codex `responses_retry.rs`）
+ * 早就实现好了，却因为判据不放行而从未被调用。
+ *
+ * 反过来**必须排除** 401/403/404/400：这些重试必然同样失败，只会让用户白等一轮。
+ * 400 里还有一类是"模型不收图片"，重试同样无效。
+ *
+ * 状态码来源两处都要认：`llmService.chatOnce` 把 `response.status` 挂在抛出的 Error 上；
+ * 智能体路径拿到的是 SDK 的 `AI_RetryError`，状态码藏在 `lastError` 里（见 `httpStatusOf`）。
+ */
+export function isRetriableHttpStatus(error: unknown): boolean {
+  const raw = httpStatusOf(error);
+  if (raw === undefined) return false;
+  return raw === 429 || raw >= 500;
+}
+
+/**
+ * 从异常里挖出 `retry-after` 头（**含包裹果**）。找不到返回 undefined。
+ *
+ * `errorRecovery.parseRetryAfter` 只读顶层 `responseHeaders`，而智能体路径拿到的是
+ * `AI_RetryError`（顶层的 `responseHeaders` 是 undefined，真实头在 `lastError` 上）。
+ * 见 `httpStatusOf` 的实测形状说明。
+ */
+export function retryAfterHeaderOf(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const record = error as {
+    responseHeaders?: Record<string, string>;
+    lastError?: unknown;
+    errors?: unknown;
+  };
+  const headers = record.responseHeaders;
+  if (headers) {
+    const raw = headers["retry-after"] ?? headers["Retry-After"];
+    if (raw !== undefined) return raw;
+  }
+  const nested = record.lastError
+    ?? (Array.isArray(record.errors) ? record.errors[record.errors.length - 1] : undefined);
+  if (nested && nested !== error) return retryAfterHeaderOf(nested);
+  return undefined;
 }

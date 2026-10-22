@@ -8,13 +8,11 @@ import { createServer } from "node:http";
 import { mkdtemp, mkdir, writeFile, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { connect } from "./driver.mjs";
+import { launchApp, connect } from "./driver.mjs";
 
 const results = [];
 const check = (name, ok, detail = "") => { results.push({ name, ok, detail }); console.log(`${ok ? "PASS" : "FAIL"} | ${name}${detail ? " | " + detail : ""}`); };
-const ELECTRON = "node_modules/electron/dist/electron.exe";
 const setReact = `(() => {
   const si = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
   const st = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
@@ -83,20 +81,16 @@ await writeFile(path.join(userData, "tasks.json"), JSON.stringify([{
   outputPath: historicVideo
 }], null, 2));
 
-const child = spawn(ELECTRON, [".", "--remote-debugging-port=9222"], {
-  cwd: process.cwd(), env: { ...process.env, H3_USER_DATA: userData }, stdio: ["ignore", "pipe", "pipe"]
-});
-child.stderr.on("data", () => {});
-let wsUrl;
-for (let i = 0; i < 60; i++) {
-  try {
-    const targets = await (await fetch("http://127.0.0.1:9222/json/list")).json();
-    const page = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
-    if (page) { wsUrl = page.webSocketDebuggerUrl; break; }
-  } catch {}
-  await delay(500);
-}
-if (!wsUrl) { child.kill(); throw new Error("CDP 不可达"); }
+// **启动必须走 driver 的 `launchApp`**，不能自己 `spawn(..., "--remote-debugging-port=9222")`。
+//
+// 这个套件原先写死 9222，并且**只设了 `H3_USER_DATA`、没传 `--user-data-dir`**。
+// Chromium 的 `DevToolsActivePort` 是主进程执行 `app.setPath("userData", …)` **之前**
+// 就写好的，落在它自己的 profile 目录；而本套件又是靠"轮询 9222"找目标——
+// 一旦上一轮残留的实例还占着 9222，这里就会**连到那个旧实例**（拿旧构建跑断言）；
+// 端口被占且旧实例已死时则直接卡满 60 次重试（实测：单独跑也卡住、10 分钟不结束）。
+// `launchApp` 用 `--remote-debugging-port=0` 自选端口 + 同一个 `--user-data-dir`，
+// 端口必然属于刚起的这个实例，两种失败模式都不存在。
+const { child, wsUrl } = await launchApp({ H3_USER_DATA: userData });
 const cdp = await connect(wsUrl);
 
 // 注入 Notification 间谍（在下次导航前生效）
@@ -126,7 +120,11 @@ const showUnrelated = JSON.parse(await cdp.eval(`window.h3.showItem(${JSON.strin
 check("showItem-无记录的目录外文件仍被拒", showUnrelated.ok === false, JSON.stringify(showUnrelated));
 
 // ---------- 3. 分类用内联输入框（不依赖 window.prompt）----------
-const made = JSON.parse(await cdp.eval(`window.h3.submitGeneration({ mode:"text", backend:"minimax", prompt:"分类回归用例", duration:4, ratio:"16:9", resolution:"768P", width:1280, height:720, count:1, baseSeed:1 }).then(r => JSON.stringify({ ok: r.ok, id: r.data?.[0]?.id }))`));
+// **后端必须用夹具里真的配好的那个**：`submit` 自 probe-retry-nocred 那批修复起会先调
+// `adapters.assertUsable(backend)`——凭据没配时不建任务、直接拒绝。
+// 这里原来写 `minimax`，而夹具只配了 `localComfyUrl`（没有 minimax 密钥），
+// 于是前置任务一条都没建出来，后面两条断言全挂在"旧夹具 × 新校验"上（不是产品回归）。
+const made = JSON.parse(await cdp.eval(`window.h3.submitGeneration({ mode:"text", backend:"local", prompt:"分类回归用例", duration:4, ratio:"16:9", resolution:"768P", width:1280, height:720, count:1, baseSeed:1 }).then(r => JSON.stringify({ ok: r.ok, id: r.data?.[0]?.id, message: r.message }))`));
 check("分类-前置任务已创建", made.ok, JSON.stringify(made));
 await delay(1000);
 await cdp.eval(`document.querySelector('[data-page="studio"]').click()`);

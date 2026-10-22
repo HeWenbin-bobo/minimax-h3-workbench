@@ -1,21 +1,25 @@
 ---
 name: playground-branch-status
-description: v0.3.1 已发布（main = tag v0.3.1）；feature/agent-ask-before-generate 已推远端（114 笔，未合并 main），2026-10-22 基线 971 项单测 / E2E 173/173
+description: v0.4.0 已发布（main = tag v0.4.0）；feature/agent-ask-before-generate 的 115 笔已合并进 main 并随 v0.4.0 发版，2026-10-22 基线 971 项单测 / E2E 173/173
 metadata:
   node_type: memory
   type: project
   originSessionId: c43a4719-8f9f-4185-b161-9cd51af6a1ae
-  modified: 2026-10-22T03:20:00.000Z
+  modified: 2026-10-22T11:50:00.000Z
 ---
 
-**当前状态（2026-10-20 18:40）：`v0.3.1` 已发布。`main` HEAD = tag `v0.3.1`（收尾只有一条
-`chore: bump version to 0.3.1`），与 `origin/main` 同步。**
-最新 Release 已从草稿转为正式；`releases/latest` 返回 `v0.3.1`（`2026-10-20T08:18:54Z`），
-`latest.yml` 指向 `0.3.1`，三件套齐全：
+**当前状态（2026-10-22 19:47）：`v0.4.0` 已发布。`main` HEAD = tag `v0.4.0`，与 `origin/main` 同步。**
+最新 Release 已从草稿转为正式；`releases/latest` 返回 `v0.4.0`（`2026-10-22T11:47:01Z`），
+`latest.yml` 指向 `0.4.0`，三件套齐全：
 
-- `latest.yml`
-- `minimax-h3-workbench-setup-0.3.1.exe`（96MB / 100375349 字节）
-- `minimax-h3-workbench-setup-0.3.1.exe.blockmap`
+- `latest.yml`（369 字节）
+- `minimax-h3-workbench-setup-0.4.0.exe`（95.8MB / 100406930 字节）
+- `minimax-h3-workbench-setup-0.4.0.exe.blockmap`（103.6KB / 106128 字节）
+
+`feature/agent-ask-before-generate` 的 **115 笔提交原样合入 `main`**（`--no-ff`，
+合并提交 `655382d` `merge: feature/agent-ask-before-generate 合入 main`）：49 个文件，
++5734 / −352。**没有 squash**——与 v0.3.1 那次（202 笔压成 `7000c62`）不同，这次保留了逐笔历史。
+发版收尾提交为 `9a170f5 chore: bump version to 0.4.0`。
 
 `feature/pelican-exploration-2026-10-19` 的 **202 笔提交已 squash 成一条** `7000c62`
 （`merge: feature/pelican-exploration-2026-10-19 — 智能体产物闭环补全 + 一整类"静默跳过"缺陷`）
@@ -110,21 +114,23 @@ E2E **test-01…test-12 全套 173/173**。
 - **成功路径零额外开销**：mock 下游正常 200 请求只发生 1 次、端到端 9ms，
   说明 429 的重试改动只影响失败路径，没有给每次对话白加退避等待。
 
-**推送状态（2026-10-22 保存进度时点）**：
-- 分支 `feature/agent-ask-before-generate` **已推送到 origin**（新建远端分支），
-  远端 HEAD 与本地 HEAD 同为 `6621ebc`；相对 `origin/main` 共 **114 笔**提交。
-- `origin/main` **未被改动**（仍是 `8ce8e9f chore: bump version to 0.3.1`）：
-  未合并、未 squash、未打 tag。
-- 工作区仅剩 `.e2e/test-02-llm.mjs` 一处**零行差异**（仅行尾归属 LF/CRLF 不同），
-  未纳入任何提交，可忽略。
-- 推送前做过安全检查：全仓 `git grep` 未发现 `sk-` 形式的真实 Key；
-  `secrets.json` / `Local State` / `_scratch/` / `.omc/` 均未被跟踪；待推提交无 >10MB 文件。
+**合并与发版（2026-10-22 19:47 完成）**：
+- 分支 `feature/agent-ask-before-generate` 的 115 笔提交已用 `--no-ff` **合并进 `main`**
+  （合并提交 `655382d`），并已推送远端。**这次没有 squash**，保留逐笔历史。
+- 发版：`package.json` 0.3.1 → **0.4.0**（`9a170f5`）→ annotated tag `v0.4.0`
+  → 推 `main` + tag → 手动 dispatch CI（run `39772078855`）→ 草稿 Release 有资产后转正式。
+- 那次 CI 四个 job 全绿：`test` ✅、`package (windows)` ✅、`package (macos)` ✅、`release` ✅。
+  **坑⑤ 复核**：`test` 跑在 ubuntu 上通过，本轮改的 `artifactDir` / `artifactStats` /
+  `settingsStore` / `localModels` 测试均为纯字符串或 `tmpdir` 用法，无符号链接/权限依赖。
+- `package-lock.json` 的根 `version` 已从 `0.2.0` 校正为 `0.4.0`（用 `npm install --package-lock-only`，
+  只动 2 行；`chromium-pickle-js` 的真实 `0.2.0` 未受影响）。
+- 工作区干净，本地与 `origin/main`、`v0.4.0` 的 SHA 完全一致。
 
 **下一阶段的入口**（供接手时快速定位）：
-1. 要合并回 `main` 时，按 CLAUDE.md「分支合并约定」先把这 114 笔按主题 squash 成少数几条，
-   不要原样塞进 `main`；合并前先 `git fetch --all --prune` 并确认基线差异。
+1. 下一个功能/修复从 `main` 开 `feature/*` 分支。合并回 `main` 用 `merge:` 提交；
+   squash 与否按当轮规模决定（v0.3.1 是 202 笔压成 1 条，v0.4.0 是 115 笔原样保留）。
 2. 发版仍需手动 dispatch CI（这个 fork 推 tag 不会自动跑），且 test 在 Linux 上跑——
-   本轮未改文件系统/符号链接相关测试，但仍建议发版前在 WSL 复核一次。
+   改了文件系统/路径/符号链接相关测试时，发版前先在 WSL 复核（坑⑤）。
 3. 未覆盖的边界：真实上游的 429（本机中转未触发过限流，全部用 mock 复现）；
    `test-12` 只验了正文补齐，切页期间的任务卡片与工具步骤补齐未单独造例。
 
